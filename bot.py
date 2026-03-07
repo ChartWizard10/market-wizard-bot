@@ -8,8 +8,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-DISCORD_TOKEN = os.environ.get(“DISCORD_TOKEN”)
-ANTHROPIC_KEY = os.environ.get(“ANTHROPIC_KEY”)
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
 
 WATCHLIST = [“SPY”,“QQQ”,“NVDA”,“AAPL”,“MSFT”,“TSLA”,“AMZN”,“META”,“GOOGL”,“AMD”,“XLE”,“GLD”,“WTI”,“SLB”,“EOG”,“XOM”]
 
