@@ -6,15 +6,11 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime
-
-DISCORD_TOKEN = os.environ.get(“DISCORD_TOKEN”)
-ANTHROPIC_KEY = os.environ.get(“ANTHROPIC_KEY”)
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN") 
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
 WATCHLIST = [“SPY”,“QQQ”,“NVDA”,“XLE”,“MSFT”,“TSLA”,“AMZN”,“META”,“GOOGL”,“SLB”]
-
 WIZARD = “”“You are the Market Wizard — elite institutional analyst. Smart money doctrine only. Every output is precise and deploy-ready.
-
 DOCTRINE v4.0 — run every layer in order:
-
 L0 ENVIRONMENT: VIX<15=full|15-25=reduced|>25=minimal. DXY,yields,calendar,macro bias.
 L1 CYCLE: Accumulation/Sweep/Expansion/Distribution. Sweep confirmed? MSS confirmed? No sweep+MSS=wait.
 L2 LIQUIDITY: Map equal highs/lows, prev day H/L, range H/L, swing H/L, round numbers. Key Q: Which pool is price drawn to next?
