@@ -9,7 +9,7 @@ from datetime import datetime
 
 DISCORD_TOKEN = os.environ.get(“DISCORD_TOKEN”)
 ANTHROPIC_KEY = os.environ.get(“ANTHROPIC_KEY”)
-WATCHLIST = [“SPY”,“QQQ”,“NVDA”,“AAPL”,“MSFT”,“TSLA”,“AMZN”,“META”,“GOOGL”,“AMD”]
+WATCHLIST = [“SPY”,“QQQ”,“NVDA”,“XLE”,“MSFT”,“TSLA”,“AMZN”,“META”,“GOOGL”,“SLB”]
 
 WIZARD = “”“You are the Market Wizard — elite institutional analyst. Smart money doctrine only. Every output is precise and deploy-ready.
 
