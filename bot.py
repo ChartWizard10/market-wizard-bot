@@ -1,4 +1,4 @@
-import os 
+import os
 import discord
 from discord.ext import commands
 import anthropic
@@ -7,9 +7,9 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY")
-WATCHLIST = [“SPY”,“QQQ”,“NVDA”,“AAPL”,“XLE”,“TSLA”,“SLB”,“META”,“GOOGL”,“AMD”]
+DISCORD_TOKEN = os.environ.get(“DISCORD_TOKEN”)
+ANTHROPIC_KEY = os.environ.get(“ANTHROPIC_KEY”)
+WATCHLIST = [“SPY”,“QQQ”,“NVDA”,“AAPL”,“MSFT”,“TSLA”,“AMZN”,“META”,“GOOGL”,“AMD”]
 
 WIZARD = “”“You are the Market Wizard — elite institutional analyst. Smart money doctrine only. Every output is precise and deploy-ready.
 
