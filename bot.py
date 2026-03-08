@@ -107,7 +107,6 @@ WIZARD = base64.b64decode(
 "VkcuIFRhcmdldCB0aGUgb3Bwb3NpbmcgcG9vbC4gRW52aXJvbm1lbnQuQ3lj"
 "bGUuTGlxdWlkaXR5LlN0cnVjdHVyZS5PQi5GVkcuTVNTLkVudHJ5LlRhcmdl"
 "dC4gVGhhdCBvcmRlci4gRXZlcnkgdGltZS4gTm8gZXhjZXB0aW9ucy4=").decode()
-
 def fetch(ticker):
 try:
 df = yf.download(ticker, period="6mo", interval="1d", progress=False, auto_adjust=True)
