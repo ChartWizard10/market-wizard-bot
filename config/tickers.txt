@@ -1,0 +1,9 @@
+# Market Wizard Bot — Ticker Universe
+# Replace this file with your full ticker list (one symbol per line).
+# Lines beginning with # are ignored.
+# Example entries below — remove and replace with your 811 symbols.
+SPY
+QQQ
+NVDA
+AAPL
+MSFT
