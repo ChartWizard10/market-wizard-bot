@@ -291,18 +291,22 @@ def test_snipe_it_downgraded_overhead_blocked():
 
 
 # ---------------------------------------------------------------------------
-# 14. SNIPE_IT downgraded if structure_event none
+# 14. SNIPE_IT downgraded if structure_event none — forces WAIT (not just not-SNIPE)
 # ---------------------------------------------------------------------------
 
 def test_snipe_it_downgraded_structure_event_none():
+    # structure_event=none in signal → all tiers blocked → WAIT
     signal = _snipe_signal(
         structure_event="none",
         missing_conditions=["structure_event"],
         upgrade_trigger="BOS above 184.00 swing high",
     )
     result = validate(signal, _pf(), _BASE_CONFIG)
-    assert result["final_tier"] != "SNIPE_IT"
+    assert result["final_tier"] == "WAIT", (
+        "structure_event=none must force WAIT, not just downgrade from SNIPE_IT"
+    )
     assert result["original_claude_tier"] == "SNIPE_IT"
+    assert result["safe_for_alert"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +324,60 @@ def test_snipe_it_downgraded_hostile_alignment():
     result = validate(signal, _pf(), _BASE_CONFIG)
     assert result["final_tier"] not in ("SNIPE_IT", "STARTER")
     assert result["original_claude_tier"] == "SNIPE_IT"
+
+
+# ---------------------------------------------------------------------------
+# 14b. no_clear_structure veto blocks NEAR_ENTRY (all-alert-blocking)
+# ---------------------------------------------------------------------------
+
+def test_no_clear_structure_veto_blocks_near_entry():
+    # NEAR_ENTRY signal with valid gates — but prefilter has no_clear_structure
+    signal = _near_entry_signal()
+    result = validate(signal, _pf(["no_clear_structure"]), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["safe_for_alert"] is False
+    assert "no_clear_structure" in result["applied_vetoes"]
+
+
+def test_no_clear_structure_veto_blocks_snipe_and_starter():
+    for base_tier, signal_fn in (("SNIPE_IT", _snipe_signal), ("STARTER", _starter_signal)):
+        result = validate(signal_fn(), _pf(["no_clear_structure"]), _BASE_CONFIG)
+        assert result["final_tier"] == "WAIT", f"{base_tier} should be WAIT with no_clear_structure veto"
+        assert result["safe_for_alert"] is False
+
+
+def test_structure_event_none_in_signal_blocks_near_entry():
+    # Even without a prefilter veto, Claude signal with structure_event=none → WAIT
+    signal = _near_entry_signal(structure_event="none")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["safe_for_alert"] is False
+
+
+def test_no_clear_structure_high_score_cannot_override():
+    signal = _snipe_signal(score=99)
+    result = validate(signal, _pf(["no_clear_structure"]), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["score"] == 99         # score preserved, tier still WAIT
+    assert result["safe_for_alert"] is False
+
+
+def test_claude_tier_cannot_override_no_clear_structure_veto():
+    # Claude says NEAR_ENTRY (lowest trade tier) — still blocked by no_clear_structure
+    signal = _near_entry_signal()
+    result = validate(signal, _pf(["no_clear_structure"]), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["original_claude_tier"] == "NEAR_ENTRY"
+    assert result["downgrades"]
+
+
+def test_claude_tier_cannot_override_no_clear_structure_in_signal():
+    # Claude says NEAR_ENTRY but structure_event=none → WAIT (signal-level check)
+    signal = _near_entry_signal(structure_event="none")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["original_claude_tier"] == "NEAR_ENTRY"
+    assert result["safe_for_alert"] is False
 
 
 # ---------------------------------------------------------------------------

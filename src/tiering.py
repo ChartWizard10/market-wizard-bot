@@ -33,7 +33,7 @@ CAPITAL_MAP = {
 # Veto sets (strings match prefilter.py VETO_* constants)
 # ---------------------------------------------------------------------------
 
-# Block SNIPE_IT and STARTER entry; NEAR_ENTRY may still alert
+# Block SNIPE_IT and STARTER entry; NEAR_ENTRY may still alert for these
 _ENTRY_BLOCKING_VETOES = {
     "data_empty",
     "data_error",
@@ -50,12 +50,15 @@ _ENTRY_BLOCKING_VETOES = {
     "rr_below_threshold_estimate",
 }
 
-# Block ALL alert tiers — force WAIT regardless of score or Claude output
+# Block ALL alert tiers — force WAIT regardless of score or Claude output.
+# no_clear_structure is here because NEAR_ENTRY requires structural proximity;
+# with no structure at all there is no valid watch alert.
 _ALL_ALERT_BLOCKING_VETOES = {
     "data_empty",
     "data_error",
     "insufficient_bars",
     "stale_data",
+    "no_clear_structure",
     "retest_failed",
     "mid_range_no_edge",
 }
@@ -208,6 +211,13 @@ def _determine_final_tier(
     blocker = _first_all_alert_blocker(prefilter_vetoes)
     if blocker:
         downgrades.append(f"{claude_tier}→WAIT: all-alert veto={blocker}")
+        return "WAIT", downgrades, notes
+
+    # Signal-level structure check: no structure in Claude output → WAIT.
+    # Mirrors the no_clear_structure prefilter veto: NEAR_ENTRY requires
+    # structural proximity and is not valid when structure itself is absent.
+    if signal.get("structure_event", "none") == "none":
+        downgrades.append(f"{claude_tier}→WAIT: structure_event=none (no clear structure)")
         return "WAIT", downgrades, notes
 
     # ---- SNIPE_IT path ----
