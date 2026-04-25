@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -175,45 +174,43 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
 # JSON parsing and validation
 # ---------------------------------------------------------------------------
 
-def _extract_json(text: str) -> str:
-    """Strip markdown fences and extract the first JSON object from a response."""
-    # Remove markdown code fences
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = re.sub(r"```\s*", "", text)
-
-    # Find the first { ... } block
-    start = text.find("{")
-    if start == -1:
-        return text.strip()
-
-    depth = 0
-    for i, ch in enumerate(text[start:], start):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : i + 1]
-
-    return text[start:].strip()
-
-
 def parse_and_validate_json(
     response_text: str,
 ) -> tuple[dict | None, str | None, str | None]:
     """Parse and validate a Claude JSON response.
+
+    Claude must return pure JSON only — no markdown fences, no prose wrapper.
+    Any non-JSON wrapping is rejected rather than silently stripped.
 
     Returns:
         (signal_dict, error_type, error_message)
         On success: (signal_dict, None, None)
         On failure: (None, error_type, error_message)
 
-    error_type values: JSON_PARSE_ERROR, JSON_SCHEMA_ERROR, JSON_ENUM_ERROR
+    error_type values:
+        markdown_wrapper  — response contains markdown code fences
+        non_json_wrapper  — response has prose before or after the JSON object
+        JSON_PARSE_ERROR  — malformed JSON syntax
+        JSON_SCHEMA_ERROR — missing required keys or wrong field types
+        JSON_ENUM_ERROR   — enum field contains disallowed value
     """
-    raw = _extract_json(response_text)
+    stripped = response_text.strip()
 
+    # Reject markdown code fences
+    if "```" in stripped:
+        return None, "markdown_wrapper", "response contains markdown code fences — JSON only"
+
+    # Reject if response does not start with a JSON object
+    if not stripped.startswith("{"):
+        return None, "non_json_wrapper", "response does not begin with '{' — JSON only"
+
+    # Parse JSON; reject trailing prose after the closing brace
     try:
-        data = json.loads(raw)
+        decoder = json.JSONDecoder()
+        data, end_idx = decoder.raw_decode(stripped)
+        trailing = stripped[end_idx:].strip()
+        if trailing:
+            return None, "non_json_wrapper", "response contains prose after JSON object"
     except (json.JSONDecodeError, ValueError) as exc:
         return None, "JSON_PARSE_ERROR", str(exc)
 
@@ -240,6 +237,10 @@ def parse_and_validate_json(
     # targets: must be a list
     if not isinstance(data.get("targets"), list):
         return None, "JSON_SCHEMA_ERROR", "targets must be a list"
+
+    # missing_conditions: must be a list
+    if not isinstance(data.get("missing_conditions"), list):
+        return None, "JSON_SCHEMA_ERROR", "missing_conditions must be a list"
 
     # score: clamp to int 0–100
     score = data.get("score")

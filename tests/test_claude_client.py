@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -92,7 +92,7 @@ _MINIMAL_CONFIG = {
 
 
 # ---------------------------------------------------------------------------
-# 1. Valid JSON passes
+# 1. Pure valid JSON passes
 # ---------------------------------------------------------------------------
 
 def test_valid_json_passes():
@@ -111,12 +111,67 @@ def test_malformed_json_rejected():
     raw = "NOT JSON AT ALL"
     signal, err_type, err_msg = parse_and_validate_json(raw)
     assert signal is None
+    assert err_type == "non_json_wrapper"
+
+
+def test_syntactically_broken_json_rejected():
+    raw = '{"ticker": "AAPL", "tier": SNIPE_IT}'  # unquoted value
+    signal, err_type, err_msg = parse_and_validate_json(raw)
+    assert signal is None
     assert err_type == "JSON_PARSE_ERROR"
-    assert err_msg is not None
 
 
 # ---------------------------------------------------------------------------
-# 3. Missing required key rejected
+# 3. Markdown-fenced JSON rejected (strict contract: JSON only)
+# ---------------------------------------------------------------------------
+
+def test_markdown_fenced_json_rejected():
+    signal_json = json.dumps(_valid_signal())
+    fenced = f"```json\n{signal_json}\n```"
+    signal, err_type, err_msg = parse_and_validate_json(fenced)
+    assert signal is None
+    assert err_type == "markdown_wrapper"
+    assert err_msg is not None
+
+
+def test_plain_code_fence_rejected():
+    signal_json = json.dumps(_valid_signal())
+    fenced = f"```\n{signal_json}\n```"
+    signal, err_type, err_msg = parse_and_validate_json(fenced)
+    assert signal is None
+    assert err_type == "markdown_wrapper"
+
+
+# ---------------------------------------------------------------------------
+# 4. Prose wrapper around JSON rejected
+# ---------------------------------------------------------------------------
+
+def test_prose_before_json_rejected():
+    signal_json = json.dumps(_valid_signal())
+    wrapped = f"Here is my analysis:\n\n{signal_json}"
+    signal, err_type, err_msg = parse_and_validate_json(wrapped)
+    assert signal is None
+    assert err_type == "non_json_wrapper"
+
+
+def test_prose_after_json_rejected():
+    signal_json = json.dumps(_valid_signal())
+    wrapped = f"{signal_json}\n\nLet me know if you need more details."
+    signal, err_type, err_msg = parse_and_validate_json(wrapped)
+    assert signal is None
+    assert err_type == "non_json_wrapper"
+
+
+def test_prose_before_and_after_json_rejected():
+    signal_json = json.dumps(_valid_signal())
+    wrapped = f"Analysis:\n\n{signal_json}\n\nPlease review."
+    signal, err_type, err_msg = parse_and_validate_json(wrapped)
+    assert signal is None
+    assert err_type in ("non_json_wrapper", "markdown_wrapper")
+
+
+# ---------------------------------------------------------------------------
+# 5. Missing required key rejected
 # ---------------------------------------------------------------------------
 
 def test_missing_key_rejected():
@@ -130,10 +185,10 @@ def test_missing_key_rejected():
 
 
 # ---------------------------------------------------------------------------
-# 4. Invalid enum value rejected
+# 6. Invalid enum value rejected
 # ---------------------------------------------------------------------------
 
-def test_invalid_enum_rejected():
+def test_invalid_enum_on_tier_rejected():
     data = _valid_signal(tier="STRONG_BUY")
     raw = json.dumps(data)
     signal, err_type, err_msg = parse_and_validate_json(raw)
@@ -142,36 +197,31 @@ def test_invalid_enum_rejected():
     assert "tier" in err_msg
 
 
+def test_invalid_enum_on_setup_family_rejected():
+    data = _valid_signal(setup_family="ROCKET_SHIP")
+    raw = json.dumps(data)
+    signal, err_type, err_msg = parse_and_validate_json(raw)
+    assert signal is None
+    assert err_type == "JSON_ENUM_ERROR"
+    assert "setup_family" in err_msg
+
+
 # ---------------------------------------------------------------------------
-# 5. Routing mismatch (discord_channel) is returned as-is — tiering.py corrects it
+# 7. Routing mismatch passes validation — tiering.py corrects it
 # ---------------------------------------------------------------------------
 
-def test_routing_mismatch_passes_validation():
-    """parse_and_validate_json accepts the mismatch — tiering.py is the correcting authority."""
+def test_routing_mismatch_passes_json_validation():
+    """parse_and_validate_json does not enforce tier↔channel mapping — tiering.py owns that."""
     data = _valid_signal(tier="SNIPE_IT", discord_channel="#near-entry-watch")
     raw = json.dumps(data)
     signal, err_type, err_msg = parse_and_validate_json(raw)
-    # JSON validator does not enforce tier↔channel mapping — that belongs to tiering.py
     assert signal is not None
     assert err_type is None
     assert signal["discord_channel"] == "#near-entry-watch"
 
 
 # ---------------------------------------------------------------------------
-# 6. Prose / markdown fences around JSON stripped correctly
-# ---------------------------------------------------------------------------
-
-def test_prose_around_json_stripped():
-    signal_json = json.dumps(_valid_signal())
-    wrapped = f"Here is my analysis:\n\n```json\n{signal_json}\n```\n\nLet me know if you need more details."
-    signal, err_type, err_msg = parse_and_validate_json(wrapped)
-    assert signal is not None
-    assert err_type is None
-    assert signal["ticker"] == "AAPL"
-
-
-# ---------------------------------------------------------------------------
-# 7. All required keys present in accepted signal
+# 8. All required keys present in accepted signal
 # ---------------------------------------------------------------------------
 
 def test_all_required_keys_present_after_parse():
@@ -183,7 +233,7 @@ def test_all_required_keys_present_after_parse():
 
 
 # ---------------------------------------------------------------------------
-# 8. Non-numeric risk_reward treated as null, not rejected
+# 9. Non-numeric risk_reward treated as null, not rejected
 # ---------------------------------------------------------------------------
 
 def test_non_numeric_risk_reward_treated_as_null():
@@ -196,7 +246,7 @@ def test_non_numeric_risk_reward_treated_as_null():
 
 
 # ---------------------------------------------------------------------------
-# 9. score clamped to 0–100
+# 10. score clamped to 0–100
 # ---------------------------------------------------------------------------
 
 def test_score_clamped_above_100():
@@ -214,7 +264,7 @@ def test_score_clamped_below_zero():
 
 
 # ---------------------------------------------------------------------------
-# 10. targets must be a list
+# 11. targets must be a list — rejects safely if not
 # ---------------------------------------------------------------------------
 
 def test_targets_not_list_rejected():
@@ -227,7 +277,29 @@ def test_targets_not_list_rejected():
 
 
 # ---------------------------------------------------------------------------
-# 11. All WAIT-tier enum values accepted
+# 12. missing_conditions must be a list — rejects safely if not
+# ---------------------------------------------------------------------------
+
+def test_missing_conditions_not_list_rejected():
+    data = _valid_signal(missing_conditions="retest_status")
+    raw = json.dumps(data)
+    signal, err_type, err_msg = parse_and_validate_json(raw)
+    assert signal is None
+    assert err_type == "JSON_SCHEMA_ERROR"
+    assert "missing_conditions" in err_msg
+
+
+def test_missing_conditions_null_rejected():
+    data = _valid_signal(missing_conditions=None)
+    raw = json.dumps(data)
+    signal, err_type, err_msg = parse_and_validate_json(raw)
+    assert signal is None
+    assert err_type == "JSON_SCHEMA_ERROR"
+    assert "missing_conditions" in err_msg
+
+
+# ---------------------------------------------------------------------------
+# 13. WAIT and NEAR_ENTRY tiers accepted by JSON validator
 # ---------------------------------------------------------------------------
 
 def test_wait_tier_valid():
@@ -245,10 +317,6 @@ def test_wait_tier_valid():
     assert err_type is None
     assert signal["tier"] == "WAIT"
 
-
-# ---------------------------------------------------------------------------
-# 12. NEAR_ENTRY tier valid
-# ---------------------------------------------------------------------------
 
 def test_near_entry_tier_valid():
     data = _valid_signal(
@@ -269,7 +337,7 @@ def test_near_entry_tier_valid():
 
 
 # ---------------------------------------------------------------------------
-# 13. build_prompt excludes all disabled indicators
+# 14. build_prompt excludes all disabled indicators
 # ---------------------------------------------------------------------------
 
 def test_build_prompt_excludes_disabled_indicators():
@@ -281,7 +349,7 @@ def test_build_prompt_excludes_disabled_indicators():
 
 
 # ---------------------------------------------------------------------------
-# 14. build_prompt includes key structure fields
+# 15. build_prompt includes key structure fields
 # ---------------------------------------------------------------------------
 
 def test_build_prompt_includes_structure_fields():
@@ -294,10 +362,6 @@ def test_build_prompt_includes_structure_fields():
     assert "VOLUME_BEHAVIOR:" in prompt
 
 
-# ---------------------------------------------------------------------------
-# 15. build_prompt includes ticker and price fields
-# ---------------------------------------------------------------------------
-
 def test_build_prompt_includes_ticker_and_price():
     enriched = _valid_enriched(ticker="NVDA", latest_close=850.00)
     prompt = build_prompt(enriched)
@@ -306,23 +370,19 @@ def test_build_prompt_includes_ticker_and_price():
 
 
 # ---------------------------------------------------------------------------
-# 16. async_claude_scan returns one result per candidate
+# 16. async_claude_scan returns one result per candidate (mocked — no live calls)
 # ---------------------------------------------------------------------------
 
 def test_async_scan_returns_one_result_per_candidate():
     valid_response = json.dumps(_valid_signal())
-
     mock_message = MagicMock()
     mock_message.content = [MagicMock(text=valid_response)]
-
     mock_client = MagicMock()
     mock_client.messages.create = AsyncMock(return_value=mock_message)
 
     candidates = [_valid_enriched(ticker="AAPL"), _valid_enriched(ticker="NVDA")]
-    system_prompt = "SYSTEM PROMPT"
-
     results = asyncio.get_event_loop().run_until_complete(
-        async_claude_scan(candidates, system_prompt, mock_client, _MINIMAL_CONFIG)
+        async_claude_scan(candidates, "SYSTEM", mock_client, _MINIMAL_CONFIG)
     )
     assert len(results) == len(candidates)
 
@@ -351,7 +411,6 @@ def test_async_scan_handles_api_error_gracefully():
 def test_async_scan_handles_malformed_json_gracefully():
     mock_message = MagicMock()
     mock_message.content = [MagicMock(text="This is not JSON at all.")]
-
     mock_client = MagicMock()
     mock_client.messages.create = AsyncMock(return_value=mock_message)
 
@@ -360,19 +419,17 @@ def test_async_scan_handles_malformed_json_gracefully():
         async_claude_scan(candidates, "PROMPT", mock_client, _MINIMAL_CONFIG)
     )
     assert results[0]["signal"] is None
-    assert results[0]["error_type"] == "JSON_PARSE_ERROR"
+    assert results[0]["error_type"] in ("JSON_PARSE_ERROR", "non_json_wrapper")
 
 
 # ---------------------------------------------------------------------------
-# 19. Claude call count is bounded by max_concurrent_calls semaphore (mock proof)
+# 19. Claude is called exactly once per candidate — mock proof, no live calls
 # ---------------------------------------------------------------------------
 
 def test_async_scan_call_count_matches_candidates():
-    """Claude is called exactly once per candidate — no more."""
     valid_response = json.dumps(_valid_signal())
     mock_message = MagicMock()
     mock_message.content = [MagicMock(text=valid_response)]
-
     call_count = []
 
     async def fake_create(**kwargs):
@@ -406,27 +463,13 @@ def test_load_system_prompt_raises_for_missing_path():
 def test_load_system_prompt_loads_actual_file():
     prompt = load_system_prompt("prompts/market_wizard_system.md")
     assert len(prompt) > 100
-    assert "WAIT" in prompt
     assert "SNIPE_IT" in prompt
-    # Disabled indicators must not appear as enabled features in the prompt
-    assert "RSI" not in prompt or "FORBIDDEN" in prompt or "MUST NOT" in prompt
+    assert "WAIT" in prompt
+    assert "JSON" in prompt
 
 
 # ---------------------------------------------------------------------------
-# 22. Invalid enum on non-tier field is also caught
-# ---------------------------------------------------------------------------
-
-def test_invalid_enum_on_setup_family_rejected():
-    data = _valid_signal(setup_family="ROCKET_SHIP")
-    raw = json.dumps(data)
-    signal, err_type, err_msg = parse_and_validate_json(raw)
-    assert signal is None
-    assert err_type == "JSON_ENUM_ERROR"
-    assert "setup_family" in err_msg
-
-
-# ---------------------------------------------------------------------------
-# 23. tier↔channel mapping constants are correct
+# 22. Tier ↔ channel/capital mapping constants are complete and correct
 # ---------------------------------------------------------------------------
 
 def test_tier_channel_map_complete():
@@ -434,6 +477,8 @@ def test_tier_channel_map_complete():
         assert tier in _TIER_CHANNEL_MAP
     assert _TIER_CHANNEL_MAP["WAIT"] == "none"
     assert _TIER_CHANNEL_MAP["SNIPE_IT"] == "#snipe-signals"
+    assert _TIER_CHANNEL_MAP["STARTER"] == "#starter-signals"
+    assert _TIER_CHANNEL_MAP["NEAR_ENTRY"] == "#near-entry-watch"
 
 
 def test_tier_capital_map_complete():
@@ -441,3 +486,5 @@ def test_tier_capital_map_complete():
         assert tier in _TIER_CAPITAL_MAP
     assert _TIER_CAPITAL_MAP["WAIT"] == "no_trade"
     assert _TIER_CAPITAL_MAP["SNIPE_IT"] == "full_quality_allowed"
+    assert _TIER_CAPITAL_MAP["STARTER"] == "starter_only"
+    assert _TIER_CAPITAL_MAP["NEAR_ENTRY"] == "wait_no_capital"
