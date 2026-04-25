@@ -1,13 +1,100 @@
 """Fetch and validate OHLCV data from yfinance."""
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import yfinance as yf
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Ticker universe loader
+# ---------------------------------------------------------------------------
+
+_VALID_TICKER_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,19}$")
+
+
+def load_tickers(path: str) -> dict:
+    """Load and validate the ticker universe from a flat text file.
+
+    Rules:
+    - Blank lines ignored.
+    - Lines starting with # ignored.
+    - Tickers normalized to uppercase.
+    - Duplicates removed; first occurrence preserved; file order maintained.
+    - Valid characters: A-Z, 0-9, dot, dash. No spaces, slashes, commas, etc.
+    - Does NOT fetch market data. Format validation only.
+    - Potentially delisted or unfetchable tickers are NOT removed — that is
+      the fetch layer's responsibility.
+
+    Returns dict with:
+      tickers              validated, deduplicated, order-preserved list
+      validation_summary   counts and sample tickers
+    """
+    file_path = Path(path)
+    if not file_path.exists():
+        log.error("Ticker file not found: %s", path)
+        return {
+            "tickers": [],
+            "validation_summary": {
+                "raw_line_count": 0,
+                "valid_ticker_count": 0,
+                "duplicate_count": 0,
+                "invalid_count": 0,
+                "invalid_tickers": [],
+                "first_10_tickers": [],
+                "last_10_tickers": [],
+                "error": f"file not found: {path}",
+            },
+        }
+
+    raw_lines = file_path.read_text().splitlines()
+    raw_line_count = len(raw_lines)
+
+    seen: set = set()
+    tickers: list = []
+    duplicates: list = []
+    invalid: list = []
+
+    for line in raw_lines:
+        stripped = line.strip()
+
+        # Skip blank lines and comments
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        normalized = stripped.upper()
+
+        # Reject malformed symbols
+        if not _VALID_TICKER_RE.match(normalized):
+            log.warning("INVALID_TICKER rejected: %r", stripped)
+            invalid.append(stripped)
+            continue
+
+        # Deduplicate — preserve first occurrence
+        if normalized in seen:
+            duplicates.append(normalized)
+            continue
+
+        seen.add(normalized)
+        tickers.append(normalized)
+
+    return {
+        "tickers": tickers,
+        "validation_summary": {
+            "raw_line_count": raw_line_count,
+            "valid_ticker_count": len(tickers),
+            "duplicate_count": len(duplicates),
+            "invalid_count": len(invalid),
+            "invalid_tickers": invalid,
+            "first_10_tickers": tickers[:10],
+            "last_10_tickers": tickers[-10:],
+        },
+    }
 
 _REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
 
