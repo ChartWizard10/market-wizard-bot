@@ -15,6 +15,9 @@ from src.claude_client import (
     _REQUIRED_KEYS,
     _TIER_CHANNEL_MAP,
     _TIER_CAPITAL_MAP,
+    _RateGovernor,
+    _is_rate_limit_error,
+    _estimate_tokens,
 )
 
 # ---------------------------------------------------------------------------
@@ -87,6 +90,21 @@ _MINIMAL_CONFIG = {
         "model": "claude-sonnet-4-6",
         "max_tokens": 1200,
         "max_concurrent_calls": 8,
+        # Zero pacing so existing tests complete instantly
+        "claude_concurrency": 1,
+        "claude_min_seconds_between_calls": 0.0,
+        "claude_max_input_tokens_per_minute_budget": 999999,
+    }
+}
+
+# Config used for rate-limit specific tests — production-like values
+_RATE_CFG = {
+    "claude": {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 1200,
+        "claude_concurrency": 1,
+        "claude_min_seconds_between_calls": 4.0,
+        "claude_max_input_tokens_per_minute_budget": 25000,
     }
 }
 
@@ -488,3 +506,146 @@ def test_tier_capital_map_complete():
     assert _TIER_CAPITAL_MAP["SNIPE_IT"] == "full_quality_allowed"
     assert _TIER_CAPITAL_MAP["STARTER"] == "starter_only"
     assert _TIER_CAPITAL_MAP["NEAR_ENTRY"] == "wait_no_capital"
+
+
+# ---------------------------------------------------------------------------
+# 23. _estimate_tokens: conservative chars/4 estimate
+# ---------------------------------------------------------------------------
+
+def test_estimate_tokens_chars_over_4():
+    assert _estimate_tokens("x" * 400) == 100
+    assert _estimate_tokens("x" * 1) == 1      # min=1
+    assert _estimate_tokens("") == 1            # empty → min=1
+
+
+# ---------------------------------------------------------------------------
+# 24. _is_rate_limit_error: detects 429 by string
+# ---------------------------------------------------------------------------
+
+def test_is_rate_limit_error_detects_429():
+    assert _is_rate_limit_error(Exception("429 Too Many Requests")) is True
+    assert _is_rate_limit_error(Exception("rate limit exceeded")) is True
+    assert _is_rate_limit_error(Exception("too many requests")) is True
+
+
+def test_is_rate_limit_error_passes_through_other_errors():
+    assert _is_rate_limit_error(Exception("network timeout")) is False
+    assert _is_rate_limit_error(Exception("500 Internal Server Error")) is False
+
+
+# ---------------------------------------------------------------------------
+# 25. 429 exception → error_type == "claude_rate_limited", not CLAUDE_API_ERROR
+# ---------------------------------------------------------------------------
+
+def test_429_classified_as_claude_rate_limited():
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(
+        side_effect=Exception("429 Too Many Requests: rate limit exceeded")
+    )
+    candidates = [_valid_enriched(ticker="AAPL")]
+    results = asyncio.get_event_loop().run_until_complete(
+        async_claude_scan(candidates, "PROMPT", mock_client, _MINIMAL_CONFIG)
+    )
+    assert results[0]["error_type"] == "claude_rate_limited"
+    assert results[0]["signal"] is None
+
+
+def test_non_rate_limit_error_stays_claude_api_error():
+    mock_client = MagicMock()
+    mock_client.messages.create = AsyncMock(
+        side_effect=Exception("500 Internal Server Error")
+    )
+    candidates = [_valid_enriched(ticker="AAPL")]
+    results = asyncio.get_event_loop().run_until_complete(
+        async_claude_scan(candidates, "PROMPT", mock_client, _MINIMAL_CONFIG)
+    )
+    assert results[0]["error_type"] == "CLAUDE_API_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# 26. _RateGovernor: enforces minimum inter-call gap
+# ---------------------------------------------------------------------------
+
+def test_governor_enforces_min_gap():
+    fake_time = [0.0]
+    sleep_log = []
+
+    async def fake_sleep(secs: float):
+        sleep_log.append(secs)
+        fake_time[0] += secs
+
+    governor = _RateGovernor(
+        min_gap_secs=4.0,
+        max_tpm=999999,
+        _clock=lambda: fake_time[0],
+        _sleep=fake_sleep,
+    )
+
+    async def run():
+        await governor.acquire(100)          # first call — no sleep
+        fake_time[0] = 2.0                   # only 2s elapsed
+        await governor.acquire(100)          # should sleep 2s to reach 4s gap
+
+    asyncio.get_event_loop().run_until_complete(run())
+    assert len(sleep_log) == 1
+    assert abs(sleep_log[0] - 2.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# 27. _RateGovernor: enforces token budget (sleeps until window resets)
+# ---------------------------------------------------------------------------
+
+def test_governor_enforces_token_budget():
+    fake_time = [0.0]
+    sleep_log = []
+
+    async def fake_sleep(secs: float):
+        sleep_log.append(secs)
+        fake_time[0] += secs
+
+    governor = _RateGovernor(
+        min_gap_secs=0.0,
+        max_tpm=1000,
+        _clock=lambda: fake_time[0],
+        _sleep=fake_sleep,
+    )
+
+    async def run():
+        await governor.acquire(600)         # uses 600/1000 tokens
+        fake_time[0] = 5.0                  # 5s into 60s window
+        await governor.acquire(500)         # 600+500=1100 > 1000 → sleep ~55s
+        assert governor.tokens_in_window == 500  # window reset, only new tokens
+
+    asyncio.get_event_loop().run_until_complete(run())
+    assert len(sleep_log) == 1
+    assert abs(sleep_log[0] - 55.0) < 1.0   # slept ~55s to reset window
+
+
+# ---------------------------------------------------------------------------
+# 28. async_claude_scan: concurrency never exceeds claude_concurrency config
+# ---------------------------------------------------------------------------
+
+def test_async_scan_respects_concurrency_limit():
+    """Concurrent live API calls never exceed claude_concurrency=1."""
+    concurrent = [0]
+    peak = [0]
+
+    valid_response = json.dumps(_valid_signal())
+    mock_message = MagicMock()
+    mock_message.content = [MagicMock(text=valid_response)]
+
+    async def fake_create(**kwargs):
+        concurrent[0] += 1
+        peak[0] = max(peak[0], concurrent[0])
+        await asyncio.sleep(0)              # yield to allow others to start
+        concurrent[0] -= 1
+        return mock_message
+
+    mock_client = MagicMock()
+    mock_client.messages.create = fake_create
+
+    candidates = [_valid_enriched(ticker=f"SYM{i}") for i in range(4)]
+    asyncio.get_event_loop().run_until_complete(
+        async_claude_scan(candidates, "PROMPT", mock_client, _MINIMAL_CONFIG)
+    )
+    assert peak[0] <= 1

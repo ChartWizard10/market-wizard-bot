@@ -103,6 +103,7 @@ def _abort_summary(scan_id: str, started_at: str, total_tickers: int, error: str
         "total_claude_candidates":    0,
         "total_claude_success":       0,
         "total_claude_failed":        0,
+        "total_claude_rate_limited":  0,
         "final_tier_counts":          {"SNIPE_IT": 0, "STARTER": 0, "NEAR_ENTRY": 0, "WAIT": 0},
         "alerts_sent":                0,
         "alerts_suppressed":          0,
@@ -144,9 +145,10 @@ async def run_scan_pipeline(
     total_prefilter_rejected = 0
     total_prefilter_passed   = 0
     total_claude_candidates  = 0
-    total_claude_success     = 0
-    total_claude_failed      = 0
-    alerts_sent              = 0
+    total_claude_success      = 0
+    total_claude_failed       = 0
+    total_claude_rate_limited = 0
+    alerts_sent               = 0
     alerts_suppressed        = 0
     final_tier_counts        = {"SNIPE_IT": 0, "STARTER": 0, "NEAR_ENTRY": 0, "WAIT": 0}
     failures: list           = []
@@ -278,10 +280,18 @@ async def run_scan_pipeline(
         ticker = cr.get("ticker", "UNKNOWN")
 
         if cr.get("signal") is None:
-            total_claude_failed += 1
+            error_type = cr.get("error_type", "UNKNOWN")
+            if error_type == "claude_rate_limited":
+                total_claude_rate_limited += 1
+                log.warning(
+                    "RATE_LIMITED: %s — excluded from this scan cycle, not a setup rejection",
+                    ticker,
+                )
+            else:
+                total_claude_failed += 1
             failures.append({
                 "ticker": ticker,
-                "type":   cr.get("error_type", "UNKNOWN"),
+                "type":   error_type,
                 "detail": cr.get("error_message", ""),
             })
             final_tier_counts["WAIT"] = final_tier_counts.get("WAIT", 0) + 1
@@ -362,8 +372,9 @@ async def run_scan_pipeline(
         "total_prefilter_rejected": total_prefilter_rejected,
         "total_prefilter_passed":   total_prefilter_passed,
         "total_claude_candidates":  total_claude_candidates,
-        "total_claude_success":     total_claude_success,
-        "total_claude_failed":      total_claude_failed,
+        "total_claude_success":       total_claude_success,
+        "total_claude_failed":        total_claude_failed,
+        "total_claude_rate_limited":  total_claude_rate_limited,
         "final_tier_counts":        final_tier_counts,
         "alerts_sent":              alerts_sent,
         "alerts_suppressed":        alerts_suppressed,

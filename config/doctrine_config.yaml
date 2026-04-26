@@ -21,7 +21,7 @@ disabled_indicators:
   - stochastic
 
 prefilter:
-  max_claude_candidates_per_scan: 30
+  max_claude_candidates_per_scan: 20
   prefilter_min_score: 55
 
   scoring_weights:
@@ -72,7 +72,10 @@ discord:
 claude:
   model: "claude-sonnet-4-6"
   max_tokens: 1200
-  max_concurrent_calls: 8
+  max_concurrent_calls: 8          # legacy — use claude_concurrency for pacing
+  claude_concurrency: 1
+  claude_min_seconds_between_calls: 4
+  claude_max_input_tokens_per_minute_budget: 25000
 
 state:
   cooldown_minutes: 60

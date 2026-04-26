@@ -3,10 +3,93 @@
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit helpers
+# ---------------------------------------------------------------------------
+
+def _estimate_tokens(text: str) -> int:
+    """Conservative token estimate: chars // 4."""
+    return max(1, len(text) // 4)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """True for Anthropic 429 / rate-limit errors."""
+    try:
+        import anthropic
+        if isinstance(exc, anthropic.RateLimitError):
+            return True
+    except (ImportError, AttributeError):
+        pass
+    msg = str(exc).lower()
+    return "429" in msg or "rate limit" in msg or "rate_limit" in msg or "too many requests" in msg
+
+
+class _RateGovernor:
+    """Paces Claude calls to stay within TPM budget and minimum inter-call gap.
+
+    Both _clock and _sleep are injectable for unit-test control.
+    """
+
+    def __init__(
+        self,
+        min_gap_secs: float,
+        max_tpm: int,
+        _clock=None,
+        _sleep=None,
+    ):
+        self._min_gap = float(min_gap_secs)
+        self._max_tpm = int(max_tpm)
+        self._clock = _clock or time.monotonic
+        self._sleep = _sleep or asyncio.sleep
+        self._last_call_at: float | None = None
+        self._window_start: float | None = None
+        self._tokens_in_window: int = 0
+
+    @property
+    def tokens_in_window(self) -> int:
+        return self._tokens_in_window
+
+    async def acquire(self, estimated_tokens: int) -> float:
+        """Wait if necessary; return total seconds slept."""
+        now = self._clock()
+        total_sleep = 0.0
+
+        # Reset token window after 60 seconds
+        if self._window_start is None or now - self._window_start >= 60.0:
+            self._window_start = now
+            self._tokens_in_window = 0
+
+        # Enforce minimum gap between calls
+        if self._last_call_at is not None:
+            elapsed = now - self._last_call_at
+            if elapsed < self._min_gap:
+                gap_sleep = self._min_gap - elapsed
+                await self._sleep(gap_sleep)
+                total_sleep += gap_sleep
+                now = self._clock()
+
+        # Enforce token budget — sleep until window resets if needed
+        if self._tokens_in_window + estimated_tokens > self._max_tpm:
+            window_age = now - self._window_start
+            remaining = max(0.0, 60.0 - window_age)
+            if remaining > 0.0:
+                await self._sleep(remaining)
+                total_sleep += remaining
+                now = self._clock()
+            self._window_start = now
+            self._tokens_in_window = 0
+
+        self._tokens_in_window += estimated_tokens
+        self._last_call_at = self._clock()
+
+        return total_sleep
 
 # ---------------------------------------------------------------------------
 # Schema constants
@@ -281,6 +364,14 @@ async def claude_call(
             )
             response_text = response.content[0].text
         except Exception as exc:
+            if _is_rate_limit_error(exc):
+                log.warning("CLAUDE_RATE_LIMITED: %s: %s", ticker, exc)
+                return {
+                    "ticker": ticker,
+                    "signal": None,
+                    "error_type": "claude_rate_limited",
+                    "error_message": str(exc),
+                }
             log.warning("CLAUDE_API_ERROR: %s: %s", ticker, exc)
             return {
                 "ticker": ticker,
@@ -317,25 +408,49 @@ async def async_claude_scan(
     system_prompt: str,
     client: Any,
     config: dict,
+    _governor: "_RateGovernor | None" = None,
 ) -> list:
-    """Run Claude analysis on all candidates with concurrency limit.
+    """Run Claude analysis on all candidates with rate governor and concurrency limit.
+
+    Candidates are processed sequentially by default (claude_concurrency=1) with a
+    minimum inter-call gap and a per-minute token budget enforced by _RateGovernor.
+    !analyze bypasses this function and calls claude_call directly, so it is never
+    paced by the scan governor.
 
     Args:
-        candidates: list of enriched dicts (already prefiltered)
+        candidates:  list of enriched dicts (already prefiltered)
         system_prompt: loaded system prompt string
-        client: anthropic AsyncAnthropic client
-        config: doctrine_config dict
+        client:      anthropic AsyncAnthropic client
+        config:      doctrine_config dict
+        _governor:   injectable _RateGovernor for testing (created from config if None)
 
     Returns:
         list of result dicts, one per candidate, in input order
     """
-    max_concurrent = config.get("claude", {}).get("max_concurrent_calls", 8)
+    claude_cfg = config.get("claude", {})
+    max_concurrent = int(
+        claude_cfg.get("claude_concurrency", claude_cfg.get("max_concurrent_calls", 1))
+    )
+    min_gap = float(claude_cfg.get("claude_min_seconds_between_calls", 4.0))
+    tpm_budget = int(claude_cfg.get("claude_max_input_tokens_per_minute_budget", 25000))
+
     semaphore = asyncio.Semaphore(max_concurrent)
+    governor = _governor if _governor is not None else _RateGovernor(
+        min_gap_secs=min_gap,
+        max_tpm=tpm_budget,
+    )
 
-    tasks = [
-        claude_call(enriched, system_prompt, client, semaphore, config)
-        for enriched in candidates
-    ]
+    results = []
+    for enriched in candidates:
+        prompt_text = build_prompt(enriched)
+        estimated_tokens = _estimate_tokens(system_prompt + prompt_text)
+        sleep_secs = await governor.acquire(estimated_tokens)
+        if sleep_secs > 0.0:
+            log.info(
+                "rate_governor_sleep: %.1fs token_budget_used=%d/%d",
+                sleep_secs, governor.tokens_in_window, tpm_budget,
+            )
+        result = await claude_call(enriched, system_prompt, client, semaphore, config)
+        results.append(result)
 
-    results = await asyncio.gather(*tasks, return_exceptions=False)
-    return list(results)
+    return results

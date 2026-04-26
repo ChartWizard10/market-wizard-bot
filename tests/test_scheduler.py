@@ -293,6 +293,7 @@ def test_scan_summary_required_fields():
         "total_tickers_input", "total_evaluated", "total_data_failures",
         "total_prefilter_rejected", "total_prefilter_passed",
         "total_claude_candidates", "total_claude_success", "total_claude_failed",
+        "total_claude_rate_limited",
         "final_tier_counts", "alerts_sent", "alerts_suppressed",
         "top_candidates", "failures", "first_data_failure_reasons",
         "is_manual", "market_hours", "status",
@@ -802,3 +803,39 @@ def test_scan_summary_includes_data_failure_sample():
     assert isinstance(sample, list)
     assert 0 < len(sample) <= 10
     assert all(isinstance(r, str) and len(r) > 0 for r in sample)
+
+
+# ---------------------------------------------------------------------------
+# 25. Rate-limited Claude result → no alert, counted as total_claude_rate_limited
+# ---------------------------------------------------------------------------
+
+def test_rate_limited_result_no_alert_counted_separately():
+    """429 from Claude is recorded as rate_limited, does not generate alert or set rejection."""
+    tickers = ["AAPL"]
+    cfg = _cfg_market_hours()
+    send_mock = AsyncMock(return_value={"ok": True, "sent": False})
+
+    rate_limited_results = [{
+        "ticker": "AAPL",
+        "signal": None,
+        "error_type": "claude_rate_limited",
+        "error_message": "429 Too Many Requests",
+    }]
+
+    with (
+        patch("src.scheduler.market_data_mod.batch_download", return_value=_market_results(tickers)),
+        patch("src.scheduler.indicators.enrich", return_value=_enriched("AAPL")),
+        patch("src.scheduler.prefilter_mod.prefilter", return_value=_pf_result(tickers)),
+        patch("src.scheduler.async_claude_scan", new=AsyncMock(return_value=rate_limited_results)),
+        patch("src.scheduler.state_store.save"),
+        patch("src.scheduler.discord_alerts.send_alert", new=send_mock),
+    ):
+        summary = _run(run_scan_pipeline(
+            tickers, _mock_bot(), cfg, _EMPTY_STATE.copy(), "PROMPT", MagicMock()
+        ))
+
+    send_mock.assert_not_called()
+    assert summary["alerts_sent"] == 0
+    assert summary["total_claude_rate_limited"] == 1
+    assert summary["total_claude_failed"] == 0        # not counted as hard failure
+    assert any(f["type"] == "claude_rate_limited" for f in summary["failures"])
