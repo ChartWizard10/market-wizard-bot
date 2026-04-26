@@ -1,0 +1,81 @@
+scan:
+  ticker_file: "config/tickers.txt"
+  interval_minutes: 15
+  market_hours_only: true
+  market_open: "09:35"
+  market_close: "15:55"
+  timezone: "America/New_York"
+
+data:
+  min_daily_bars: 120
+  max_staleness_days: 2
+  lookback_period: "18mo"
+  interval: "1d"
+  fetch_batch_size: 100
+  fetch_delay_seconds: 0.3
+
+disabled_indicators:
+  - rsi
+  - macd
+  - bollinger_bands
+  - stochastic
+
+prefilter:
+  max_claude_candidates_per_scan: 30
+  prefilter_min_score: 55
+
+  scoring_weights:
+    trend_value_alignment: 15
+    structure_event: 20
+    fvg_ob_demand_zone_quality: 15
+    retest_proximity_status: 20
+    target_path_rr_estimate: 15
+    volume_participation: 10
+    data_quality_recency: 5
+
+  thresholds:
+    max_price_extension_from_sma20_pct: 8
+    overhead_block_distance_pct: 3
+    volume_expansion_ratio: 1.2
+    volume_dryup_ratio: 0.8
+    fvg_lookback_bars: 30
+    ob_lookback_bars: 30
+    swing_lookback_bars: 60
+    recent_trigger_window_bars: 10
+
+tiers:
+  snipe_it:
+    min_score: 85
+    min_rr: 3.0
+    requires_retest: true
+    requires_hold: true
+    requires_invalidation: true
+  starter:
+    min_score: 75
+    min_rr: 3.0
+    requires_retest: true
+    requires_hold: true
+    requires_invalidation: true
+  near_entry:
+    min_score: 60
+    requires_missing_conditions: true
+    requires_upgrade_trigger: true
+  wait:
+    posts_to_discord: false
+
+discord:
+  snipe_channel_id: 1497532086335311883
+  starter_channel_id: 1497532177359962112
+  near_entry_channel_id: 1497532274470551693
+  scan_log_channel_id: null
+
+claude:
+  model: "claude-sonnet-4-6"
+  max_tokens: 1200
+  max_concurrent_calls: 8
+
+state:
+  cooldown_minutes: 60
+  max_memory_entries: 500
+  persist_to_file: true
+  state_file: ".state/alert_history.json"

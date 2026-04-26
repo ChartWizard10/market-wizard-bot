@@ -1,0 +1,10 @@
+discord.py>=2.0
+anthropic
+yfinance
+pandas
+numpy
+pyyaml
+pytz
+zoneinfo; python_version < "3.9"
+pytest
+pytest-asyncio
