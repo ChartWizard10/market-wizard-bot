@@ -164,6 +164,37 @@ def test_saves_state_after_alert(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 5a. load() returns empty state when parent directory does not exist
+# ---------------------------------------------------------------------------
+
+def test_load_when_parent_dir_missing(tmp_path):
+    """load() must not crash and must return empty state when parent dir does not exist."""
+    missing_parent = tmp_path / "nonexistent" / "deep"
+    cfg = {"state": {"state_file": str(missing_parent / "state.json"), "cooldown_minutes": 240}}
+    state = load(cfg)
+    assert state["tickers"] == {}
+    assert "meta" in state
+
+
+# ---------------------------------------------------------------------------
+# 5b. save() creates missing parent directory then persists; load() reads back
+# ---------------------------------------------------------------------------
+
+def test_persists_state_after_creating_missing_dir(tmp_path):
+    """Full round-trip: save() creates dir, writes data; load() reads it correctly."""
+    missing_dir = tmp_path / "auto_created" / "nested"
+    cfg = {"state": {"state_file": str(missing_dir / "state.json"), "cooldown_minutes": 240}}
+
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), cfg)
+    save(state, cfg)
+    assert (missing_dir / "state.json").exists()
+
+    loaded = load(cfg)
+    assert loaded["tickers"]["AAPL"]["last_alerted_tier"] == "SNIPE_IT"
+
+
+# ---------------------------------------------------------------------------
 # 6. WAIT never alerts
 # ---------------------------------------------------------------------------
 

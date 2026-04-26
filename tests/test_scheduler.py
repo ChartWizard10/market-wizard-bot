@@ -748,3 +748,23 @@ def test_full_pipeline_order_enforced():
     assert call_order.index("claude") < call_order.index("tiering")
     assert call_order.index("tiering") < call_order.index("dedup")
     assert call_order.index("dedup") < call_order.index("alert")
+
+
+# ---------------------------------------------------------------------------
+# 23. Scheduler does not require manual mkdir for state directory
+# ---------------------------------------------------------------------------
+
+def test_scheduler_does_not_require_manual_mkdir(tmp_path):
+    """state_store.save() auto-creates missing parent directories.
+    No manual mkdir needed before starting the bot."""
+    from src import state_store as ss
+
+    state_path = tmp_path / "auto_created" / "state.json"
+    cfg = _cfg_market_hours()
+    cfg["state"]["state_file"] = str(state_path)
+
+    # Mimic exactly what run_scan_pipeline does: load then save
+    state = ss.load(cfg)       # parent dir does not exist; returns empty state
+    ss.save(state, cfg)        # must auto-create directory and write file
+
+    assert state_path.exists(), "state_store.save() must create missing parent directory"
