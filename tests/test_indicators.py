@@ -104,11 +104,58 @@ def test_no_disabled_in_prefilter_score():
 
 
 def test_no_disabled_in_prompt_payload():
-    pytest.skip("Verified in Phase 4 when build_prompt() is implemented")
+    """build_prompt() must not include rsi, macd, bollinger, or stochastic in output."""
+    from src.claude_client import build_prompt
+    df = _make_df(200)
+    enriched = enrich("TEST", df, BASE_CONFIG)
+    enriched["latest_close"] = enriched["current_price"]
+    prompt = build_prompt(enriched)
+    prompt_lower = prompt.lower()
+    for indicator in ("rsi", "macd", "bollinger", "stochastic"):
+        assert indicator not in prompt_lower, (
+            f"Disabled indicator '{indicator}' found in build_prompt() output"
+        )
 
 
 def test_no_disabled_in_discord_embed():
-    pytest.skip("Verified in Phase 7 when discord_alerts is implemented")
+    """format_alert() embed text must not include rsi, macd, bollinger, or stochastic."""
+    from src.discord_alerts import format_alert
+    df = _make_df(200)
+    enriched = enrich("TEST", df, BASE_CONFIG)
+    enriched["latest_close"] = enriched["current_price"]
+    enriched["data_status"] = "OK"
+
+    # Build a minimal tiering_result using the enriched dict fields
+    signal = {
+        "ticker": "TEST", "tier": "SNIPE_IT", "score": 88,
+        "setup_family": "continuation",
+        "structure_event": enriched.get("structure_event", "MSS"),
+        "trend_state": "fresh_expansion",
+        "sma_value_alignment": enriched.get("sma_value_alignment", "supportive"),
+        "zone_type": "FVG", "trigger_level": enriched["current_price"],
+        "retest_status": enriched.get("retest_status", "confirmed"),
+        "hold_status": "confirmed",
+        "invalidation_condition": enriched.get("invalidation_condition", "below zone"),
+        "invalidation_level": enriched.get("invalidation_level", 140.0),
+        "targets": enriched.get("targets") or [{"label": "T1", "level": 160.0, "reason": "pool"}],
+        "risk_reward": enriched.get("estimated_rr", 3.0),
+        "overhead_status": enriched.get("overhead_status", "clear"),
+        "forced_participation": "none", "missing_conditions": [],
+        "upgrade_trigger": "none", "next_action": "Enter on retest",
+        "discord_channel": "#snipe-signals", "capital_action": "full_quality_allowed",
+        "reason": "MSS with confirmed retest.",
+    }
+    tr = {
+        "final_tier": "SNIPE_IT", "score": 88, "safe_for_alert": True,
+        "final_discord_channel": "#snipe-signals",
+        "final_signal": signal,
+    }
+    text = format_alert(tr)
+    text_lower = text.lower()
+    for indicator in ("rsi", "macd", "bollinger", "stochastic"):
+        assert indicator not in text_lower, (
+            f"Disabled indicator '{indicator}' found in format_alert() output"
+        )
 
 
 # ---------------------------------------------------------------------------
