@@ -106,8 +106,9 @@ def _abort_summary(scan_id: str, started_at: str, total_tickers: int, error: str
         "final_tier_counts":          {"SNIPE_IT": 0, "STARTER": 0, "NEAR_ENTRY": 0, "WAIT": 0},
         "alerts_sent":                0,
         "alerts_suppressed":          0,
-        "top_candidates":             [],
-        "failures":                   [{"type": "ABORT", "detail": error}],
+        "top_candidates":                [],
+        "failures":                      [{"type": "ABORT", "detail": error}],
+        "first_data_failure_reasons":    [],
     }
 
 
@@ -150,6 +151,7 @@ async def run_scan_pipeline(
     final_tier_counts        = {"SNIPE_IT": 0, "STARTER": 0, "NEAR_ENTRY": 0, "WAIT": 0}
     failures: list           = []
     top_candidates: list     = []
+    data_failure_sample: list = []
 
     log.info("scan_start: scan_id=%s tickers=%d manual=%s", scan_id, total_tickers_input, is_manual)
 
@@ -177,11 +179,14 @@ async def run_scan_pipeline(
 
         if mres["data_status"] != "OK":
             total_data_failures += 1
+            detail = mres.get("error", "")
             failures.append({
                 "ticker": ticker,
                 "type":   mres["data_status"],
-                "detail": mres.get("error", ""),
+                "detail": detail,
             })
+            if len(data_failure_sample) < 10:
+                data_failure_sample.append(f"{ticker}: {mres['data_status']} — {detail}")
             enriched_map[ticker] = {
                 "ticker":       ticker,
                 "data_status":  mres["data_status"],
@@ -198,7 +203,15 @@ async def run_scan_pipeline(
             log.warning("ENRICH_ERROR: %s: %s", ticker, exc)
             total_data_failures += 1
             failures.append({"ticker": ticker, "type": "ENRICH_ERROR", "detail": str(exc)})
+            if len(data_failure_sample) < 10:
+                data_failure_sample.append(f"{ticker}: ENRICH_ERROR — {exc}")
             enriched_map[ticker] = {"ticker": ticker, "data_status": "ERROR", "latest_close": None}
+
+    if total_data_failures > 0:
+        log.warning(
+            "DATA_FAILURES: %d/%d tickers failed market data fetch. Sample: %s",
+            total_data_failures, total_tickers_input, data_failure_sample,
+        )
 
     # ------------------------------------------------------------------
     # Step 3: Prefilter — score, veto, rank, cap
@@ -354,8 +367,9 @@ async def run_scan_pipeline(
         "final_tier_counts":        final_tier_counts,
         "alerts_sent":              alerts_sent,
         "alerts_suppressed":        alerts_suppressed,
-        "top_candidates":           top_candidates,
-        "failures":                 failures,
+        "top_candidates":                top_candidates,
+        "failures":                      failures,
+        "first_data_failure_reasons":    data_failure_sample,
     }
 
 

@@ -108,6 +108,35 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _extract_ticker_df(raw: pd.DataFrame, ticker: str, single: bool) -> pd.DataFrame:
+    """Extract per-ticker DataFrame from a yfinance download result.
+
+    Handles three shapes:
+    - Flat (single=True or no MultiIndex): columns are already field names.
+    - (field, ticker) MultiIndex — default orientation: tickers at level 1.
+    - (ticker, field) MultiIndex — group_by="ticker" orientation: tickers at level 0.
+
+    Raises KeyError if ticker is absent from a multi-ticker response.
+    """
+    if single or not isinstance(raw.columns, pd.MultiIndex):
+        df = raw.copy()
+        df.columns = [c.lower() for c in df.columns]
+        return df
+
+    level_0_vals = set(raw.columns.get_level_values(0))
+    level_1_vals = set(raw.columns.get_level_values(1))
+
+    if ticker in level_1_vals:
+        df = raw.xs(ticker, axis=1, level=1).copy()
+    elif ticker in level_0_vals:
+        df = raw.xs(ticker, axis=1, level=0).copy()
+    else:
+        raise KeyError(f"{ticker} not found in batch response at level 0 or level 1")
+
+    df.columns = [c.lower() for c in df.columns]
+    return df
+
+
 def _last_market_date() -> datetime:
     """Return today if weekday, else last Friday."""
     today = datetime.utcnow().date()
@@ -213,14 +242,18 @@ def batch_download(tickers: list, config: dict) -> dict:
     for batch_idx, batch in enumerate(batches):
         if batch_idx > 0:
             time.sleep(delay)
+
+        single = len(batch) == 1
+        # Pass a string for single-ticker batches to get a flat DataFrame (no MultiIndex)
+        download_arg = batch[0] if single else batch
+
         try:
             raw = yf.download(
-                batch,
+                download_arg,
                 period=period,
                 interval=interval,
                 progress=False,
                 auto_adjust=True,
-                group_by="ticker",
             )
         except Exception as exc:
             log.warning("BATCH_FETCH_ERROR batch %d: %s", batch_idx, exc)
@@ -230,25 +263,27 @@ def batch_download(tickers: list, config: dict) -> dict:
 
         for ticker in batch:
             try:
-                if len(batch) == 1:
-                    # Single-ticker download doesn't produce MultiIndex
-                    df = raw.copy()
-                    df.columns = [c.lower() for c in df.columns]
-                else:
-                    if ticker not in raw.columns.get_level_values(1):
-                        results[ticker] = _error_result(ticker, "not in batch response")
-                        continue
-                    df = raw.xs(ticker, axis=1, level=1).copy()
-                    df.columns = [c.lower() for c in df.columns]
+                df = _extract_ticker_df(raw, ticker, single)
+            except KeyError:
+                log.warning("TICKER_NOT_IN_BATCH: %s — falling back to individual fetch", ticker)
+                results[ticker] = fetch_ticker(ticker, config)
+                continue
+            except Exception as exc:
+                log.warning("EXTRACT_ERROR: %s: %s", ticker, exc)
+                results[ticker] = _error_result(ticker, f"extraction failed: {exc}")
+                continue
 
-                is_valid, skip_reason = validate_ticker_data(ticker, df, config)
+            try:
                 if df.empty:
                     results[ticker] = {
                         "ticker": ticker, "bars": 0,
                         "latest_close": None, "latest_date": None,
                         "data_status": "EMPTY", "df": None, "error": "empty",
                     }
-                elif not is_valid:
+                    continue
+
+                is_valid, skip_reason = validate_ticker_data(ticker, df, config)
+                if not is_valid:
                     status = skip_reason.split(":")[0]
                     results[ticker] = {
                         "ticker": ticker, "bars": len(df),

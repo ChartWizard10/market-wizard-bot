@@ -294,7 +294,8 @@ def test_scan_summary_required_fields():
         "total_prefilter_rejected", "total_prefilter_passed",
         "total_claude_candidates", "total_claude_success", "total_claude_failed",
         "final_tier_counts", "alerts_sent", "alerts_suppressed",
-        "top_candidates", "failures", "is_manual", "market_hours", "status",
+        "top_candidates", "failures", "first_data_failure_reasons",
+        "is_manual", "market_hours", "status",
     ]
     tickers = ["AAPL"]
     cfg = _cfg_market_hours()
@@ -768,3 +769,36 @@ def test_scheduler_does_not_require_manual_mkdir(tmp_path):
     ss.save(state, cfg)        # must auto-create directory and write file
 
     assert state_path.exists(), "state_store.save() must create missing parent directory"
+
+
+# ---------------------------------------------------------------------------
+# 24. Scan summary includes first_data_failure_reasons when data failures occur
+# ---------------------------------------------------------------------------
+
+def test_scan_summary_includes_data_failure_sample():
+    """When batch_download returns all failures, summary includes first_data_failure_reasons
+    with at most 10 entries, each a non-empty string."""
+    tickers = [f"T{i:04d}" for i in range(20)]
+    cfg = _cfg_market_hours()
+
+    fail_results = {
+        t: {"ticker": t, "bars": 0, "latest_close": None, "latest_date": None,
+            "data_status": "ERROR", "df": None, "error": f"network error for {t}"}
+        for t in tickers
+    }
+
+    with (
+        patch("src.scheduler.market_data_mod.batch_download", return_value=fail_results),
+        patch("src.scheduler.prefilter_mod.prefilter", return_value=_pf_result([], eligible_count=0)),
+        patch("src.scheduler.async_claude_scan", new=AsyncMock(return_value=[])),
+        patch("src.scheduler.state_store.save"),
+    ):
+        summary = _run(run_scan_pipeline(
+            tickers, _mock_bot(), cfg, _EMPTY_STATE.copy(), "PROMPT", MagicMock()
+        ))
+
+    assert "first_data_failure_reasons" in summary, "summary must include first_data_failure_reasons"
+    sample = summary["first_data_failure_reasons"]
+    assert isinstance(sample, list)
+    assert 0 < len(sample) <= 10
+    assert all(isinstance(r, str) and len(r) > 0 for r in sample)

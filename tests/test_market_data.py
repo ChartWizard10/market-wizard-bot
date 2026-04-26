@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from src.market_data import validate_ticker_data, fetch_ticker, _normalize
+from src.market_data import validate_ticker_data, fetch_ticker, _normalize, _extract_ticker_df, batch_download
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -192,3 +192,101 @@ def test_fetch_ticker_exception_returns_error():
         result = fetch_ticker("ERR", BASE_CONFIG)
     assert result["data_status"] == "ERROR"
     assert "network error" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# _extract_ticker_df — MultiIndex shape handling
+# ---------------------------------------------------------------------------
+
+def _make_mi_field_ticker(ticker: str, n: int = 10) -> pd.DataFrame:
+    """(field, ticker) MultiIndex — default yfinance orientation."""
+    idx = pd.bdate_range(end=date(2025, 1, 2), periods=n)
+    fields = ["Open", "High", "Low", "Close", "Volume"]
+    mi = pd.MultiIndex.from_arrays([fields, [ticker] * 5])
+    return pd.DataFrame(np.ones((n, 5)) * 100.0, index=idx, columns=mi)
+
+
+def _make_mi_ticker_field(ticker: str, n: int = 10) -> pd.DataFrame:
+    """(ticker, field) MultiIndex — group_by='ticker' orientation (the buggy shape)."""
+    idx = pd.bdate_range(end=date(2025, 1, 2), periods=n)
+    fields = ["Open", "High", "Low", "Close", "Volume"]
+    mi = pd.MultiIndex.from_arrays([[ticker] * 5, fields])
+    return pd.DataFrame(np.ones((n, 5)) * 100.0, index=idx, columns=mi)
+
+
+def test_extract_ticker_df_flat_no_multiindex():
+    """single=True returns flat df with lowercased columns."""
+    df = _make_df(10)
+    result = _extract_ticker_df(df, "AAPL", single=True)
+    assert list(result.columns) == ["open", "high", "low", "close", "volume"]
+    assert len(result) == 10
+
+
+def test_extract_ticker_df_field_ticker_multiindex():
+    """(field, ticker) MultiIndex — ticker at level 1 → correct extraction."""
+    raw = _make_mi_field_ticker("AAPL")
+    result = _extract_ticker_df(raw, "AAPL", single=False)
+    assert set(result.columns) == {"open", "high", "low", "close", "volume"}
+
+
+def test_extract_ticker_df_ticker_field_multiindex():
+    """(ticker, field) MultiIndex — ticker at level 0 → correct extraction (was the bug)."""
+    raw = _make_mi_ticker_field("AAPL")
+    result = _extract_ticker_df(raw, "AAPL", single=False)
+    assert set(result.columns) == {"open", "high", "low", "close", "volume"}
+
+
+def test_extract_ticker_df_missing_ticker_raises_key_error():
+    """Ticker absent from both MultiIndex levels → KeyError."""
+    raw = _make_mi_field_ticker("AAPL")
+    with pytest.raises(KeyError):
+        _extract_ticker_df(raw, "NVDA", single=False)
+
+
+def test_batch_download_multi_ticker_field_ticker_orientation():
+    """batch_download handles (field, ticker) MultiIndex and returns OK for all tickers."""
+    today = date.today()
+    while today.weekday() >= 5:
+        today -= timedelta(days=1)
+    n = 200
+    idx = pd.bdate_range(end=today, periods=n)
+    test_tickers = ["AAPL", "NVDA"]
+    fields = ["Close", "High", "Low", "Open", "Volume"]
+    mi = pd.MultiIndex.from_product([fields, test_tickers])
+    raw = pd.DataFrame(np.ones((n, len(fields) * len(test_tickers))) * 100.0, index=idx, columns=mi)
+
+    with patch("src.market_data.yf.download", return_value=raw):
+        results = batch_download(test_tickers, BASE_CONFIG)
+
+    for t in test_tickers:
+        assert results[t]["data_status"] == "OK", f"{t}: {results[t].get('error')}"
+        assert results[t]["df"] is not None
+
+
+def test_batch_download_missing_ticker_falls_back_to_fetch_ticker():
+    """Ticker absent from batch response triggers individual fetch_ticker fallback."""
+    today = date.today()
+    while today.weekday() >= 5:
+        today -= timedelta(days=1)
+    n = 200
+    idx = pd.bdate_range(end=today, periods=n)
+
+    # Batch raw contains only AAPL — NVDA is absent
+    fields = ["Close", "High", "Low", "Open", "Volume"]
+    mi = pd.MultiIndex.from_arrays([fields, ["AAPL"] * 5])
+    raw_batch = pd.DataFrame(np.ones((n, 5)) * 100.0, index=idx, columns=mi)
+
+    fallback_result = {
+        "ticker": "NVDA", "bars": n, "latest_close": 150.0,
+        "latest_date": str(today), "data_status": "OK",
+        "df": MagicMock(), "error": None,
+    }
+
+    with (
+        patch("src.market_data.yf.download", return_value=raw_batch),
+        patch("src.market_data.fetch_ticker", return_value=fallback_result) as mock_fallback,
+    ):
+        results = batch_download(["AAPL", "NVDA"], BASE_CONFIG)
+
+    mock_fallback.assert_called_once_with("NVDA", BASE_CONFIG)
+    assert results["NVDA"]["data_status"] == "OK"
