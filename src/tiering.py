@@ -72,6 +72,7 @@ def _entry_gate_failures(
     signal: dict,
     prefilter_vetoes: list,
     min_rr: float,
+    current_price: float | None = None,
 ) -> list[str]:
     """Return failure reasons for the entry gates shared by SNIPE_IT and STARTER."""
     failures: list[str] = []
@@ -112,6 +113,9 @@ def _entry_gate_failures(
     if active_block:
         failures.append(f"prefilter_hard_veto: {sorted(active_block)}")
 
+    # Semantic price sanity — geometry relationship checks
+    failures.extend(_semantic_price_sanity_failures(signal, current_price))
+
     return failures
 
 
@@ -120,12 +124,13 @@ def _snipe_gate_failures(
     prefilter_vetoes: list,
     score: int,
     config: dict,
+    current_price: float | None = None,
 ) -> list[str]:
     tier_cfg = config.get("tiers", {}).get("snipe_it", {})
     min_score = tier_cfg.get("min_score", 85)
     min_rr = tier_cfg.get("min_rr", 3.0)
 
-    failures = _entry_gate_failures(signal, prefilter_vetoes, min_rr)
+    failures = _entry_gate_failures(signal, prefilter_vetoes, min_rr, current_price)
 
     if score < min_score:
         failures.append(f"score={score} < snipe_min_score={min_score}")
@@ -138,12 +143,13 @@ def _starter_gate_failures(
     prefilter_vetoes: list,
     score: int,
     config: dict,
+    current_price: float | None = None,
 ) -> list[str]:
     tier_cfg = config.get("tiers", {}).get("starter", {})
     min_score = tier_cfg.get("min_score", 75)
     min_rr = tier_cfg.get("min_rr", 3.0)
 
-    failures = _entry_gate_failures(signal, prefilter_vetoes, min_rr)
+    failures = _entry_gate_failures(signal, prefilter_vetoes, min_rr, current_price)
 
     if score < min_score:
         failures.append(f"score={score} < starter_min_score={min_score}")
@@ -155,6 +161,7 @@ def _near_entry_gate_failures(
     signal: dict,
     score: int,
     config: dict,
+    current_price: float | None = None,
 ) -> list[str]:
     min_score = config.get("tiers", {}).get("near_entry", {}).get("min_score", 60)
     failures: list[str] = []
@@ -170,6 +177,11 @@ def _near_entry_gate_failures(
     if not trigger or str(trigger).lower() == "none":
         failures.append("upgrade_trigger empty or 'none'")
 
+    # Impossible geometry blocks NEAR_ENTRY too — if both levels are present and
+    # contradict each other, there is no valid watch setup to alert on.
+    # Checks are skipped when levels are None (common for NEAR_ENTRY).
+    failures.extend(_semantic_price_sanity_failures(signal, current_price))
+
     return failures
 
 
@@ -182,6 +194,77 @@ def _first_all_alert_blocker(prefilter_vetoes: list) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Semantic price sanity
+# ---------------------------------------------------------------------------
+
+def _semantic_price_sanity_failures(
+    signal: dict,
+    current_price: float | None = None,
+) -> list[str]:
+    """Check bullish geometry invariants. Returns failure reasons.
+
+    All checks assume bullish/long setups. Checks are skipped when required
+    levels are absent so NEAR_ENTRY signals with incomplete data are not
+    falsely blocked.
+    """
+    failures: list[str] = []
+
+    trigger = signal.get("trigger_level")
+    invalidation = signal.get("invalidation_level")
+    targets = signal.get("targets", [])
+    rr = signal.get("risk_reward")
+
+    # Invalidation must be strictly below trigger (stop below entry for bullish)
+    if trigger is not None and invalidation is not None:
+        try:
+            if float(invalidation) >= float(trigger):
+                failures.append(
+                    f"semantic_price_sanity_failed: invalidation_level={invalidation} "
+                    f">= trigger_level={trigger} (impossible bullish geometry)"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    # First actionable target must be above trigger
+    if trigger is not None and isinstance(targets, list) and targets:
+        first_target = targets[0]
+        if isinstance(first_target, dict):
+            t_level = first_target.get("level")
+            if t_level is not None:
+                try:
+                    if float(t_level) <= float(trigger):
+                        failures.append(
+                            f"semantic_price_sanity_failed: first_target_level={t_level} "
+                            f"<= trigger_level={trigger} (target not above entry)"
+                        )
+                except (TypeError, ValueError):
+                    pass
+
+    # risk_reward must be positive if present
+    if rr is not None:
+        try:
+            if float(rr) <= 0:
+                failures.append(
+                    f"semantic_price_sanity_failed: risk_reward={rr} is not positive"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    # Current price already below invalidation → position already stopped out
+    if current_price is not None and invalidation is not None:
+        try:
+            if float(current_price) < float(invalidation):
+                failures.append(
+                    f"semantic_price_sanity_failed: current_price={current_price} "
+                    f"< invalidation_level={invalidation} (price below stop level)"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    return failures
+
+
+# ---------------------------------------------------------------------------
 # Downgrade cascade
 # ---------------------------------------------------------------------------
 
@@ -191,6 +274,7 @@ def _determine_final_tier(
     prefilter_vetoes: list,
     score: int,
     config: dict,
+    current_price: float | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Return (final_tier, downgrades, notes).
 
@@ -222,16 +306,16 @@ def _determine_final_tier(
 
     # ---- SNIPE_IT path ----
     if claude_tier == "SNIPE_IT":
-        snipe_failures = _snipe_gate_failures(signal, prefilter_vetoes, score, config)
+        snipe_failures = _snipe_gate_failures(signal, prefilter_vetoes, score, config, current_price)
         if not snipe_failures:
             return "SNIPE_IT", downgrades, notes
 
-        starter_failures = _starter_gate_failures(signal, prefilter_vetoes, score, config)
+        starter_failures = _starter_gate_failures(signal, prefilter_vetoes, score, config, current_price)
         if not starter_failures:
             downgrades.append(f"SNIPE_IT→STARTER: {'; '.join(snipe_failures)}")
             return "STARTER", downgrades, notes
 
-        near_failures = _near_entry_gate_failures(signal, score, config)
+        near_failures = _near_entry_gate_failures(signal, score, config, current_price)
         if not near_failures:
             downgrades.append(f"SNIPE_IT→NEAR_ENTRY: {'; '.join(snipe_failures)}")
             return "NEAR_ENTRY", downgrades, notes
@@ -241,11 +325,11 @@ def _determine_final_tier(
 
     # ---- STARTER path ----
     if claude_tier == "STARTER":
-        starter_failures = _starter_gate_failures(signal, prefilter_vetoes, score, config)
+        starter_failures = _starter_gate_failures(signal, prefilter_vetoes, score, config, current_price)
         if not starter_failures:
             return "STARTER", downgrades, notes
 
-        near_failures = _near_entry_gate_failures(signal, score, config)
+        near_failures = _near_entry_gate_failures(signal, score, config, current_price)
         if not near_failures:
             downgrades.append(f"STARTER→NEAR_ENTRY: {'; '.join(starter_failures)}")
             return "NEAR_ENTRY", downgrades, notes
@@ -255,7 +339,7 @@ def _determine_final_tier(
 
     # ---- NEAR_ENTRY path ----
     if claude_tier == "NEAR_ENTRY":
-        near_failures = _near_entry_gate_failures(signal, score, config)
+        near_failures = _near_entry_gate_failures(signal, score, config, current_price)
         if not near_failures:
             return "NEAR_ENTRY", downgrades, notes
 
@@ -342,8 +426,18 @@ def validate(
 
     prefilter_vetoes: list = (prefilter_result or {}).get("veto_flags", [])
 
+    # Extract current_price from prefilter key_features if available.
+    # Used by _semantic_price_sanity_failures to detect already-stopped-out positions.
+    current_price: float | None = None
+    cp_raw = (prefilter_result or {}).get("key_features", {}).get("current_price")
+    if cp_raw is not None:
+        try:
+            current_price = float(cp_raw)
+        except (TypeError, ValueError):
+            pass
+
     final_tier, downgrades, notes = _determine_final_tier(
-        claude_tier, raw_signal, prefilter_vetoes, score, config
+        claude_tier, raw_signal, prefilter_vetoes, score, config, current_price
     )
 
     # applied_vetoes: prefilter vetoes + signal-derived vetoes (deduplicated)

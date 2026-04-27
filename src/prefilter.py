@@ -342,6 +342,11 @@ def score_ticker(enriched: dict, config: dict) -> dict:
             "estimated_rr": enriched.get("estimated_rr"),
             "volume_behavior": enriched.get("volume_behavior"),
             "price_extension_pct": enriched.get("price_extension_from_sma20_pct"),
+            "current_price": (
+                enriched.get("current_price")
+                or enriched.get("latest_close")
+                or enriched.get("close")
+            ),
         },
     }
 

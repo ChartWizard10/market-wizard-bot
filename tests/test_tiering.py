@@ -710,3 +710,224 @@ def test_capital_map_covers_all_tiers():
     for tier in TIERS:
         assert tier in CAPITAL_MAP
     assert CAPITAL_MAP["WAIT"] == "no_trade"
+
+
+# ---------------------------------------------------------------------------
+# Phase 10A-G: Semantic price sanity, strict gates, damage cap, preservation
+# ---------------------------------------------------------------------------
+
+def _pf_with_price(price: float | None, vetoes: list | None = None) -> dict:
+    """Prefilter result carrying a current_price for sanity gate tests."""
+    return {
+        "veto_flags": vetoes or [],
+        "key_features": {"current_price": price},
+    }
+
+
+# 1. Invalidation at or above trigger → impossible bullish geometry → downgrade
+def test_bullish_signal_rejects_invalidation_above_trigger():
+    # invalidation_level >= trigger_level is impossible for a bullish entry
+    signal = _snipe_signal(trigger_level=182.50, invalidation_level=185.00)
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] != "SNIPE_IT", (
+        "SNIPE_IT must be blocked when invalidation_level >= trigger_level"
+    )
+    assert result["downgrades"], "downgrade must be recorded"
+
+
+# 2. First target below trigger → target path impossible → downgrade
+def test_bullish_signal_rejects_target_below_trigger():
+    signal = _snipe_signal(
+        trigger_level=182.50,
+        invalidation_level=178.00,
+        targets=[{"label": "T1", "level": 180.00, "reason": "Below entry — invalid"}],
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] != "SNIPE_IT", (
+        "SNIPE_IT must be blocked when first target is at or below trigger_level"
+    )
+
+
+# 3. Non-positive risk_reward → invalid geometry → downgrade
+def test_bullish_signal_rejects_nonpositive_risk_reward():
+    signal = _snipe_signal(risk_reward=-1.0)
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] != "SNIPE_IT", (
+        "SNIPE_IT must be blocked when risk_reward is negative"
+    )
+
+
+# 4. current_price below invalidation_level → position stopped out → WAIT
+def test_current_price_below_invalidation_forces_wait_when_current_price_available():
+    signal = _snipe_signal(trigger_level=182.50, invalidation_level=178.00)
+    # Price has already traded below the stop level
+    pf = _pf_with_price(175.00)
+    result = validate(signal, pf, _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", (
+        "current_price below invalidation_level must force WAIT regardless of Claude tier"
+    )
+    assert result["safe_for_alert"] is False
+
+
+# 5. SNIPE_IT requires confirmed retest AND confirmed hold
+def test_snipe_requires_confirmed_retest_and_hold():
+    for bad_retest, bad_hold in [
+        ("missing", "confirmed"),
+        ("confirmed", "missing"),
+        ("partial", "confirmed"),
+        ("confirmed", "failed"),
+    ]:
+        signal = _snipe_signal(retest_status=bad_retest, hold_status=bad_hold)
+        result = validate(signal, _pf(), _BASE_CONFIG)
+        assert result["final_tier"] != "SNIPE_IT", (
+            f"SNIPE_IT must be blocked: retest={bad_retest} hold={bad_hold}"
+        )
+        assert result["original_claude_tier"] == "SNIPE_IT"
+
+
+# 6. STARTER requires confirmed retest AND confirmed hold
+def test_starter_requires_confirmed_retest_and_hold():
+    for bad_retest, bad_hold in [
+        ("missing", "confirmed"),
+        ("confirmed", "missing"),
+    ]:
+        signal = _starter_signal(retest_status=bad_retest, hold_status=bad_hold)
+        result = validate(signal, _pf(), _BASE_CONFIG)
+        assert result["final_tier"] not in ("SNIPE_IT", "STARTER"), (
+            f"STARTER must be blocked: retest={bad_retest} hold={bad_hold}"
+        )
+        assert result["original_claude_tier"] == "STARTER"
+
+
+# 7. NEAR_ENTRY allows missing retest/hold when geometry is valid
+def test_near_entry_allows_missing_retest_only_when_geometry_valid():
+    # Standard NEAR_ENTRY: missing retest, missing hold, invalidation_level=None → valid
+    signal = _near_entry_signal()
+    # trigger_level=182.50 (inherited), invalidation_level=None → geometry check skipped
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY", (
+        "NEAR_ENTRY must be preserved when geometry is valid (invalidation_level=None skips check)"
+    )
+    assert result["safe_for_alert"] is True
+
+
+# 8. NEAR_ENTRY with impossible geometry (both levels present, invalidation above trigger) → WAIT
+def test_near_entry_impossible_geometry_forces_wait():
+    signal = _near_entry_signal(
+        trigger_level=182.50,
+        invalidation_level=185.00,  # above trigger — impossible
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", (
+        "NEAR_ENTRY with invalidation_level >= trigger_level must force WAIT"
+    )
+    assert result["safe_for_alert"] is False
+
+
+# 9. JBHT-style valid STARTER is preserved by new sanity gates
+def test_jbht_style_valid_starter_preserved():
+    # Realistic STARTER: BOS, continuation, overhead moderate, confirmed retest/hold
+    # trigger below current (already near entry), invalidation below trigger, target above
+    signal = _starter_signal(
+        ticker="JBHT",
+        structure_event="BOS",
+        setup_family="continuation",
+        trend_state="mature_continuation",
+        trigger_level=190.00,
+        invalidation_level=185.50,   # below trigger ✓
+        targets=[{"label": "T1", "level": 205.00, "reason": "Prior swing high cluster"}],
+        risk_reward=3.2,             # >= 3.0 ✓
+        overhead_status="moderate",  # not blocked ✓
+        retest_status="confirmed",   # ✓
+        hold_status="confirmed",     # ✓
+        sma_value_alignment="supportive",
+        score=78,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER", (
+        "JBHT-style STARTER with valid geometry must be preserved — not downgraded"
+    )
+    assert result["safe_for_alert"] is True
+    assert result["final_discord_channel"] == "#starter-signals"
+    assert result["capital_action"] == "starter_only"
+    assert not result["downgrades"]
+
+
+# 10. IRDM-style SNIPE_IT downgraded when current_price is below invalidation
+def test_irdm_style_snipe_downgraded_or_wait_when_current_damage_fields_available():
+    # Claude says SNIPE_IT, but current price has already traded through the stop zone
+    signal = _snipe_signal(
+        ticker="IRDM",
+        trigger_level=10.50,
+        invalidation_level=9.80,
+        targets=[{"label": "T1", "level": 13.00, "reason": "Resistance cluster"}],
+        risk_reward=3.5,
+        retest_status="confirmed",
+        hold_status="confirmed",
+    )
+    # Current price is 9.50 — already below invalidation_level of 9.80
+    pf = _pf_with_price(9.50)
+    result = validate(signal, pf, _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", (
+        "IRDM-style SNIPE_IT must be capped to WAIT when current_price < invalidation_level"
+    )
+    assert result["safe_for_alert"] is False
+    assert "semantic_price_sanity_failed" in (result["rejection_reason"] or "")
+
+
+# 11. WAIT never posts to Discord (explicit named test)
+def test_wait_never_posts():
+    for signal_fn in (_snipe_signal, _starter_signal, _near_entry_signal, _wait_signal):
+        signal = signal_fn()
+        result = validate(signal, _pf(), _BASE_CONFIG)
+        if result["final_tier"] == "WAIT":
+            assert result["final_discord_channel"] == "none", (
+                f"WAIT must never post: got channel={result['final_discord_channel']!r}"
+            )
+            assert result["safe_for_alert"] is False
+            assert result["capital_action"] == "no_trade"
+
+
+# 12. discord_channel is always recomputed from final_tier (not trusted from Claude)
+def test_discord_channel_recomputed_from_final_tier():
+    # Claude says SNIPE_IT but puts a mismatched channel — tiering must correct it
+    signal = _snipe_signal(discord_channel="#near-entry-watch")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["final_discord_channel"] == "#snipe-signals"
+    assert result["final_signal"]["discord_channel"] == "#snipe-signals"
+
+    # STARTER with wrong channel
+    signal = _starter_signal(discord_channel="#snipe-signals")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["final_discord_channel"] == "#starter-signals"
+    assert result["final_signal"]["discord_channel"] == "#starter-signals"
+
+
+# 13. capital_action is always recomputed from final_tier (not trusted from Claude)
+def test_capital_action_recomputed_from_final_tier():
+    # Claude says SNIPE_IT but wrong capital_action
+    signal = _snipe_signal(capital_action="wait_no_capital")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["capital_action"] == "full_quality_allowed"
+    assert result["final_signal"]["capital_action"] == "full_quality_allowed"
+
+    # NEAR_ENTRY that gets forced to WAIT — capital_action must be no_trade
+    signal = _near_entry_signal(missing_conditions=[], upgrade_trigger="none")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["capital_action"] == "no_trade"
+    assert result["final_signal"]["capital_action"] == "no_trade"
+
+
+# 14. rejection_reason contains "semantic_price_sanity_failed" when geometry is rejected
+def test_reason_includes_semantic_sanity_failure_on_geometry_reject():
+    # Impossible geometry: invalidation above trigger
+    signal = _snipe_signal(trigger_level=182.50, invalidation_level=185.00)
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["rejection_reason"] is not None
+    assert "semantic_price_sanity_failed" in result["rejection_reason"], (
+        f"rejection_reason must contain 'semantic_price_sanity_failed', got: {result['rejection_reason']!r}"
+    )
