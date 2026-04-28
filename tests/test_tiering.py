@@ -1124,3 +1124,42 @@ def test_cava_style_damaging_impossible_geometry_forces_wait():
         "CAVA-style damaging acceptance + impossible geometry must produce WAIT, not NEAR_ENTRY"
     )
     assert result["safe_for_alert"] is False
+
+
+# 10.1-13: CAVA live failure mode — valid geometry, confirmed retest/hold, but damaging
+#           current acceptance caps STARTER (the exact live scenario that slipped through)
+def test_cava_style_valid_geometry_but_damaging_current_acceptance_caps_starter():
+    # All geometry is valid: target above trigger, invalidation below trigger, positive R:R.
+    # All confirmations are in place: retest confirmed, hold confirmed.
+    # The sole failure: current price is falling into the zone — red candle, close near lows,
+    # price has not reclaimed or defended the trigger level.
+    # STARTER must NOT remain STARTER when the zone is being actively sold into.
+    signal = _starter_signal(
+        ticker="CAVA",
+        trigger_level=90.00,
+        invalidation_level=85.00,
+        targets=[{"label": "T1", "level": 105.00, "reason": "Prior swing high"}],
+        risk_reward=3.75,
+        retest_status="confirmed",
+        hold_status="confirmed",
+        score=78,
+    )
+    kf = {
+        "current_price": 87.50,          # above invalidation=85.00 but below trigger=90.00
+        "current_bar_direction": "red",
+        "current_close_location_pct": 0.22,  # closing in lower quarter — active selling
+    }
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+
+    assert result["final_tier"] != "STARTER", (
+        "CAVA live failure: valid-geometry STARTER with damaging acceptance must not remain STARTER"
+    )
+    # damaging acceptance (price below trigger, red candle) → caps to NEAR_ENTRY
+    assert result["final_tier"] == "NEAR_ENTRY", (
+        f"STARTER with damaging current acceptance must be capped to NEAR_ENTRY, got {result['final_tier']!r}"
+    )
+    assert result["capital_action"] == "wait_no_capital"
+    assert result["safe_for_alert"] is True
+    assert any("damaging" in d for d in result["downgrades"]), (
+        f"Downgrade reason must mention 'damaging', got: {result['downgrades']}"
+    )
