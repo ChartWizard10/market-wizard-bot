@@ -872,7 +872,8 @@ def test_irdm_style_snipe_downgraded_or_wait_when_current_damage_fields_availabl
         "IRDM-style SNIPE_IT must be capped to WAIT when current_price < invalidation_level"
     )
     assert result["safe_for_alert"] is False
-    assert "semantic_price_sanity_failed" in (result["rejection_reason"] or "")
+    # Phase 10.1: acceptance pre-check fires first (invalidated), not semantic sanity
+    assert "invalidated" in (result["rejection_reason"] or "")
 
 
 # 11. WAIT never posts to Discord (explicit named test)
@@ -931,3 +932,195 @@ def test_reason_includes_semantic_sanity_failure_on_geometry_reject():
     assert "semantic_price_sanity_failed" in result["rejection_reason"], (
         f"rejection_reason must contain 'semantic_price_sanity_failed', got: {result['rejection_reason']!r}"
     )
+
+
+# ===========================================================================
+# Phase 10.1 — Current Acceptance Zone Defense Gate
+# ===========================================================================
+
+def _pf_with_key_features(key_features: dict, vetoes: list | None = None) -> dict:
+    """Build a prefilter result with explicit key_features for acceptance tests."""
+    return {
+        "veto_flags": vetoes or [],
+        "key_features": key_features,
+    }
+
+
+# 10.1-1: invalidated acceptance forces WAIT for SNIPE_IT
+def test_acceptance_invalidated_forces_wait_snipe_it():
+    # Price has traded through the stop — SNIPE_IT must become WAIT
+    signal = _snipe_signal(trigger_level=50.00, invalidation_level=46.00)
+    kf = {"current_price": 45.50}  # below invalidation_level=46.00
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", (
+        f"SNIPE_IT with price below stop must be WAIT, got {result['final_tier']!r}"
+    )
+    assert result["safe_for_alert"] is False
+    assert "invalidated" in (result["rejection_reason"] or "")
+
+
+# 10.1-2: invalidated acceptance forces WAIT for STARTER
+def test_acceptance_invalidated_forces_wait_starter():
+    signal = _starter_signal(trigger_level=50.00, invalidation_level=46.00)
+    kf = {"current_price": 45.90}  # at/below stop
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["safe_for_alert"] is False
+    assert "invalidated" in (result["rejection_reason"] or "")
+
+
+# 10.1-3: invalidated acceptance forces WAIT for NEAR_ENTRY
+def test_acceptance_invalidated_forces_wait_near_entry():
+    # NEAR_ENTRY with a concrete invalidation level set — price trades through it
+    signal = _near_entry_signal(
+        trigger_level=50.00,
+        invalidation_level=46.00,
+        missing_conditions=["retest_status"],
+        upgrade_trigger="Confirmed retest of zone",
+    )
+    kf = {"current_price": 45.00}  # below stop
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", (
+        "NEAR_ENTRY with price below stop must be WAIT"
+    )
+    assert "invalidated" in (result["rejection_reason"] or "")
+
+
+# 10.1-4: damaging acceptance caps SNIPE_IT to NEAR_ENTRY (valid geometry)
+def test_acceptance_damaging_caps_snipe_it_to_near_entry():
+    # Price is below trigger but above stop → zone is being tested, not confirmed
+    signal = _snipe_signal(trigger_level=50.00, invalidation_level=46.00)
+    kf = {"current_price": 48.50}  # below trigger=50.00, above stop=46.00
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY", (
+        f"SNIPE_IT with price below trigger must be capped to NEAR_ENTRY, got {result['final_tier']!r}"
+    )
+    assert result["safe_for_alert"] is True
+    assert "damaging" in " ".join(result["downgrades"])
+
+
+# 10.1-5: damaging acceptance caps STARTER to NEAR_ENTRY (valid geometry)
+def test_acceptance_damaging_caps_starter_to_near_entry():
+    signal = _starter_signal(trigger_level=50.00, invalidation_level=46.00)
+    kf = {"current_price": 48.00}  # below trigger
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert "damaging" in " ".join(result["downgrades"])
+
+
+# 10.1-6: damaging acceptance with impossible geometry forces WAIT (not NEAR_ENTRY)
+def test_acceptance_damaging_with_impossible_geometry_forces_wait():
+    # Price below trigger (damaging) AND target is below trigger (impossible geometry)
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=95.00,
+        targets=[{"label": "T1", "level": 90.00, "reason": "Below entry — impossible"}],
+        risk_reward=3.5,
+    )
+    kf = {"current_price": 98.00, "current_bar_direction": "red", "current_close_location_pct": 0.20}
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", (
+        "damaging acceptance + impossible geometry must produce WAIT, not NEAR_ENTRY"
+    )
+    assert "damaging" in (result["rejection_reason"] or "")
+
+
+# 10.1-7: unproven acceptance blocks SNIPE_IT but STARTER survives cascade
+def test_acceptance_unproven_blocks_snipe_but_not_starter():
+    # trigger_level=None → _classify_current_acceptance returns 'unproven'
+    # This adds a failure to _snipe_gate_failures only, not _starter_gate_failures.
+    # score=90 passes STARTER min=75, so cascade lands at STARTER.
+    signal = _snipe_signal(score=90, trigger_level=None)
+    kf = {"current_price": 182.00, "current_bar_direction": "unknown"}
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER", (
+        f"unproven acceptance must cascade SNIPE_IT → STARTER, got {result['final_tier']!r}"
+    )
+    assert any("unproven" in d for d in result["downgrades"])
+
+
+# 10.1-8: accepted acceptance allows SNIPE_IT through
+def test_acceptance_accepted_allows_snipe_it():
+    # Price above trigger, green candle — zone is being actively defended
+    signal = _snipe_signal(trigger_level=50.00, invalidation_level=46.00)
+    kf = {
+        "current_price": 52.00,  # above trigger
+        "current_bar_direction": "green",
+        "current_close_location_pct": 0.80,
+    }
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT", (
+        f"accepted acceptance must not downgrade SNIPE_IT, got {result['final_tier']!r}"
+    )
+
+
+# 10.1-9: unknown acceptance (no current data) does not force any downgrade
+def test_acceptance_unknown_no_forced_downgrade():
+    # _pf() has no key_features → current_price is None → acceptance='unknown'
+    signal = _snipe_signal()
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT", (
+        "Missing current price data must not downgrade a valid SNIPE_IT"
+    )
+
+
+# 10.1-10: FORM-style — active selling into zone caps SNIPE_IT to NEAR_ENTRY
+def test_form_style_selling_into_zone_capped_to_near_entry():
+    # FORM: strong red candle, close in bottom quarter, price below trigger
+    signal = _snipe_signal(
+        ticker="FORM",
+        trigger_level=30.00,
+        invalidation_level=27.00,
+        targets=[{"label": "T1", "level": 38.00, "reason": "Prior swing high"}],
+        risk_reward=3.5,
+    )
+    kf = {
+        "current_price": 28.50,        # below trigger=30.00
+        "current_bar_direction": "red",
+        "current_close_location_pct": 0.18,  # closing near lows = strong rejection
+    }
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY", (
+        "FORM-style active zone selling must cap SNIPE_IT to NEAR_ENTRY"
+    )
+    assert result["capital_action"] == "wait_no_capital"
+
+
+# 10.1-11: VFC-style — price already through stop forces WAIT
+def test_vfc_style_price_through_stop_forced_wait():
+    signal = _snipe_signal(
+        ticker="VFC",
+        trigger_level=20.00,
+        invalidation_level=17.50,
+        targets=[{"label": "T1", "level": 26.00, "reason": "Resistance level"}],
+        risk_reward=3.5,
+    )
+    kf = {"current_price": 17.20}  # below invalidation_level=17.50
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", (
+        "VFC-style: price through stop must force WAIT"
+    )
+    assert result["safe_for_alert"] is False
+    assert result["capital_action"] == "no_trade"
+
+
+# 10.1-12: CAVA-style — damaging + impossible geometry → WAIT (not NEAR_ENTRY)
+def test_cava_style_damaging_impossible_geometry_forces_wait():
+    # CAVA: price below trigger (damaging) AND first target is below trigger (impossible)
+    signal = _snipe_signal(
+        ticker="CAVA",
+        trigger_level=120.00,
+        invalidation_level=114.00,
+        targets=[{"label": "T1", "level": 110.00, "reason": "Wrong direction target"}],
+        risk_reward=3.5,
+    )
+    kf = {
+        "current_price": 117.00,       # below trigger=120.00 → damaging
+        "current_bar_direction": "red",
+        "current_close_location_pct": 0.15,
+    }
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", (
+        "CAVA-style damaging acceptance + impossible geometry must produce WAIT, not NEAR_ENTRY"
+    )
+    assert result["safe_for_alert"] is False

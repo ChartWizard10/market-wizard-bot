@@ -581,9 +581,17 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
     rr = estimate_rr(cur, targets, invalidation)
     volume = assess_volume(df, config)
 
+    prev_close: float | None = None
+    if len(df) >= 2:
+        prev_close = round(float(df["close"].iloc[-2]), 4)
+
     return {
         "ticker": ticker,
         "current_price": cur,
+        "current_open": round(float(df["open"].iloc[-1]), 4),
+        "current_high": round(float(df["high"].iloc[-1]), 4),
+        "current_low": round(float(df["low"].iloc[-1]), 4),
+        "previous_close": prev_close,
         # SMA / value
         "sma20": smas["sma20"],
         "sma50": smas["sma50"],
