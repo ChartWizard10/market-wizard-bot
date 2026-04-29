@@ -40,6 +40,15 @@ _CAPITAL_LABEL = {
     "no_trade":             "NO TRADE",
 }
 
+# Deterministic tier action label — overrides any Claude-sourced tier prose.
+# This ensures alert text matches final_tier regardless of Claude's reason field.
+_TIER_ACTION_LABEL = {
+    "SNIPE_IT":   "All SNIPE_IT conditions met.",
+    "STARTER":    "All STARTER conditions met.",
+    "NEAR_ENTRY": "NEAR_ENTRY conditions met; wait for missing confirmations.",
+    "WAIT":       "WAIT — no actionable setup.",
+}
+
 _MENTION_RE = re.compile(r"@(everyone|here)", re.IGNORECASE)
 _ROLE_USER_MENTION_RE = re.compile(r"<@[!&]?\d+>")
 
@@ -144,8 +153,15 @@ def format_alert(
     upgrade_trigger    = _sanitize(str(signal.get("upgrade_trigger", "—")))
     targets            = signal.get("targets", [])
 
-    badge         = _TIER_BADGE.get(final_tier, final_tier)
-    capital_label = _CAPITAL_LABEL.get(capital_action, capital_action)
+    # Phase 11: freshness fields (snapshot_only in current architecture)
+    scan_price      = signal.get("scan_price")
+    drift_status    = _sanitize(str(signal.get("drift_status", "unknown")))
+    drift_pct_raw   = signal.get("drift_pct", 0.0)
+    freshness_note  = _sanitize(str(signal.get("freshness_note", "")))
+
+    badge              = _TIER_BADGE.get(final_tier, final_tier)
+    capital_label      = _CAPITAL_LABEL.get(capital_action, capital_action)
+    tier_action_label  = _TIER_ACTION_LABEL.get(final_tier, f"Tier: {final_tier}")
 
     rr_str = f"{float(risk_reward):.2f}" if risk_reward is not None else "—"
 
@@ -182,9 +198,30 @@ def format_alert(
     lines += [
         "──────────────────────────────",
         "ACTION",
+        f"  {tier_action_label}",
         f"  {capital_label}",
         f"  Next: {next_action}",
         f"  Why:  {reason}",
+    ]
+
+    # FRESHNESS block — always present; snapshot_only when no live recheck price
+    lines += [
+        "──────────────────────────────",
+        "FRESHNESS",
+        f"  Scan Price: {_fmt_level(scan_price)}",
+    ]
+    if drift_status not in ("snapshot_only", "unknown") and drift_pct_raw != 0.0:
+        try:
+            dp = float(drift_pct_raw)
+            sign = "+" if dp > 0 else ""
+            lines.append(f"  Drift:      {sign}{dp:.2f}%")
+        except (TypeError, ValueError):
+            pass
+    lines.append(f"  Status:     {drift_status}")
+    if freshness_note:
+        lines.append(f"  Note:       {freshness_note}")
+
+    lines += [
         "──────────────────────────────",
         "META",
     ]
