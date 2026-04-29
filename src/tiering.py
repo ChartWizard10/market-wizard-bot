@@ -125,6 +125,7 @@ def _snipe_gate_failures(
     score: int,
     config: dict,
     current_price: float | None = None,
+    key_features: dict | None = None,
 ) -> list[str]:
     tier_cfg = config.get("tiers", {}).get("snipe_it", {})
     min_score = tier_cfg.get("min_score", 85)
@@ -134,6 +135,12 @@ def _snipe_gate_failures(
 
     if score < min_score:
         failures.append(f"score={score} < snipe_min_score={min_score}")
+
+    # Unproven acceptance blocks SNIPE_IT — cascade will try STARTER next.
+    # STARTER does not run this check, so unproven alone cannot suppress STARTER.
+    acceptance = _classify_current_acceptance(signal, key_features or {})
+    if acceptance == "unproven":
+        failures.append("current_acceptance=unproven (zone defense unconfirmed for SNIPE_IT)")
 
     return failures
 
@@ -265,6 +272,72 @@ def _semantic_price_sanity_failures(
 
 
 # ---------------------------------------------------------------------------
+# Current acceptance classification
+# ---------------------------------------------------------------------------
+
+def _classify_current_acceptance(signal: dict, key_features: dict) -> str:
+    """Classify live price action relative to the signal's zone.
+
+    Returns: accepted | unproven | damaging | invalidated | unknown
+
+    'unknown' means no current price data — callers must NOT downgrade on unknown.
+    'unproven' means data exists but zone defense is inconclusive — blocks SNIPE_IT only.
+    """
+    current_price = key_features.get("current_price")
+    if current_price is None:
+        return "unknown"
+
+    try:
+        cp = float(current_price)
+    except (TypeError, ValueError):
+        return "unknown"
+
+    trigger = signal.get("trigger_level")
+    invalidation = signal.get("invalidation_level")
+    bar_dir = key_features.get("current_bar_direction", "unknown")
+    close_loc = key_features.get("current_close_location_pct")
+
+    # Invalidated: price at or below the stop level
+    if invalidation is not None:
+        try:
+            if cp <= float(invalidation):
+                return "invalidated"
+        except (TypeError, ValueError):
+            pass
+
+    # Without a trigger level we cannot assess entry acceptance
+    if trigger is None:
+        # Strong rejection candle is still damaging even without a trigger reference
+        if bar_dir == "red" and close_loc is not None:
+            try:
+                if float(close_loc) < 0.25:
+                    return "damaging"
+            except (TypeError, ValueError):
+                pass
+        return "unproven"
+
+    try:
+        trig = float(trigger)
+    except (TypeError, ValueError):
+        return "unproven"
+
+    # Price has not reached the entry trigger
+    if cp < trig:
+        return "damaging"
+
+    # Price at/above trigger — check for strong rejection candle
+    if bar_dir == "red" and close_loc is not None:
+        try:
+            if float(close_loc) < 0.25:
+                return "damaging"
+        except (TypeError, ValueError):
+            pass
+
+    # Price at/above trigger with no rejection signal
+    return "accepted"
+
+
+# ---------------------------------------------------------------------------
 # Downgrade cascade
 # ---------------------------------------------------------------------------
 
@@ -275,6 +348,7 @@ def _determine_final_tier(
     score: int,
     config: dict,
     current_price: float | None = None,
+    key_features: dict | None = None,
 ) -> tuple[str, list[str], list[str]]:
     """Return (final_tier, downgrades, notes).
 
@@ -282,6 +356,7 @@ def _determine_final_tier(
     """
     downgrades: list[str] = []
     notes: list[str] = []
+    kf = key_features or {}
 
     if claude_tier not in TIERS:
         notes.append(f"unknown tier {claude_tier!r} — forced to WAIT")
@@ -304,9 +379,31 @@ def _determine_final_tier(
         downgrades.append(f"{claude_tier}→WAIT: structure_event=none (no clear structure)")
         return "WAIT", downgrades, notes
 
+    # Acceptance pre-check: live price action vs the claimed zone
+    acceptance = _classify_current_acceptance(signal, kf)
+
+    if acceptance == "invalidated":
+        # Price is at or below the stop level — position already stopped out
+        downgrades.append(
+            f"{claude_tier}→WAIT: current_acceptance=invalidated (price at/below stop)"
+        )
+        return "WAIT", downgrades, notes
+
+    if acceptance == "damaging" and claude_tier in ("SNIPE_IT", "STARTER"):
+        # Price below trigger or strong rejection candle — cap to NEAR_ENTRY
+        # Only valid if geometry is self-consistent (otherwise WAIT is safer)
+        geo_failures = _semantic_price_sanity_failures(signal, current_price)
+        if geo_failures:
+            downgrades.append(
+                f"{claude_tier}→WAIT: current_acceptance=damaging with impossible geometry"
+            )
+            return "WAIT", downgrades, notes
+        downgrades.append(f"{claude_tier}→NEAR_ENTRY: current_acceptance=damaging")
+        return "NEAR_ENTRY", downgrades, notes
+
     # ---- SNIPE_IT path ----
     if claude_tier == "SNIPE_IT":
-        snipe_failures = _snipe_gate_failures(signal, prefilter_vetoes, score, config, current_price)
+        snipe_failures = _snipe_gate_failures(signal, prefilter_vetoes, score, config, current_price, kf)
         if not snipe_failures:
             return "SNIPE_IT", downgrades, notes
 
@@ -426,10 +523,10 @@ def validate(
 
     prefilter_vetoes: list = (prefilter_result or {}).get("veto_flags", [])
 
-    # Extract current_price from prefilter key_features if available.
-    # Used by _semantic_price_sanity_failures to detect already-stopped-out positions.
+    # Extract key_features for acceptance and semantic sanity checks.
+    key_features: dict = (prefilter_result or {}).get("key_features", {})
     current_price: float | None = None
-    cp_raw = (prefilter_result or {}).get("key_features", {}).get("current_price")
+    cp_raw = key_features.get("current_price")
     if cp_raw is not None:
         try:
             current_price = float(cp_raw)
@@ -437,7 +534,7 @@ def validate(
             pass
 
     final_tier, downgrades, notes = _determine_final_tier(
-        claude_tier, raw_signal, prefilter_vetoes, score, config, current_price
+        claude_tier, raw_signal, prefilter_vetoes, score, config, current_price, key_features
     )
 
     # applied_vetoes: prefilter vetoes + signal-derived vetoes (deduplicated)

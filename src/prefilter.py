@@ -290,6 +290,68 @@ def apply_hard_vetoes(enriched: dict, config: dict) -> list[str]:
 # Single-ticker prefilter result
 # ---------------------------------------------------------------------------
 
+def _build_key_features(enriched: dict) -> dict:
+    """Assemble key_features dict forwarded to tiering. Includes current OHLC acceptance data."""
+    cp = (
+        enriched.get("current_price")
+        or enriched.get("latest_close")
+        or enriched.get("close")
+    )
+    co = enriched.get("current_open")
+    ch = enriched.get("current_high")
+    cl = enriched.get("current_low")
+    pc = enriched.get("previous_close")
+
+    change_pct: float | None = None
+    if cp is not None and pc is not None and pc != 0:
+        try:
+            change_pct = round((float(cp) - float(pc)) / float(pc) * 100, 3)
+        except (TypeError, ValueError):
+            pass
+
+    bar_dir = "unknown"
+    if cp is not None and co is not None:
+        try:
+            fcp, fco = float(cp), float(co)
+            if fcp > fco:
+                bar_dir = "green"
+            elif fcp < fco:
+                bar_dir = "red"
+            else:
+                bar_dir = "flat"
+        except (TypeError, ValueError):
+            pass
+
+    close_loc: float | None = None
+    if cp is not None and ch is not None and cl is not None:
+        try:
+            fcp, fch, fcl = float(cp), float(ch), float(cl)
+            rng = fch - fcl
+            if rng > 0:
+                close_loc = round((fcp - fcl) / rng, 3)
+        except (TypeError, ValueError):
+            pass
+
+    return {
+        "sma_value_alignment": enriched.get("sma_value_alignment"),
+        "structure_event": enriched.get("structure_event"),
+        "zone_quality": _zone_label(enriched),
+        "retest_status": enriched.get("retest_status"),
+        "overhead_status": enriched.get("overhead_status"),
+        "estimated_rr": enriched.get("estimated_rr"),
+        "volume_behavior": enriched.get("volume_behavior"),
+        "price_extension_pct": enriched.get("price_extension_from_sma20_pct"),
+        "current_price": cp,
+        "current_open": co,
+        "current_high": ch,
+        "current_low": cl,
+        "previous_close": pc,
+        "current_change_pct": change_pct,
+        "current_bar_direction": bar_dir,
+        "current_close_location_pct": close_loc,
+    }
+
+
 def score_ticker(enriched: dict, config: dict) -> dict:
     """Score and veto a single ticker. Returns full prefilter result dict.
 
@@ -333,21 +395,7 @@ def score_ticker(enriched: dict, config: dict) -> dict:
         "eligible_for_claude": eligible,
         "rejection_reason": rejection_reason,
         "ranking_reason": _ranking_summary(enriched, score, vetoes),
-        "key_features": {
-            "sma_value_alignment": enriched.get("sma_value_alignment"),
-            "structure_event": enriched.get("structure_event"),
-            "zone_quality": _zone_label(enriched),
-            "retest_status": enriched.get("retest_status"),
-            "overhead_status": enriched.get("overhead_status"),
-            "estimated_rr": enriched.get("estimated_rr"),
-            "volume_behavior": enriched.get("volume_behavior"),
-            "price_extension_pct": enriched.get("price_extension_from_sma20_pct"),
-            "current_price": (
-                enriched.get("current_price")
-                or enriched.get("latest_close")
-                or enriched.get("close")
-            ),
-        },
+        "key_features": _build_key_features(enriched),
     }
 
 
