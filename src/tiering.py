@@ -549,6 +549,41 @@ def validate(
     final_signal["discord_channel"] = CHANNEL_MAP[final_tier]
     final_signal["capital_action"] = CAPITAL_MAP[final_tier]
 
+    # Phase 11: Freshness/drift fields — snapshot_only architecture.
+    # scan_price is the last close at scan time (from prefilter key_features).
+    # No live re-fetch occurs between scan and alert send.
+    # TODO: !recheck TICKER command can refresh these fields post-alert.
+    final_signal["scan_price"] = current_price
+    if current_price is not None:
+        try:
+            trig = final_signal.get("trigger_level")
+            if trig is not None:
+                final_signal["price_distance_to_trigger_pct"] = round(
+                    (float(current_price) - float(trig)) / abs(float(trig)) * 100, 3
+                )
+            else:
+                final_signal["price_distance_to_trigger_pct"] = None
+        except (TypeError, ValueError, ZeroDivisionError):
+            final_signal["price_distance_to_trigger_pct"] = None
+        try:
+            inval = final_signal.get("invalidation_level")
+            if inval is not None:
+                final_signal["price_distance_to_invalidation_pct"] = round(
+                    (float(current_price) - float(inval)) / abs(float(inval)) * 100, 3
+                )
+            else:
+                final_signal["price_distance_to_invalidation_pct"] = None
+        except (TypeError, ValueError, ZeroDivisionError):
+            final_signal["price_distance_to_invalidation_pct"] = None
+    else:
+        final_signal["price_distance_to_trigger_pct"] = None
+        final_signal["price_distance_to_invalidation_pct"] = None
+    final_signal["drift_status"] = "snapshot_only"
+    final_signal["drift_pct"] = 0.0
+    final_signal["freshness_note"] = (
+        "Signal based on scan-time price; verify live chart before entry."
+    )
+
     safe_for_alert = final_tier != "WAIT"
 
     rejection_reason: str | None = None

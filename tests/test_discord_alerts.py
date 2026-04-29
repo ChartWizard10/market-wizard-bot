@@ -44,6 +44,13 @@ def _tiering_result(tier="SNIPE_IT", score=88, safe=True, **signal_overrides) ->
         "discord_channel": "#snipe-signals",
         "capital_action": "full_quality_allowed",
         "reason": "Clean MSS with FVG retest confirmed.",
+        # Phase 11 freshness fields (mirroring what tiering.validate() now adds)
+        "scan_price": 182.50,
+        "drift_status": "snapshot_only",
+        "drift_pct": 0.0,
+        "freshness_note": "Signal based on scan-time price; verify live chart before entry.",
+        "price_distance_to_trigger_pct": 0.0,
+        "price_distance_to_invalidation_pct": 2.41,
     }
     signal.update(signal_overrides)
     return {
@@ -415,3 +422,319 @@ def test_send_alert_posts_multiple_chunks_for_long_message():
     assert result["sent"] is True
     assert result["message_count"] >= 2
     assert channel.send.call_count == result["message_count"]
+
+
+# ===========================================================================
+# Phase 11 — Alert Freshness + Drift Layer
+# ===========================================================================
+
+import pytest
+
+
+# 11-1: FRESHNESS block includes scan_price when available
+def test_alert_includes_scan_price_when_current_price_available():
+    tr = _tiering_result(tier="SNIPE_IT", scan_price=182.50)
+    text = format_alert(tr)
+    assert "FRESHNESS" in text
+    assert "Scan Price:" in text
+    assert "182.50" in text
+
+
+# 11-2: drift_status=snapshot_only when no live recheck price (current architecture)
+def test_alert_freshness_snapshot_only_when_no_live_recheck_price():
+    tr = _tiering_result(tier="SNIPE_IT", drift_status="snapshot_only", drift_pct=0.0)
+    text = format_alert(tr)
+    assert "snapshot_only" in text
+    assert "verify live chart" in text.lower() or "scan-time" in text.lower()
+
+
+# 11-3: future — drift_status=invalidated if live price available
+@pytest.mark.skip(
+    reason="TODO: Requires live post-scan recheck price. "
+    "Currently snapshot_only only. Implement when !recheck TICKER is built."
+)
+def test_drift_status_invalidated_when_current_price_below_invalidation_if_live_price_available():
+    pass
+
+
+# 11-4: future — drift_status=degraded if live price moves below trigger
+@pytest.mark.skip(
+    reason="TODO: Requires live post-scan recheck price. "
+    "Currently snapshot_only only. Implement when !recheck TICKER is built."
+)
+def test_drift_status_degraded_when_current_price_moves_below_trigger_if_live_price_available():
+    pass
+
+
+# 11-5: future — drift_status=extended if live price near T1
+@pytest.mark.skip(
+    reason="TODO: Requires live post-scan recheck price. "
+    "Currently snapshot_only only. Implement when !recheck TICKER is built."
+)
+def test_drift_status_extended_when_price_near_target_if_live_price_available():
+    pass
+
+
+# 11-6: STARTER alert must not say "All SNIPE_IT conditions met." in the ACTION block
+def test_starter_alert_does_not_say_all_snipe_conditions_met():
+    tr = _tiering_result(
+        tier="STARTER",
+        capital_action="starter_only",
+        # Claude's reason deliberately does NOT say SNIPE_IT (well-behaved case)
+        reason="Partial zone interaction — reduced size warranted.",
+    )
+    tr["final_tier"] = "STARTER"
+    tr["capital_action"] = "starter_only"
+    text = format_alert(tr)
+    # Deterministic tier label must say STARTER
+    assert "All STARTER conditions met." in text
+    # SNIPE_IT label must NOT appear in this STARTER alert
+    assert "All SNIPE_IT conditions met." not in text
+
+
+# 11-7: SNIPE_IT alert correctly shows "All SNIPE_IT conditions met."
+def test_snipe_alert_says_all_snipe_conditions_met():
+    tr = _tiering_result(tier="SNIPE_IT", reason="Clean zone defense, full quality.")
+    text = format_alert(tr)
+    assert "All SNIPE_IT conditions met." in text
+    assert "All STARTER conditions met." not in text
+
+
+# 11-8: NEAR_ENTRY alert uses NEAR_ENTRY action language
+def test_near_entry_alert_uses_near_entry_language():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_status"],
+        upgrade_trigger="Confirmed retest",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "NEAR_ENTRY conditions met; wait for missing confirmations." in text
+
+
+# 11-9: WAIT never posts — but if format_alert called directly it shows WAIT language
+def test_wait_alert_uses_wait_language_or_does_not_post():
+    tr = _tiering_result(tier="WAIT", safe=False)
+    tr["final_tier"] = "WAIT"
+    tr["safe_for_alert"] = False
+    # WAIT never posts via send_alert (tested elsewhere)
+    # If format_alert called directly, tier action label must be WAIT
+    text = format_alert(tr)
+    assert "WAIT — no actionable setup." in text
+    # send_alert blocks WAIT
+    bot = MagicMock()
+    bot.get_channel = MagicMock()
+    cfg = _config()
+    result = _run(send_alert(tr, None, bot, cfg))
+    assert result["sent"] is False
+
+
+# 11-10: final_tier controls ACTION label regardless of what Claude wrote in reason
+def test_final_tier_controls_alert_language_not_claude_reason():
+    # Claude wrote SNIPE_IT language in reason, but final_tier is STARTER
+    tr = _tiering_result(
+        tier="STARTER",
+        capital_action="starter_only",
+        reason="All SNIPE_IT conditions met — execute at full quality.",
+    )
+    tr["final_tier"] = "STARTER"
+    tr["capital_action"] = "starter_only"
+    text = format_alert(tr)
+    # Deterministic label must be STARTER (from final_tier)
+    assert "All STARTER conditions met." in text
+    # The badge must say STARTER too
+    assert "🟡 STARTER" in text
+
+
+# 11-11: Phase 10 semantic price sanity gates still pass (regression)
+def test_phase10_semantic_price_sanity_still_passes():
+    from src.tiering import validate
+    signal = {
+        "ticker": "JBHT",
+        "tier": "STARTER",
+        "score": 78,
+        "setup_family": "continuation",
+        "structure_event": "BOS",
+        "trend_state": "fresh_expansion",
+        "sma_value_alignment": "supportive",
+        "zone_type": "OB",
+        "trigger_level": 182.50,
+        "retest_status": "confirmed",
+        "hold_status": "confirmed",
+        "invalidation_condition": "Below OB base",
+        "invalidation_level": 178.20,
+        "targets": [{"label": "T1", "level": 195.00, "reason": "Prior swing high"}],
+        "risk_reward": 3.5,
+        "overhead_status": "clear",
+        "forced_participation": "none",
+        "missing_conditions": [],
+        "upgrade_trigger": "none",
+        "next_action": "Enter at retest",
+        "discord_channel": "#starter-signals",
+        "capital_action": "starter_only",
+        "reason": "BOS confirmed with OB retest and hold.",
+    }
+    config = {
+        "tiers": {
+            "snipe_it": {"min_score": 85, "min_rr": 3.0},
+            "starter":  {"min_score": 75, "min_rr": 3.0},
+            "near_entry": {"min_score": 60},
+        }
+    }
+    result = validate(signal, {"veto_flags": []}, config)
+    assert result["final_tier"] == "STARTER"
+    assert result["safe_for_alert"] is True
+
+
+# 11-12: JBHT-style valid STARTER still preserved with freshness fields present
+def test_jbht_style_starter_still_preserved():
+    from src.tiering import validate
+    signal = {
+        "ticker": "JBHT",
+        "tier": "STARTER",
+        "score": 78,
+        "setup_family": "continuation",
+        "structure_event": "BOS",
+        "trend_state": "fresh_expansion",
+        "sma_value_alignment": "supportive",
+        "zone_type": "OB",
+        "trigger_level": 182.50,
+        "retest_status": "confirmed",
+        "hold_status": "confirmed",
+        "invalidation_condition": "Below OB base",
+        "invalidation_level": 178.20,
+        "targets": [{"label": "T1", "level": 195.00, "reason": "Prior swing high"}],
+        "risk_reward": 3.5,
+        "overhead_status": "clear",
+        "forced_participation": "none",
+        "missing_conditions": [],
+        "upgrade_trigger": "none",
+        "next_action": "Enter at retest",
+        "discord_channel": "#starter-signals",
+        "capital_action": "starter_only",
+        "reason": "BOS confirmed with OB retest and hold.",
+    }
+    config = {
+        "tiers": {
+            "snipe_it": {"min_score": 85, "min_rr": 3.0},
+            "starter":  {"min_score": 75, "min_rr": 3.0},
+            "near_entry": {"min_score": 60},
+        }
+    }
+    pf = {
+        "veto_flags": [],
+        "key_features": {"current_price": 182.50},
+    }
+    result = validate(signal, pf, config)
+    assert result["final_tier"] == "STARTER"
+    # Phase 11 freshness fields must be present in final_signal
+    fs = result["final_signal"]
+    assert fs.get("scan_price") == 182.50
+    assert fs.get("drift_status") == "snapshot_only"
+    assert fs.get("drift_pct") == 0.0
+    assert "scan-time" in fs.get("freshness_note", "")
+    assert fs.get("price_distance_to_trigger_pct") == 0.0
+
+
+# 11-13: CRNT-style alert shows snapshot_only with operator verification note
+def test_crnt_style_snapshot_only_warns_operator_to_verify_live_chart():
+    tr = _tiering_result(
+        tier="STARTER",
+        ticker="CRNT",
+        capital_action="starter_only",
+        scan_price=2.50,
+        drift_status="snapshot_only",
+        freshness_note="Signal based on scan-time price; verify live chart before entry.",
+    )
+    tr["final_tier"] = "STARTER"
+    tr["capital_action"] = "starter_only"
+    text = format_alert(tr)
+    assert "FRESHNESS" in text
+    assert "2.50" in text
+    assert "snapshot_only" in text
+    assert "verify live chart before entry" in text.lower()
+
+
+# 11-14: discord_channel still recomputed from final_tier (not Claude's field)
+def test_discord_channel_still_recomputed_from_final_tier():
+    from src.tiering import validate
+    signal = {
+        "ticker": "AAPL",
+        "tier": "SNIPE_IT",
+        "score": 90,
+        "setup_family": "continuation",
+        "structure_event": "MSS",
+        "trend_state": "fresh_expansion",
+        "sma_value_alignment": "supportive",
+        "zone_type": "FVG",
+        "trigger_level": 182.50,
+        "retest_status": "confirmed",
+        "hold_status": "confirmed",
+        "invalidation_condition": "Below FVG base",
+        "invalidation_level": 178.20,
+        "targets": [{"label": "T1", "level": 195.00, "reason": "Swing high"}],
+        "risk_reward": 3.5,
+        "overhead_status": "clear",
+        "forced_participation": "none",
+        "missing_conditions": [],
+        "upgrade_trigger": "none",
+        "next_action": "Enter at retest",
+        "discord_channel": "#near-entry-watch",   # Claude mismatch — must be corrected
+        "capital_action": "full_quality_allowed",
+        "reason": "Full quality setup.",
+    }
+    config = {
+        "tiers": {
+            "snipe_it": {"min_score": 85, "min_rr": 3.0},
+            "starter":  {"min_score": 75, "min_rr": 3.0},
+            "near_entry": {"min_score": 60},
+        }
+    }
+    result = validate(signal, {"veto_flags": []}, config)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["final_discord_channel"] == "#snipe-signals"
+    assert result["final_signal"]["discord_channel"] == "#snipe-signals"
+
+
+# 11-15: capital_action still recomputed from final_tier (not Claude's field)
+def test_capital_action_still_recomputed_from_final_tier():
+    from src.tiering import validate
+    signal = {
+        "ticker": "AAPL",
+        "tier": "SNIPE_IT",
+        "score": 90,
+        "setup_family": "continuation",
+        "structure_event": "MSS",
+        "trend_state": "fresh_expansion",
+        "sma_value_alignment": "supportive",
+        "zone_type": "FVG",
+        "trigger_level": 182.50,
+        "retest_status": "confirmed",
+        "hold_status": "confirmed",
+        "invalidation_condition": "Below FVG base",
+        "invalidation_level": 178.20,
+        "targets": [{"label": "T1", "level": 195.00, "reason": "Swing high"}],
+        "risk_reward": 3.5,
+        "overhead_status": "clear",
+        "forced_participation": "none",
+        "missing_conditions": [],
+        "upgrade_trigger": "none",
+        "next_action": "Enter at retest",
+        "discord_channel": "#snipe-signals",
+        "capital_action": "wait_no_capital",   # Claude mismatch — must be corrected
+        "reason": "Full quality setup.",
+    }
+    config = {
+        "tiers": {
+            "snipe_it": {"min_score": 85, "min_rr": 3.0},
+            "starter":  {"min_score": 75, "min_rr": 3.0},
+            "near_entry": {"min_score": 60},
+        }
+    }
+    result = validate(signal, {"veto_flags": []}, config)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["capital_action"] == "full_quality_allowed"
+    assert result["final_signal"]["capital_action"] == "full_quality_allowed"
