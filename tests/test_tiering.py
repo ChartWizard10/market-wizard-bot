@@ -1384,3 +1384,245 @@ def test_12b_snipe_and_starter_gates_unchanged():
         _starter_signal(missing_conditions=[]), _pf(), _BASE_CONFIG
     )
     assert starter_empty_mc["final_tier"] == "STARTER"
+
+
+# ===========================================================================
+# Phase 12C: Risk Realism informational fields
+# ===========================================================================
+
+from src.tiering import _classify_risk_realism
+
+
+# 12C-1: Tiny risk distance → fragile state. Final tier preserved.
+def test_12c_valid_geometry_tiny_stop_gets_fragile_risk_state():
+    # trigger=100.00, invalidation=99.70 → risk_distance=0.30, pct=0.30%
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=99.70,
+        targets=[{"label": "T1", "level": 105.00, "reason": "Prior swing high"}],
+        risk_reward=3.5,
+    )
+    kf = {"current_price": 101.50}
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "fragile"
+    assert "fragile" in fs["risk_realism_note"].lower()
+    # Phase 12C must NOT introduce semantic_price_sanity_failed for valid geometry
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "semantic_price_sanity_failed" not in downgrade_text
+    # Final tier must not be downgraded by Phase 12C alone
+    assert result["final_tier"] == "SNIPE_IT"
+
+
+# 12C-2: Risk distance between 0.35% and 0.75% → tight state.
+def test_12c_valid_geometry_tight_stop_gets_tight_risk_state():
+    # trigger=100.00, invalidation=99.50 → pct=0.50%
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=99.50,
+        targets=[{"label": "T1", "level": 105.00, "reason": "Prior swing high"}],
+        risk_reward=3.5,
+    )
+    kf = {"current_price": 102.00}
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "tight"
+    assert "tight" in fs["risk_realism_note"].lower()
+    assert result["final_tier"] == "SNIPE_IT"
+
+
+# 12C-3: Healthy risk window — risk_distance_pct >= 0.75% AND
+# current_price_to_invalidation_pct >= 1.0%.
+def test_12c_healthy_risk_window_gets_healthy_state():
+    # trigger=100.00, invalidation=98.00 → risk_distance_pct=2.0%
+    # current_price=102.00, cp - invalidation = 4.0, pct = 4.0/102 * 100 = 3.92%
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=98.00,
+        targets=[{"label": "T1", "level": 110.00, "reason": "Prior swing high"}],
+        risk_reward=5.0,
+    )
+    kf = {"current_price": 102.00}
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "healthy"
+    assert "healthy" in fs["risk_realism_note"].lower()
+    assert fs["risk_distance"] == 2.0
+    assert fs["risk_distance_pct"] == 2.0
+
+
+# 12C-4: Missing trigger or invalidation → unknown, no crash, no downgrade.
+def test_12c_missing_fields_gets_unknown_without_downgrade():
+    # NEAR_ENTRY signal with no invalidation_level — should be "unknown"
+    signal = _near_entry_signal(invalidation_level=None)
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "unknown"
+    assert fs["risk_distance"] is None
+    assert fs["risk_distance_pct"] is None
+    # No new hard downgrade caused by risk realism
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "risk_realism" not in downgrade_text.lower()
+    assert "fragile" not in downgrade_text.lower()
+
+
+# 12C-5: Impossible geometry still produces canonical semantic_price_sanity_failed.
+# Phase 12C must NOT replace or compete with that rejection reason. risk_realism
+# may still mark the state as "invalid" informationally.
+def test_12c_impossible_geometry_still_uses_semantic_price_sanity_failed():
+    # invalidation=105.00 >= trigger=100.00 → impossible bullish geometry
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=105.00,
+        targets=[{"label": "T1", "level": 110.00, "reason": "Prior swing high"}],
+        risk_reward=3.5,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    # Canonical rejection reason still mentions semantic_price_sanity_failed
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "semantic_price_sanity_failed" in downgrade_text, (
+        f"Phase 10 semantic gate must own impossible-geometry rejection. "
+        f"Got downgrades: {result.get('downgrades')!r}"
+    )
+    # Final tier WAIT
+    assert result["final_tier"] == "WAIT"
+    # Phase 12C marks informationally — but does not own the rejection
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "invalid"
+
+
+# 12C-6: JBHT-style valid STARTER must remain STARTER. risk_realism is
+# informational and does not change tier or capital action.
+def test_12c_risk_realism_does_not_change_jbht_style_starter():
+    # JBHT: trigger=190.00, invalidation=185.50 → risk_distance_pct ≈ 2.37% → healthy
+    signal = _starter_signal(
+        ticker="JBHT",
+        structure_event="BOS",
+        setup_family="continuation",
+        trend_state="mature_continuation",
+        trigger_level=190.00,
+        invalidation_level=185.50,
+        targets=[{"label": "T1", "level": 205.00, "reason": "Prior swing high cluster"}],
+        risk_reward=3.2,
+        overhead_status="moderate",
+        retest_status="confirmed",
+        hold_status="confirmed",
+        sma_value_alignment="supportive",
+        score=78,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["capital_action"] == "starter_only"
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] in ("healthy", "tight")
+
+
+# 12C-7: Phase 10/10.1 regression — FORM/VFC/CAVA/JBHT scenarios still pass.
+# This test re-runs the canonical Phase 10/10.1 fixtures alongside Phase 12C
+# to prove that adding the risk_realism informational fields did not regress
+# any existing semantic gate or current-acceptance behavior.
+def test_12c_phase_10_1_form_vfc_cava_tests_still_pass():
+    # FORM-style: SNIPE with selling-into-zone (damaging) + valid geometry → NEAR_ENTRY cap
+    form_signal = _snipe_signal(
+        ticker="FORM",
+        trigger_level=50.00,
+        invalidation_level=46.00,
+        targets=[{"label": "T1", "level": 60.00, "reason": "Prior swing high"}],
+        risk_reward=3.0,
+        retest_status="confirmed",
+        hold_status="confirmed",
+    )
+    form_kf = {
+        "current_price": 47.50,
+        "current_bar_direction": "red",
+        "current_close_location_pct": 0.18,
+    }
+    form_result = validate(form_signal, _pf_with_key_features(form_kf), _BASE_CONFIG)
+    assert form_result["final_tier"] == "NEAR_ENTRY", (
+        "FORM-style damaging acceptance with valid geometry must cap to NEAR_ENTRY"
+    )
+
+    # VFC-style: price already through stop → WAIT
+    vfc_signal = _snipe_signal(
+        ticker="VFC",
+        trigger_level=15.00,
+        invalidation_level=14.20,
+        targets=[{"label": "T1", "level": 18.00, "reason": "Prior swing high"}],
+        risk_reward=3.5,
+    )
+    vfc_kf = {"current_price": 13.80}
+    vfc_result = validate(vfc_signal, _pf_with_key_features(vfc_kf), _BASE_CONFIG)
+    assert vfc_result["final_tier"] == "WAIT", (
+        "VFC-style price-through-stop must force WAIT"
+    )
+
+    # CAVA valid-geometry damaging → STARTER capped to NEAR_ENTRY
+    cava_signal = _starter_signal(
+        ticker="CAVA",
+        trigger_level=90.00,
+        invalidation_level=85.00,
+        targets=[{"label": "T1", "level": 105.00, "reason": "Prior swing high"}],
+        risk_reward=3.75,
+        retest_status="confirmed",
+        hold_status="confirmed",
+        score=78,
+    )
+    cava_kf = {
+        "current_price": 87.50,
+        "current_bar_direction": "red",
+        "current_close_location_pct": 0.22,
+    }
+    cava_result = validate(cava_signal, _pf_with_key_features(cava_kf), _BASE_CONFIG)
+    assert cava_result["final_tier"] == "NEAR_ENTRY", (
+        "CAVA valid-geometry damaging acceptance must cap STARTER to NEAR_ENTRY"
+    )
+
+    # JBHT valid STARTER preserved
+    jbht_signal = _starter_signal(
+        ticker="JBHT",
+        structure_event="BOS",
+        trigger_level=190.00,
+        invalidation_level=185.50,
+        targets=[{"label": "T1", "level": 205.00, "reason": "Prior swing high"}],
+        risk_reward=3.2,
+        overhead_status="moderate",
+        retest_status="confirmed",
+        hold_status="confirmed",
+        sma_value_alignment="supportive",
+        score=78,
+    )
+    jbht_result = validate(jbht_signal, _pf(), _BASE_CONFIG)
+    assert jbht_result["final_tier"] == "STARTER", (
+        "JBHT-style valid STARTER must remain STARTER under Phase 12C"
+    )
+
+
+# 12C-8: Direct unit test for _classify_risk_realism (no validate() coupling).
+def test_12c_classify_risk_realism_direct_units():
+    # Healthy
+    state, note, fields = _classify_risk_realism(100.0, 98.0, 102.0)
+    assert state == "healthy"
+    assert fields["risk_distance"] == 2.0
+    assert fields["risk_distance_pct"] == 2.0
+
+    # Tight
+    state, _, _ = _classify_risk_realism(100.0, 99.50, 101.50)
+    assert state == "tight"
+
+    # Fragile
+    state, _, _ = _classify_risk_realism(100.0, 99.80, 101.0)
+    assert state == "fragile"
+
+    # Invalid (impossible geometry — Phase 10 owns rejection, Phase 12C labels)
+    state, note, _ = _classify_risk_realism(100.0, 105.0, 101.0)
+    assert state == "invalid"
+    assert "semantic gate owns rejection" in note.lower()
+
+    # Unknown — missing trigger
+    state, _, fields = _classify_risk_realism(None, 98.0, 102.0)
+    assert state == "unknown"
+    assert fields["risk_distance"] is None
+
+    # Unknown — missing invalidation
+    state, _, _ = _classify_risk_realism(100.0, None, 102.0)
+    assert state == "unknown"

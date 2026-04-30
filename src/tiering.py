@@ -461,6 +461,114 @@ def _backfill_missing_conditions(signal: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 12C: Risk Realism informational fields
+# ---------------------------------------------------------------------------
+# Operator-clarity layer. NOT a hard-filter layer.
+#
+# Phase 10 _semantic_price_sanity_failures remains canonical for impossible
+# geometry (invalidation >= trigger, first target <= trigger, risk_reward <= 0,
+# current_price below invalidation). Phase 12C must NOT own those rejections,
+# and must NOT add a competing rejection reason. Phase 12C only labels what the
+# risk window looks like for operator awareness.
+#
+# State precedence (most conservative wins):
+#   invalid > fragile > tight > healthy > unknown
+#
+# Phase 12C does not modify final_tier, capital_action, discord_channel,
+# downgrades, or rejection_reason. It populates informational fields only.
+
+def _classify_risk_realism(
+    trigger: float | None,
+    invalidation: float | None,
+    current_price: float | None,
+) -> tuple[str, str, dict]:
+    """Classify whether the risk window is realistic. Informational only.
+
+    Returns (state, note, computed_fields_dict). The dict has four keys:
+        risk_distance, risk_distance_pct,
+        current_price_to_invalidation, current_price_to_invalidation_pct.
+    Any of those may be None when the inputs are missing or non-numeric.
+    """
+    fields: dict = {
+        "risk_distance": None,
+        "risk_distance_pct": None,
+        "current_price_to_invalidation": None,
+        "current_price_to_invalidation_pct": None,
+    }
+
+    risk_distance: float | None = None
+    risk_distance_pct: float | None = None
+    if trigger is not None and invalidation is not None:
+        try:
+            t = float(trigger)
+            i = float(invalidation)
+            risk_distance = t - i
+            fields["risk_distance"] = round(risk_distance, 4)
+            if t != 0:
+                risk_distance_pct = risk_distance / abs(t) * 100
+                fields["risk_distance_pct"] = round(risk_distance_pct, 3)
+        except (TypeError, ValueError):
+            pass
+
+    cp_to_inval: float | None = None
+    cp_to_inval_pct: float | None = None
+    if current_price is not None and invalidation is not None:
+        try:
+            cp = float(current_price)
+            i = float(invalidation)
+            cp_to_inval = cp - i
+            fields["current_price_to_invalidation"] = round(cp_to_inval, 4)
+            if cp != 0:
+                cp_to_inval_pct = cp_to_inval / abs(cp) * 100
+                fields["current_price_to_invalidation_pct"] = round(cp_to_inval_pct, 3)
+        except (TypeError, ValueError):
+            pass
+
+    # Cannot classify without risk_distance_pct
+    if risk_distance_pct is None:
+        return (
+            "unknown",
+            "Risk realism unknown; missing trigger, invalidation, or current price.",
+            fields,
+        )
+
+    # Impossible geometry — Phase 10 owns rejection. Mark informationally only.
+    if risk_distance is not None and risk_distance <= 0:
+        return (
+            "invalid",
+            "Risk geometry invalid; semantic gate owns rejection.",
+            fields,
+        )
+
+    # Classify by risk_distance_pct (most conservative wins)
+    if risk_distance_pct < 0.35:
+        state = "fragile"
+    elif risk_distance_pct < 0.75:
+        state = "tight"
+    else:
+        state = "healthy"
+
+    # current_price_to_invalidation_pct < 1.0 → escalate at least to tight.
+    # If price has already traded below invalidation, Phase 10 owns rejection,
+    # but for operator clarity we still mark this as fragile.
+    if cp_to_inval_pct is not None:
+        if cp_to_inval_pct < 0:
+            state = "fragile"
+        elif cp_to_inval_pct < 1.0:
+            if state == "healthy":
+                state = "tight"
+
+    if state == "fragile":
+        note = "Risk window is fragile; invalidation is very close."
+    elif state == "tight":
+        note = "Risk window is tight; verify live chart before entry."
+    else:
+        note = "Risk window is healthy."
+
+    return (state, note, fields)
+
+
+# ---------------------------------------------------------------------------
 # Downgrade cascade
 # ---------------------------------------------------------------------------
 
@@ -723,6 +831,22 @@ def validate(
     final_signal["freshness_note"] = (
         "Signal based on scan-time price; verify live chart before entry."
     )
+
+    # Phase 12C: Risk Realism informational fields. Operator-clarity only.
+    # Does NOT change final_tier, capital_action, discord_channel, or downgrades.
+    # Phase 10 _semantic_price_sanity_failures retains canonical authority over
+    # impossible-geometry rejection.
+    _rr_trigger = final_signal.get("trigger_level")
+    _rr_invalidation = final_signal.get("invalidation_level")
+    _rr_state, _rr_note, _rr_fields = _classify_risk_realism(
+        _rr_trigger, _rr_invalidation, current_price
+    )
+    final_signal["risk_distance"] = _rr_fields["risk_distance"]
+    final_signal["risk_distance_pct"] = _rr_fields["risk_distance_pct"]
+    final_signal["current_price_to_invalidation"] = _rr_fields["current_price_to_invalidation"]
+    final_signal["current_price_to_invalidation_pct"] = _rr_fields["current_price_to_invalidation_pct"]
+    final_signal["risk_realism_state"] = _rr_state
+    final_signal["risk_realism_note"] = _rr_note
 
     safe_for_alert = final_tier != "WAIT"
 
