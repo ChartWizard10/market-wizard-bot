@@ -148,7 +148,8 @@ def format_alert(
     forced_part        = _sanitize(str(signal.get("forced_participation", "none")))
     next_action        = _sanitize(str(signal.get("next_action", "—")))
     capital_action     = signal.get("capital_action", "no_trade")
-    reason             = _sanitize(str(signal.get("reason", "—")))
+    # Phase 12A: use sanitized_reason if present; fall back to raw reason
+    reason             = _sanitize(str(signal.get("sanitized_reason") or signal.get("reason", "—")))
     missing_conditions = signal.get("missing_conditions") or []
     upgrade_trigger    = _sanitize(str(signal.get("upgrade_trigger", "—")))
     targets            = signal.get("targets", [])

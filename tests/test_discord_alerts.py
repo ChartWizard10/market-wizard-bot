@@ -44,6 +44,8 @@ def _tiering_result(tier="SNIPE_IT", score=88, safe=True, **signal_overrides) ->
         "discord_channel": "#snipe-signals",
         "capital_action": "full_quality_allowed",
         "reason": "Clean MSS with FVG retest confirmed.",
+        # Phase 12A: sanitized_reason (None = falls back to reason)
+        "sanitized_reason": None,
         # Phase 11 freshness fields (mirroring what tiering.validate() now adds)
         "scan_price": 182.50,
         "drift_status": "snapshot_only",
@@ -738,3 +740,64 @@ def test_capital_action_still_recomputed_from_final_tier():
     assert result["final_tier"] == "SNIPE_IT"
     assert result["capital_action"] == "full_quality_allowed"
     assert result["final_signal"]["capital_action"] == "full_quality_allowed"
+
+
+# ===========================================================================
+# Phase 12A — Alert Integrity / Sanitized Reason (Discord rendering)
+# ===========================================================================
+
+# 12A-D1: Alert uses sanitized_reason when present, not raw reason
+def test_12a_alert_uses_sanitized_reason_over_raw():
+    tr = _tiering_result(
+        tier="STARTER",
+        capital_action="starter_only",
+        reason="All SNIPE_IT conditions met — execute full quality.",
+        sanitized_reason="Starter-quality candidate; full SNIPE confirmation not granted.",
+    )
+    tr["final_tier"] = "STARTER"
+    text = format_alert(tr)
+    # sanitized_reason must appear in Why line
+    assert "Starter-quality candidate" in text
+    # raw SNIPE phrase must NOT appear in Why line
+    assert "All SNIPE_IT conditions met" not in text
+
+
+# 12A-D2: Alert falls back to raw reason when sanitized_reason is None
+def test_12a_alert_falls_back_to_raw_reason_when_sanitized_none():
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        reason="Clean MSS with FVG retest confirmed.",
+        sanitized_reason=None,
+    )
+    text = format_alert(tr)
+    assert "Clean MSS with FVG retest confirmed." in text
+
+
+# 12A-D3: NEAR_ENTRY alert does not display capital-positive language from raw reason
+def test_12a_near_entry_alert_no_capital_language():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_not_confirmed"],
+        upgrade_trigger="Close above trigger with hold.",
+        reason="Reducing conviction to STARTER tier only.",
+        sanitized_reason="Watch-only; confirmation pending.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "STARTER tier only" not in text
+    assert "watch-only" in text.lower() or "confirmation pending" in text.lower()
+
+
+# 12A-D4: SNIPE_IT alert DOES display SNIPE language (no restriction for SNIPE_IT)
+def test_12a_snipe_alert_preserves_snipe_language():
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        reason="All SNIPE_IT conditions met. Zone defended cleanly.",
+        sanitized_reason="All SNIPE_IT conditions met. Zone defended cleanly.",
+    )
+    text = format_alert(tr)
+    assert "All SNIPE_IT conditions met" in text

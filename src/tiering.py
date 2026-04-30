@@ -30,6 +30,35 @@ CAPITAL_MAP = {
 }
 
 # ---------------------------------------------------------------------------
+# Phase 12A: Alert integrity — tier-contradicting phrase replacement
+# ---------------------------------------------------------------------------
+# Phrases that must not appear in the displayed reason for a given final tier.
+# Listed longest-first within each tier to prevent partial-match shadowing.
+# Format: (banned_phrase_lowercase_match, replacement_text)
+_TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
+    "NEAR_ENTRY": [
+        ("reducing conviction to starter tier only", "Watch-only; confirmation pending."),
+        ("all snipe_it conditions met", "Watch-only; confirmation pending."),
+        ("snipe_it conditions met", "Watch-only; confirmation pending."),
+        ("all starter conditions met", "Watch-only; confirmation pending."),
+        ("starter tier only", "watch-only"),
+        ("capital authorized", "no capital authorized"),
+        ("full quality allowed", "no capital authorized"),
+    ],
+    "STARTER": [
+        ("all snipe_it conditions met", "Starter-quality candidate; full SNIPE confirmation not granted."),
+        ("snipe_it conditions met", "Starter-quality candidate; full SNIPE confirmation not granted."),
+    ],
+    "WAIT": [
+        ("capital authorized", "No capital authorized."),
+        ("full quality allowed", "No capital authorized."),
+        ("full quality", "no actionable setup"),
+        ("execute now", "No capital authorized."),
+        ("enter now", "No capital authorized."),
+    ],
+}
+
+# ---------------------------------------------------------------------------
 # Veto sets (strings match prefilter.py VETO_* constants)
 # ---------------------------------------------------------------------------
 
@@ -338,6 +367,58 @@ def _classify_current_acceptance(signal: dict, key_features: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 12A: Sanitize reason text for final tier
+# ---------------------------------------------------------------------------
+
+def _replace_phrase_non_overlapping(text: str, banned_lower: str, replacement: str) -> str:
+    """Replace every non-overlapping case-insensitive occurrence of `banned_lower`
+    in `text` with `replacement`. The cursor advances over the matched span in the
+    source text only — never into the inserted replacement — so a replacement that
+    contains the banned substring cannot trigger another match.
+    """
+    if not banned_lower:
+        return text
+    lower_text = text.lower()
+    n = len(lower_text)
+    parts: list[str] = []
+    cursor = 0
+    while cursor < n:
+        idx = lower_text.find(banned_lower, cursor)
+        if idx == -1:
+            parts.append(text[cursor:])
+            break
+        parts.append(text[cursor:idx])
+        parts.append(replacement)
+        cursor = idx + len(banned_lower)
+    else:
+        # cursor reached n exactly — nothing trailing
+        pass
+    return "".join(parts)
+
+
+def _sanitize_reason_for_tier(reason: str | None, final_tier: str) -> str:
+    """Remove phrases from Claude's reason that contradict final_tier.
+
+    Uses case-insensitive substring replacement from _TIER_BANNED_PHRASES.
+    Does not attempt NLP — only replaces explicit tier-contradiction strings.
+    Preserves all chart structure and analysis reasoning.
+    Returns the original reason unchanged for SNIPE_IT (no restrictions).
+
+    Replacement is performed as a single non-overlapping pass per phrase, so a
+    replacement that itself contains the banned substring will not loop.
+    """
+    if not reason:
+        return ""
+    banned_list = _TIER_BANNED_PHRASES.get(final_tier, [])
+    if not banned_list:
+        return str(reason)
+    result = str(reason)
+    for banned_lower, replacement in banned_list:
+        result = _replace_phrase_non_overlapping(result, banned_lower, replacement)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Downgrade cascade
 # ---------------------------------------------------------------------------
 
@@ -548,6 +629,11 @@ def validate(
     final_signal["tier"] = final_tier
     final_signal["discord_channel"] = CHANNEL_MAP[final_tier]
     final_signal["capital_action"] = CAPITAL_MAP[final_tier]
+
+    # Phase 12A: sanitize Claude prose so alerts cannot display tier-contradicting language
+    final_signal["sanitized_reason"] = _sanitize_reason_for_tier(
+        final_signal.get("reason"), final_tier
+    )
 
     # Phase 11: Freshness/drift fields — snapshot_only architecture.
     # scan_price is the last close at scan time (from prefilter key_features).

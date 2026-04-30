@@ -1163,3 +1163,97 @@ def test_cava_style_valid_geometry_but_damaging_current_acceptance_caps_starter(
     assert any("damaging" in d for d in result["downgrades"]), (
         f"Downgrade reason must mention 'damaging', got: {result['downgrades']}"
     )
+
+
+# ===========================================================================
+# Phase 12A — Alert Integrity / Sanitized Reason
+# ===========================================================================
+
+from src.tiering import _sanitize_reason_for_tier
+
+
+# 12A-1: sanitized_reason present in final_signal
+def test_12a_sanitized_reason_present_in_final_signal():
+    result = validate(_snipe_signal(), _pf(), _BASE_CONFIG)
+    assert "sanitized_reason" in result["final_signal"]
+
+
+# 12A-2: SNIPE_IT reason is preserved unchanged (no restrictions on SNIPE)
+def test_12a_snipe_it_reason_preserved():
+    signal = _snipe_signal(reason="All SNIPE_IT conditions met — execute full quality.")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert result["final_tier"] == "SNIPE_IT"
+    assert "All SNIPE_IT conditions met" in (fs["sanitized_reason"] or "")
+
+
+# 12A-3: STARTER final_tier removes SNIPE_IT-claiming language
+def test_12a_starter_sanitized_removes_snipe_language():
+    dirty = "All SNIPE_IT conditions met — execute at full quality."
+    clean = _sanitize_reason_for_tier(dirty, "STARTER")
+    assert "All SNIPE_IT conditions met" not in clean
+    assert "Starter-quality" in clean or "SNIPE confirmation not granted" in clean
+
+
+# 12A-4: NEAR_ENTRY sanitized removes capital-approved language
+def test_12a_near_entry_sanitized_removes_capital_language():
+    dirty = "Zone valid. Reducing conviction to STARTER tier only — retest not confirmed."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "STARTER tier only" not in clean
+    assert "watch-only" in clean.lower() or "confirmation pending" in clean.lower()
+
+
+# 12A-5: WAIT sanitized removes entry-approved language
+def test_12a_wait_sanitized_removes_entry_language():
+    dirty = "Full quality allowed — capital authorized to enter."
+    clean = _sanitize_reason_for_tier(dirty, "WAIT")
+    assert "capital authorized" not in clean.lower() or "no capital authorized" in clean.lower()
+    assert "full quality allowed" not in clean.lower() or "no capital authorized" in clean.lower()
+
+
+# 12A-6: STARTER validate call produces sanitized_reason in final_signal
+def test_12a_starter_validate_sanitized_reason_in_signal():
+    signal = _starter_signal(reason="All SNIPE_IT conditions met — reduced size only.")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    fs = result["final_signal"]
+    sanitized = fs.get("sanitized_reason") or ""
+    assert "All SNIPE_IT conditions met" not in sanitized
+
+
+# 12A-7: sanitize_reason_for_tier is a pure function (empty reason returns empty string)
+def test_12a_sanitize_empty_reason_returns_empty():
+    assert _sanitize_reason_for_tier("", "STARTER") == ""
+    assert _sanitize_reason_for_tier(None, "NEAR_ENTRY") == ""
+
+
+# 12A-8: Regression — replacement string that contains its banned phrase must
+# not cause the sanitizer to re-scan inserted replacement text. Previously the
+# while/find loop produced an infinite loop because "No capital authorized."
+# contains "capital authorized" and was matched again on every iteration.
+def test_12a_sanitizer_replacement_that_contains_banned_phrase_does_not_loop():
+    # Direct unit-level call — must terminate.
+    dirty = "Capital authorized — proceed to entry."
+    clean = _sanitize_reason_for_tier(dirty, "WAIT")
+    assert isinstance(clean, str)
+    # The misleading entry permission must be neutered. The sanitizer's intent
+    # is to ensure any reader sees "no capital authorized" wording, not raw
+    # "capital authorized" as a positive permission.
+    assert "no capital authorized" in clean.lower()
+
+    # Through validate() — must terminate, must keep WAIT, must populate sanitized_reason.
+    signal = _wait_signal(reason="Capital authorized — proceed to entry.")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    fs = result["final_signal"]
+    sanitized = fs.get("sanitized_reason") or ""
+    assert "no capital authorized" in sanitized.lower()
+
+
+# 12A-9: NEAR_ENTRY equivalent — same self-containing replacement bug class.
+# NEAR_ENTRY has ("capital authorized", "no capital authorized") which is
+# structurally identical to the WAIT case.
+def test_12a_near_entry_capital_authorized_replacement_does_not_loop():
+    dirty = "Setup forming. Capital authorized once retest confirms."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert isinstance(clean, str)
+    assert "no capital authorized" in clean.lower()
