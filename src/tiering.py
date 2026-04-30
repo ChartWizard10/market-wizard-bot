@@ -37,13 +37,27 @@ CAPITAL_MAP = {
 # Format: (banned_phrase_lowercase_match, replacement_text)
 _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
     "NEAR_ENTRY": [
+        # Phase 12A entries (longest-first to prevent partial-match shadowing)
         ("reducing conviction to starter tier only", "Watch-only; confirmation pending."),
-        ("all snipe_it conditions met", "Watch-only; confirmation pending."),
-        ("snipe_it conditions met", "Watch-only; confirmation pending."),
-        ("all starter conditions met", "Watch-only; confirmation pending."),
-        ("starter tier only", "watch-only"),
-        ("capital authorized", "no capital authorized"),
-        ("full quality allowed", "no capital authorized"),
+        # Phase 12.1 entries — capital/entry-implying phrases for NEAR_ENTRY
+        # Longer compound phrases must precede their sub-phrases.
+        ("starter allocation warranted", "Watchlist only until retest and hold confirm."),
+        ("all snipe_it conditions met",  "Watch-only; confirmation pending."),
+        ("all starter conditions met",   "Watch-only; confirmation pending."),
+        ("starter entry warranted",      "Watchlist only until retest and hold confirm."),
+        ("snipe_it conditions met",      "Watch-only; confirmation pending."),
+        ("snipe conditions met",         "Watch-only; confirmation pending."),
+        ("forced participation",         "Watchlist only until retest and hold confirm."),
+        ("full quality allowed",         "no capital authorized"),     # before "full quality"
+        ("allocation warranted",         "Watchlist only until retest and hold confirm."),
+        ("reduced-size entry",           "Watchlist only until retest and hold confirm."),
+        ("capital authorized",           "no capital authorized"),
+        ("capital justified",            "Watchlist only until retest and hold confirm."),
+        ("starter tier only",            "watch-only"),
+        ("starter warranted",            "Watchlist only until retest and hold confirm."),
+        ("entry warranted",              "Watchlist only until retest and hold confirm."),
+        ("reduced size",                 "Watchlist only until retest and hold confirm."),
+        ("full quality",                 "no capital authorized"),
     ],
     "STARTER": [
         ("all snipe_it conditions met", "Starter-quality candidate; full SNIPE confirmation not granted."),

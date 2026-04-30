@@ -926,3 +926,79 @@ def test_12d_starter_alert_language_still_not_snipe():
     # Deterministic STARTER action label is used; the SNIPE label must not appear
     assert "All SNIPE_IT conditions met" not in text
     assert "All STARTER conditions met" in text
+
+
+# ===========================================================================
+# Phase 12.1 — NEAR_ENTRY Language Integrity (Discord rendering)
+# ===========================================================================
+
+# 12.1-D1: NEAR_ENTRY alert does not render the FORCED PARTICIPATION block,
+# even when forced_participation field is a non-empty, non-"none" string.
+def test_12_1_near_entry_removes_forced_participation_language():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_not_confirmed"],
+        upgrade_trigger="Close above trigger with hold.",
+        forced_participation="Full quality — zone held cleanly",
+        reason="MSS confirmed, zone present, awaiting retest.",
+        sanitized_reason="MSS confirmed, zone present, awaiting retest.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    # FORCED PARTICIPATION block must be suppressed for NEAR_ENTRY
+    assert "FORCED PARTICIPATION" not in text
+
+
+# 12.1-D2: NEAR_ENTRY alert always shows NO CAPITAL — WATCH ONLY label
+def test_12_1_near_entry_keeps_no_capital_action():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_status"],
+        upgrade_trigger="Confirmed retest of FVG at 179.00",
+        reason="Zone valid — awaiting retest.",
+        sanitized_reason="Zone valid — awaiting retest.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "NO CAPITAL" in text
+    assert "WATCH ONLY" in text
+
+
+# 12.1-D3: STARTER alert still renders FORCED PARTICIPATION when set
+def test_12_1_starter_forced_participation_still_renders():
+    tr = _tiering_result(
+        tier="STARTER",
+        score=78,
+        capital_action="starter_only",
+        forced_participation="Reduced-size entry — zone quality partial",
+        reason="Partial zone interaction.",
+        sanitized_reason="Partial zone interaction.",
+    )
+    tr["final_tier"] = "STARTER"
+    tr["final_discord_channel"] = "#starter-signals"
+    text = format_alert(tr)
+    assert "FORCED PARTICIPATION" in text
+    assert "Reduced-size entry" in text
+
+
+# 12.1-D4: SNIPE_IT alert still renders FORCED PARTICIPATION when set
+def test_12_1_snipe_forced_participation_still_renders():
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        forced_participation="Full quality — zone held cleanly",
+        reason="Clean MSS with FVG retest confirmed.",
+        sanitized_reason="Clean MSS with FVG retest confirmed.",
+    )
+    text = format_alert(tr)
+    assert "FORCED PARTICIPATION" in text
+    assert "Full quality" in text

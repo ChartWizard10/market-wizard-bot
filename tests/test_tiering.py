@@ -1626,3 +1626,98 @@ def test_12c_classify_risk_realism_direct_units():
     # Unknown — missing invalidation
     state, _, _ = _classify_risk_realism(100.0, None, 102.0)
     assert state == "unknown"
+
+
+# ===========================================================================
+# Phase 12.1 — NEAR_ENTRY Language Integrity
+# ===========================================================================
+
+# 12.1-1: NEAR_ENTRY reason with "reduced size justified" is sanitized
+def test_12_1_near_entry_removes_reduced_size_language():
+    dirty = "Partial zone interaction — reduced size justified here."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "reduced size" not in clean.lower()
+    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+
+
+# 12.1-2: NEAR_ENTRY reason with "starter allocation warranted" is sanitized
+def test_12_1_near_entry_removes_starter_allocation_language():
+    dirty = "Zone quality is decent — starter allocation warranted at current level."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "starter allocation" not in clean.lower()
+    assert "allocation warranted" not in clean.lower()
+    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+
+
+# 12.1-3: NEAR_ENTRY reason with "capital justified" is sanitized
+def test_12_1_near_entry_removes_capital_justified_language():
+    dirty = "Setup is developing — capital justified once retest occurs."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "capital justified" not in clean.lower()
+    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+
+
+# 12.1-4: NEAR_ENTRY reason with "entry warranted" is sanitized
+def test_12_1_near_entry_removes_entry_warranted_language():
+    dirty = "Zone defended — entry warranted on confirmed retest."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "entry warranted" not in clean.lower()
+
+
+# 12.1-5: STARTER tier still allows "reduced size warranted" — not over-sanitized
+def test_12_1_starter_can_still_use_starter_language():
+    dirty = "Partial zone interaction — reduced size warranted."
+    clean = _sanitize_reason_for_tier(dirty, "STARTER")
+    # STARTER has no ban on "reduced size" — text must pass through unchanged
+    assert "reduced size warranted" in clean.lower()
+
+    # Via validate() — STARTER reason with starter language is preserved
+    from src.tiering import validate
+    signal = _starter_signal(reason="Partial zone interaction — reduced size warranted.")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    sanitized = result["final_signal"].get("sanitized_reason") or ""
+    assert "reduced size warranted" in sanitized.lower()
+
+
+# 12.1-6: SNIPE_IT tier has no banned phrases — all reason text passes through
+def test_12_1_snipe_can_still_use_snipe_language():
+    dirty = "All SNIPE_IT conditions met — full quality allowed. Entry warranted."
+    clean = _sanitize_reason_for_tier(dirty, "SNIPE_IT")
+    # SNIPE_IT has no banned list — text unchanged
+    assert clean == dirty
+
+    # Via validate() — SNIPE_IT reason is preserved intact
+    from src.tiering import validate
+    signal = _snipe_signal(reason="All SNIPE_IT conditions met — full quality allowed.")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    sanitized = result["final_signal"].get("sanitized_reason") or ""
+    assert "all snipe_it conditions met" in sanitized.lower()
+    assert "full quality allowed" in sanitized.lower()
+
+
+# 12.1-7: Phase 12A/B/C regressions are unaffected by Phase 12.1 additions
+def test_12_1_existing_phase_12_alerts_still_pass():
+    from src.tiering import validate
+
+    # 12A: sanitized_reason present in final_signal
+    result = validate(_snipe_signal(), _pf(), _BASE_CONFIG)
+    assert "sanitized_reason" in result["final_signal"]
+
+    # 12A: WAIT banner phrase still sanitized
+    dirty_wait = "Full quality allowed — capital authorized to enter."
+    clean_wait = _sanitize_reason_for_tier(dirty_wait, "WAIT")
+    assert "capital authorized" not in clean_wait.lower() or "no capital authorized" in clean_wait.lower()
+
+    # 12B: no backfill when both missing
+    signal_b = _near_entry_signal(missing_conditions=[], retest_status="missing", hold_status="missing")
+    result_b = validate(signal_b, _pf(), _BASE_CONFIG)
+    assert result_b["final_tier"] == "WAIT"
+
+    # 12C: risk_realism_state present in final_signal
+    result_c = validate(_snipe_signal(), _pf(), _BASE_CONFIG)
+    assert "risk_realism_state" in result_c["final_signal"]
+    assert result_c["final_signal"]["risk_realism_state"] in (
+        "healthy", "tight", "fragile", "invalid", "unknown"
+    )
