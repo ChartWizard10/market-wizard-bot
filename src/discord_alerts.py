@@ -235,9 +235,15 @@ def format_alert(
 
     if final_tier == "NEAR_ENTRY":
         missing_str = ", ".join(_sanitize(str(c)) for c in missing_conditions) if missing_conditions else "—"
+        # Phase 12.3: render blocker note above missing conditions
+        blocker_note = _sanitize(str(signal.get("near_entry_blocker_note") or ""))
         lines += [
             "──────────────────────────────",
             "⚠️  NO CAPITAL YET",
+        ]
+        if blocker_note:
+            lines.append(f"Blocker:            {blocker_note}")
+        lines += [
             f"Missing conditions: {missing_str}",
             f"Upgrade trigger:    {upgrade_trigger}",
         ]

@@ -43,6 +43,8 @@ _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
     "NEAR_ENTRY": [
         # 40 chars — Phase 12A
         ("reducing conviction to starter tier only", "Watch-only; confirmation pending."),
+        # 38 chars — Phase 12.3: must precede "all snipe_it conditions satisfied" (33)
+        ("enter on confirmed close above trigger", "watch for confirmed close above trigger"),
         # 33 chars — Phase 12.2: must precede "snipe_it conditions satisfied" (29)
         ("all snipe_it conditions satisfied", "Watchlist only until retest and hold confirm."),
         # 31 chars — Phase 12.2: must precede "snipe_it criteria" (17)
@@ -93,20 +95,31 @@ _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
         ("full quality",                       "no capital authorized"),
         # 11 chars — Phase 12.2
         ("entry valid",                        "Watchlist only until retest and hold confirm."),
+        # 10 chars — Phase 12.3: must follow all longer phrases
+        ("stop below",                         "invalidation reference below"),
+        # 10 chars — Phase 12.3
+        ("trail stop",                         "use invalidation reference only"),
     ],
     "STARTER": [
+        # 35 chars — Phase 12.3: must precede "all snipe_it conditions satisfied" (33)
+        # and "snipe confirmation not granted" (30)
+        ("full snipe confirmation not granted", "full-size confirmation not granted"),
         # 33 chars — Phase 12.2: must precede "snipe_it conditions satisfied" (29)
         ("all snipe_it conditions satisfied",  "All STARTER conditions met."),
         # 31 chars — Phase 12.2: must precede "snipe_it criteria" (17)
-        ("satisfies all snipe_it criteria",    "Starter-quality candidate; full SNIPE confirmation not granted."),
+        # Phase 12.3: replacement no longer says "SNIPE" to prevent self-referential
+        # "SNIPE" wording in STARTER alerts.
+        ("satisfies all snipe_it criteria",    "Starter-quality candidate; full-size confirmation not granted."),
+        # 30 chars — Phase 12.3: must precede "snipe_it conditions satisfied" (29)
+        ("snipe confirmation not granted",     "full-size confirmation not granted"),
         # 29 chars — Phase 12.2
         ("snipe_it conditions satisfied",      "All STARTER conditions met."),
         # 28 chars — Phase 12.2: must precede "snipe criteria" (14)
-        ("satisfies all snipe criteria",       "Starter-quality candidate; full SNIPE confirmation not granted."),
+        ("satisfies all snipe criteria",       "Starter-quality candidate; full-size confirmation not granted."),
         # 27 chars — Phase 12A: must precede "snipe_it conditions met" (23)
-        ("all snipe_it conditions met",        "Starter-quality candidate; full SNIPE confirmation not granted."),
+        ("all snipe_it conditions met",        "Starter-quality candidate; full-size confirmation not granted."),
         # 23 chars — Phase 12A
-        ("snipe_it conditions met",            "Starter-quality candidate; full SNIPE confirmation not granted."),
+        ("snipe_it conditions met",            "Starter-quality candidate; full-size confirmation not granted."),
         # 17 chars — Phase 12.2: must precede "snipe criteria" (14)
         ("snipe_it criteria",                  "starter criteria"),
         # 14 chars — Phase 12.2
@@ -472,6 +485,122 @@ _WATCHLIST_TAIL_RE = re.compile(
     r"(retest and hold confirm\.)\s+only until\b[^.]*\.?",
     re.IGNORECASE,
 )
+
+
+def _near_entry_blocker_backfill(signal: dict, current_price: float | None) -> None:
+    """Phase 12.3: pre-gate backfill for NEAR_ENTRY signals.
+
+    Populates upgrade_trigger and missing_conditions from blocker priority so
+    the NEAR_ENTRY gate can pass when Claude left these fields blank or 'none'.
+    Modifies signal in place. Called only when claude_tier == 'NEAR_ENTRY'.
+
+    Priority A (price below trigger) overrides missing_conditions with
+    trigger-specific context. Priorities B–F only backfill upgrade_trigger
+    when it is blank/none — missing_conditions is left as-is.
+    """
+    trigger = signal.get("trigger_level")
+    retest = signal.get("retest_status", "missing")
+    hold = signal.get("hold_status", "missing")
+    rr = signal.get("risk_reward")
+    overhead = signal.get("overhead_status", "unknown")
+
+    existing_trigger = str(signal.get("upgrade_trigger") or "")
+    trigger_is_blank = not existing_trigger or existing_trigger.lower() == "none"
+
+    # Priority A: price has not accepted above trigger — most specific blocker
+    if current_price is not None and trigger is not None:
+        try:
+            if float(current_price) < float(trigger):
+                signal["missing_conditions"] = [
+                    "trigger_acceptance — price is below trigger and has not confirmed"
+                    " acceptance above trigger"
+                ]
+                if trigger_is_blank:
+                    signal["upgrade_trigger"] = (
+                        "Price reclaims and holds above trigger with body-close confirmation."
+                    )
+                return
+        except (TypeError, ValueError):
+            pass
+
+    # Priorities B–F: only backfill upgrade_trigger when blank AND at least one of
+    # retest/hold shows partial progress (mirrors Phase 12B has_partial_progress guard).
+    # When both are 'missing', no progress exists and the gate should reject — do not
+    # rescue a signal that has neither retest nor hold progress.
+    if not trigger_is_blank:
+        return
+
+    has_partial_progress = (
+        retest in ("partial", "confirmed") or hold in ("partial", "confirmed")
+    )
+    if not has_partial_progress:
+        return
+
+    if retest != "confirmed":
+        signal["upgrade_trigger"] = "Full zone retest confirmed with body-close hold."
+    elif hold != "confirmed":
+        signal["upgrade_trigger"] = "Body-close acceptance inside or above the zone."
+    elif rr is None or (isinstance(rr, (int, float)) and float(rr) < 3.0):
+        signal["upgrade_trigger"] = "Wait for improved entry geometry (R:R ≥ 3.0)."
+    elif overhead in ("moderate", "blocked", "unknown"):
+        signal["upgrade_trigger"] = "Reclaim through overhead resistance with acceptance."
+    else:
+        signal["upgrade_trigger"] = "Trigger acceptance with retest and hold confirmation."
+
+
+def _build_near_entry_blocker_note(signal: dict, current_price: float | None) -> str:
+    """Phase 12.3: build a human-readable blocker explanation for NEAR_ENTRY alerts.
+
+    Returns a 'Blocker: ...' string. Called only when final_tier == 'NEAR_ENTRY'.
+    Applies the same priority as _near_entry_blocker_backfill so the rendered
+    blocker always matches the pre-gate backfill decision.
+    """
+    trigger = signal.get("trigger_level")
+    retest = signal.get("retest_status", "missing")
+    hold = signal.get("hold_status", "missing")
+    rr = signal.get("risk_reward")
+    overhead = signal.get("overhead_status", "unknown")
+
+    # A: price below trigger
+    if current_price is not None and trigger is not None:
+        try:
+            if float(current_price) < float(trigger):
+                return (
+                    "Blocker: price is below trigger; wait for reclaim and hold above trigger."
+                )
+        except (TypeError, ValueError):
+            pass
+
+    # B: retest not confirmed
+    if retest != "confirmed":
+        return (
+            "Blocker: retest is not fully confirmed; wait for full zone interaction and hold."
+        )
+
+    # C: hold not confirmed
+    if hold != "confirmed":
+        return (
+            "Blocker: hold is not fully confirmed; wait for body-close acceptance"
+            " inside/above the zone."
+        )
+
+    # D: R:R not sufficient
+    if rr is None or (isinstance(rr, (int, float)) and float(rr) < 3.0):
+        return (
+            "Blocker: R:R is not sufficient for capital; wait for improved entry geometry."
+        )
+
+    # E: overhead not clean
+    if overhead in ("moderate", "blocked", "unknown"):
+        return (
+            "Blocker: overhead path is not clean enough for capital;"
+            " wait for reclaim through resistance."
+        )
+
+    # F: fallback
+    return (
+        "Blocker: watchlist only until trigger acceptance, retest, and hold confirm."
+    )
 
 
 def _replace_phrase_non_overlapping(text: str, banned_lower: str, replacement: str) -> str:
@@ -885,6 +1014,13 @@ def validate(
             if backfilled:
                 working_signal["missing_conditions"] = backfilled
 
+    # Phase 12.3: pre-gate backfill for NEAR_ENTRY.
+    # Populates upgrade_trigger (and for price-below-trigger, missing_conditions)
+    # so the NEAR_ENTRY gate passes when Claude left those fields blank or 'none'.
+    # Does not change tier-gate logic — only ensures required fields are present.
+    if claude_tier == "NEAR_ENTRY":
+        _near_entry_blocker_backfill(working_signal, current_price)
+
     final_tier, downgrades, notes = _determine_final_tier(
         claude_tier, working_signal, prefilter_vetoes, score, config, current_price, key_features
     )
@@ -906,6 +1042,13 @@ def validate(
     final_signal["sanitized_reason"] = _sanitize_reason_for_tier(
         final_signal.get("reason"), final_tier
     )
+
+    # Phase 12.3: NEAR_ENTRY blocker explanation — always explains why capital is not authorized.
+    # Only added when final_tier is NEAR_ENTRY; absent for SNIPE_IT, STARTER, and WAIT.
+    if final_tier == "NEAR_ENTRY":
+        final_signal["near_entry_blocker_note"] = _build_near_entry_blocker_note(
+            final_signal, current_price
+        )
 
     # Phase 11: Freshness/drift fields — snapshot_only architecture.
     # scan_price is the last close at scan time (from prefilter key_features).
