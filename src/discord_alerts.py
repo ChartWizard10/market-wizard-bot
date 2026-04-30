@@ -148,7 +148,8 @@ def format_alert(
     forced_part        = _sanitize(str(signal.get("forced_participation", "none")))
     next_action        = _sanitize(str(signal.get("next_action", "—")))
     capital_action     = signal.get("capital_action", "no_trade")
-    reason             = _sanitize(str(signal.get("reason", "—")))
+    # Phase 12A: use sanitized_reason if present; fall back to raw reason
+    reason             = _sanitize(str(signal.get("sanitized_reason") or signal.get("reason", "—")))
     missing_conditions = signal.get("missing_conditions") or []
     upgrade_trigger    = _sanitize(str(signal.get("upgrade_trigger", "—")))
     targets            = signal.get("targets", [])
@@ -158,6 +159,15 @@ def format_alert(
     drift_status    = _sanitize(str(signal.get("drift_status", "unknown")))
     drift_pct_raw   = signal.get("drift_pct", 0.0)
     freshness_note  = _sanitize(str(signal.get("freshness_note", "")))
+
+    # Phase 12C/D: risk realism informational fields. Display only — not gating.
+    risk_distance        = signal.get("risk_distance")
+    risk_distance_pct    = signal.get("risk_distance_pct")
+    cp_to_inval          = signal.get("current_price_to_invalidation")
+    cp_to_inval_pct      = signal.get("current_price_to_invalidation_pct")
+    risk_realism_state   = signal.get("risk_realism_state")
+    risk_realism_note_raw = signal.get("risk_realism_note")
+    risk_realism_note    = _sanitize(str(risk_realism_note_raw)) if risk_realism_note_raw else ""
 
     badge              = _TIER_BADGE.get(final_tier, final_tier)
     capital_label      = _CAPITAL_LABEL.get(capital_action, capital_action)
@@ -178,6 +188,42 @@ def format_alert(
         f"  Invalidation: {inval_condition} @ {_fmt_level(inval_level)}",
         f"  R:R:          {rr_str}",
         f"  Overhead:     {overhead_status}",
+    ]
+
+    # Phase 12D: RISK REALISM block — only emit lines for non-None values so
+    # alerts never display "None". State and note are always displayed when
+    # populated by tiering (Phase 12C fills them deterministically).
+    risk_lines: list[str] = []
+    if risk_distance is not None and risk_distance_pct is not None:
+        risk_lines.append(
+            f"  Risk window:    ${float(risk_distance):.2f} / {float(risk_distance_pct):.2f}%"
+        )
+    elif risk_distance is not None:
+        risk_lines.append(f"  Risk window:    ${float(risk_distance):.2f}")
+    elif risk_distance_pct is not None:
+        risk_lines.append(f"  Risk window:    {float(risk_distance_pct):.2f}%")
+
+    if cp_to_inval is not None and cp_to_inval_pct is not None:
+        risk_lines.append(
+            f"  Price → inval:  ${float(cp_to_inval):.2f} / {float(cp_to_inval_pct):.2f}%"
+        )
+    elif cp_to_inval is not None:
+        risk_lines.append(f"  Price → inval:  ${float(cp_to_inval):.2f}")
+    elif cp_to_inval_pct is not None:
+        risk_lines.append(f"  Price → inval:  {float(cp_to_inval_pct):.2f}%")
+
+    if risk_realism_state:
+        risk_lines.append(f"  Risk state:     {risk_realism_state}")
+    if risk_realism_note:
+        risk_lines.append(f"  Risk note:      {risk_realism_note}")
+
+    if risk_lines:
+        lines += [
+            "──────────────────────────────",
+            "RISK REALISM",
+        ] + risk_lines
+
+    lines += [
         "──────────────────────────────",
         "TARGETS",
         _fmt_targets(targets),

@@ -44,6 +44,8 @@ def _tiering_result(tier="SNIPE_IT", score=88, safe=True, **signal_overrides) ->
         "discord_channel": "#snipe-signals",
         "capital_action": "full_quality_allowed",
         "reason": "Clean MSS with FVG retest confirmed.",
+        # Phase 12A: sanitized_reason (None = falls back to reason)
+        "sanitized_reason": None,
         # Phase 11 freshness fields (mirroring what tiering.validate() now adds)
         "scan_price": 182.50,
         "drift_status": "snapshot_only",
@@ -51,6 +53,13 @@ def _tiering_result(tier="SNIPE_IT", score=88, safe=True, **signal_overrides) ->
         "freshness_note": "Signal based on scan-time price; verify live chart before entry.",
         "price_distance_to_trigger_pct": 0.0,
         "price_distance_to_invalidation_pct": 2.41,
+        # Phase 12C risk realism informational fields (defaults match a healthy SNIPE_IT)
+        "risk_distance": 4.30,
+        "risk_distance_pct": 2.356,
+        "current_price_to_invalidation": 4.30,
+        "current_price_to_invalidation_pct": 2.356,
+        "risk_realism_state": "healthy",
+        "risk_realism_note": "Risk window is healthy.",
     }
     signal.update(signal_overrides)
     return {
@@ -738,3 +747,182 @@ def test_capital_action_still_recomputed_from_final_tier():
     assert result["final_tier"] == "SNIPE_IT"
     assert result["capital_action"] == "full_quality_allowed"
     assert result["final_signal"]["capital_action"] == "full_quality_allowed"
+
+
+# ===========================================================================
+# Phase 12A — Alert Integrity / Sanitized Reason (Discord rendering)
+# ===========================================================================
+
+# 12A-D1: Alert uses sanitized_reason when present, not raw reason
+def test_12a_alert_uses_sanitized_reason_over_raw():
+    tr = _tiering_result(
+        tier="STARTER",
+        capital_action="starter_only",
+        reason="All SNIPE_IT conditions met — execute full quality.",
+        sanitized_reason="Starter-quality candidate; full SNIPE confirmation not granted.",
+    )
+    tr["final_tier"] = "STARTER"
+    text = format_alert(tr)
+    # sanitized_reason must appear in Why line
+    assert "Starter-quality candidate" in text
+    # raw SNIPE phrase must NOT appear in Why line
+    assert "All SNIPE_IT conditions met" not in text
+
+
+# 12A-D2: Alert falls back to raw reason when sanitized_reason is None
+def test_12a_alert_falls_back_to_raw_reason_when_sanitized_none():
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        reason="Clean MSS with FVG retest confirmed.",
+        sanitized_reason=None,
+    )
+    text = format_alert(tr)
+    assert "Clean MSS with FVG retest confirmed." in text
+
+
+# 12A-D3: NEAR_ENTRY alert does not display capital-positive language from raw reason
+def test_12a_near_entry_alert_no_capital_language():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_not_confirmed"],
+        upgrade_trigger="Close above trigger with hold.",
+        reason="Reducing conviction to STARTER tier only.",
+        sanitized_reason="Watch-only; confirmation pending.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "STARTER tier only" not in text
+    assert "watch-only" in text.lower() or "confirmation pending" in text.lower()
+
+
+# 12A-D4: SNIPE_IT alert DOES display SNIPE language (no restriction for SNIPE_IT)
+def test_12a_snipe_alert_preserves_snipe_language():
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        reason="All SNIPE_IT conditions met. Zone defended cleanly.",
+        sanitized_reason="All SNIPE_IT conditions met. Zone defended cleanly.",
+    )
+    text = format_alert(tr)
+    assert "All SNIPE_IT conditions met" in text
+
+
+# ===========================================================================
+# Phase 12D — Discord Risk Display
+# ===========================================================================
+
+# 12D-1: Risk window distance and percentage are both displayed
+def test_12d_alert_displays_risk_distance_when_available():
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        risk_distance=4.30,
+        risk_distance_pct=2.356,
+    )
+    text = format_alert(tr)
+    assert "RISK REALISM" in text
+    assert "Risk window" in text
+    # Numeric values rendered (2 decimals)
+    assert "4.30" in text
+    assert "2.36%" in text
+
+
+# 12D-2: Distance to invalidation and percentage are both displayed
+def test_12d_alert_displays_distance_to_invalidation_when_available():
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        current_price_to_invalidation=4.30,
+        current_price_to_invalidation_pct=2.356,
+    )
+    text = format_alert(tr)
+    assert "Price" in text and "inval" in text
+    assert "4.30" in text
+    assert "2.36%" in text
+
+
+# 12D-3: Risk state and note are displayed in the alert
+def test_12d_alert_displays_risk_realism_state_and_note():
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        risk_realism_state="tight",
+        risk_realism_note="Risk window is tight; verify live chart before entry.",
+    )
+    text = format_alert(tr)
+    assert "Risk state" in text
+    assert "tight" in text
+    assert "Risk note" in text
+    assert "Risk window is tight" in text
+
+
+# 12D-4: When numeric risk fields are None, alert formats cleanly without "None"
+def test_12d_alert_hides_missing_risk_numeric_fields_cleanly():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_status"],
+        upgrade_trigger="Confirmed retest of FVG at 179.00",
+        risk_distance=None,
+        risk_distance_pct=None,
+        current_price_to_invalidation=None,
+        current_price_to_invalidation_pct=None,
+        risk_realism_state="unknown",
+        risk_realism_note="Risk realism unknown; missing trigger, invalidation, or current price.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    text = format_alert(tr)
+    # Alert formats without crash and without rendering "None" strings for numerics
+    assert "Risk window:    None" not in text
+    assert "Price → inval:  None" not in text
+    assert "$None" not in text
+    # State and note still display because they are populated
+    assert "unknown" in text
+    assert "Risk realism unknown" in text
+
+
+# 12D-5: Sanitized reason is still preferred over raw reason in the alert
+def test_12d_alert_still_uses_sanitized_reason():
+    tr = _tiering_result(
+        tier="STARTER",
+        score=78,
+        capital_action="starter_only",
+        reason="All SNIPE_IT conditions met — execute at full quality.",
+        sanitized_reason="Starter-quality candidate; full SNIPE confirmation not granted.",
+    )
+    tr["final_tier"] = "STARTER"
+    tr["final_discord_channel"] = "#starter-signals"
+    text = format_alert(tr)
+    # Sanitized text wins
+    assert "Starter-quality candidate" in text
+    # Raw misleading prose must not appear in the Why line
+    # (the deterministic "All STARTER conditions met." action label is still allowed,
+    #  but the raw claim "All SNIPE_IT conditions met" must not appear)
+    assert "All SNIPE_IT conditions met" not in text
+
+
+# 12D-6: FRESHNESS block is still present after Phase 12D additions
+def test_12d_freshness_block_still_present():
+    tr = _tiering_result(tier="SNIPE_IT", scan_price=182.50)
+    text = format_alert(tr)
+    assert "FRESHNESS" in text
+    assert "Scan Price:" in text
+    assert "snapshot_only" in text
+
+
+# 12D-7: STARTER alert language must not say "All SNIPE_IT conditions met"
+def test_12d_starter_alert_language_still_not_snipe():
+    tr = _tiering_result(
+        tier="STARTER",
+        score=78,
+        capital_action="starter_only",
+        reason="Starter-quality candidate; reduced size.",
+        sanitized_reason=None,
+    )
+    tr["final_tier"] = "STARTER"
+    tr["final_discord_channel"] = "#starter-signals"
+    text = format_alert(tr)
+    # Deterministic STARTER action label is used; the SNIPE label must not appear
+    assert "All SNIPE_IT conditions met" not in text
+    assert "All STARTER conditions met" in text

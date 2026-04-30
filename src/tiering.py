@@ -30,6 +30,35 @@ CAPITAL_MAP = {
 }
 
 # ---------------------------------------------------------------------------
+# Phase 12A: Alert integrity — tier-contradicting phrase replacement
+# ---------------------------------------------------------------------------
+# Phrases that must not appear in the displayed reason for a given final tier.
+# Listed longest-first within each tier to prevent partial-match shadowing.
+# Format: (banned_phrase_lowercase_match, replacement_text)
+_TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
+    "NEAR_ENTRY": [
+        ("reducing conviction to starter tier only", "Watch-only; confirmation pending."),
+        ("all snipe_it conditions met", "Watch-only; confirmation pending."),
+        ("snipe_it conditions met", "Watch-only; confirmation pending."),
+        ("all starter conditions met", "Watch-only; confirmation pending."),
+        ("starter tier only", "watch-only"),
+        ("capital authorized", "no capital authorized"),
+        ("full quality allowed", "no capital authorized"),
+    ],
+    "STARTER": [
+        ("all snipe_it conditions met", "Starter-quality candidate; full SNIPE confirmation not granted."),
+        ("snipe_it conditions met", "Starter-quality candidate; full SNIPE confirmation not granted."),
+    ],
+    "WAIT": [
+        ("capital authorized", "No capital authorized."),
+        ("full quality allowed", "No capital authorized."),
+        ("full quality", "no actionable setup"),
+        ("execute now", "No capital authorized."),
+        ("enter now", "No capital authorized."),
+    ],
+}
+
+# ---------------------------------------------------------------------------
 # Veto sets (strings match prefilter.py VETO_* constants)
 # ---------------------------------------------------------------------------
 
@@ -338,6 +367,208 @@ def _classify_current_acceptance(signal: dict, key_features: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 12A: Sanitize reason text for final tier
+# ---------------------------------------------------------------------------
+
+def _replace_phrase_non_overlapping(text: str, banned_lower: str, replacement: str) -> str:
+    """Replace every non-overlapping case-insensitive occurrence of `banned_lower`
+    in `text` with `replacement`. The cursor advances over the matched span in the
+    source text only — never into the inserted replacement — so a replacement that
+    contains the banned substring cannot trigger another match.
+    """
+    if not banned_lower:
+        return text
+    lower_text = text.lower()
+    n = len(lower_text)
+    parts: list[str] = []
+    cursor = 0
+    while cursor < n:
+        idx = lower_text.find(banned_lower, cursor)
+        if idx == -1:
+            parts.append(text[cursor:])
+            break
+        parts.append(text[cursor:idx])
+        parts.append(replacement)
+        cursor = idx + len(banned_lower)
+    else:
+        # cursor reached n exactly — nothing trailing
+        pass
+    return "".join(parts)
+
+
+def _sanitize_reason_for_tier(reason: str | None, final_tier: str) -> str:
+    """Remove phrases from Claude's reason that contradict final_tier.
+
+    Uses case-insensitive substring replacement from _TIER_BANNED_PHRASES.
+    Does not attempt NLP — only replaces explicit tier-contradiction strings.
+    Preserves all chart structure and analysis reasoning.
+    Returns the original reason unchanged for SNIPE_IT (no restrictions).
+
+    Replacement is performed as a single non-overlapping pass per phrase, so a
+    replacement that itself contains the banned substring will not loop.
+    """
+    if not reason:
+        return ""
+    banned_list = _TIER_BANNED_PHRASES.get(final_tier, [])
+    if not banned_list:
+        return str(reason)
+    result = str(reason)
+    for banned_lower, replacement in banned_list:
+        result = _replace_phrase_non_overlapping(result, banned_lower, replacement)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 12B: Conservative NEAR_ENTRY missing_conditions backfill
+# ---------------------------------------------------------------------------
+# Doctrine: NEAR_ENTRY alerts must be explicit about what is missing, but the
+# bot must not invent progress. If both retest and hold are "missing", there is
+# no observable progress and the empty-list veto is allowed to downgrade the
+# signal to WAIT (existing behavior preserved). Backfill runs only when at
+# least one of retest_status / hold_status is "partial" or "confirmed".
+#
+# This backfill never overrides hard vetoes — semantic_price_sanity_failures,
+# current_acceptance_invalidated/damaging, prefilter blockers, and structure
+# absence still fire downstream in _determine_final_tier and can downgrade
+# NEAR_ENTRY → WAIT regardless of the missing_conditions list contents.
+#
+# This backfill is NEVER applied to SNIPE_IT or STARTER claude_tier. Those
+# tier gates remain exactly as before.
+
+def _backfill_missing_conditions(signal: dict) -> list[str]:
+    """Return a deterministic missing_conditions list, or [] if no progress.
+
+    Returns [] when both retest_status and hold_status are 'missing' so the
+    caller's empty-list veto can downgrade the signal to WAIT.
+    """
+    retest = signal.get("retest_status", "missing")
+    hold = signal.get("hold_status", "missing")
+
+    has_partial_progress = (
+        retest in ("partial", "confirmed") or hold in ("partial", "confirmed")
+    )
+    if not has_partial_progress:
+        return []
+
+    out: list[str] = []
+    if retest == "missing":
+        out.append("missing_retest")
+    if hold == "missing":
+        out.append("missing_hold")
+    if not out:
+        out.append("current_acceptance_needed")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Phase 12C: Risk Realism informational fields
+# ---------------------------------------------------------------------------
+# Operator-clarity layer. NOT a hard-filter layer.
+#
+# Phase 10 _semantic_price_sanity_failures remains canonical for impossible
+# geometry (invalidation >= trigger, first target <= trigger, risk_reward <= 0,
+# current_price below invalidation). Phase 12C must NOT own those rejections,
+# and must NOT add a competing rejection reason. Phase 12C only labels what the
+# risk window looks like for operator awareness.
+#
+# State precedence (most conservative wins):
+#   invalid > fragile > tight > healthy > unknown
+#
+# Phase 12C does not modify final_tier, capital_action, discord_channel,
+# downgrades, or rejection_reason. It populates informational fields only.
+
+def _classify_risk_realism(
+    trigger: float | None,
+    invalidation: float | None,
+    current_price: float | None,
+) -> tuple[str, str, dict]:
+    """Classify whether the risk window is realistic. Informational only.
+
+    Returns (state, note, computed_fields_dict). The dict has four keys:
+        risk_distance, risk_distance_pct,
+        current_price_to_invalidation, current_price_to_invalidation_pct.
+    Any of those may be None when the inputs are missing or non-numeric.
+    """
+    fields: dict = {
+        "risk_distance": None,
+        "risk_distance_pct": None,
+        "current_price_to_invalidation": None,
+        "current_price_to_invalidation_pct": None,
+    }
+
+    risk_distance: float | None = None
+    risk_distance_pct: float | None = None
+    if trigger is not None and invalidation is not None:
+        try:
+            t = float(trigger)
+            i = float(invalidation)
+            risk_distance = t - i
+            fields["risk_distance"] = round(risk_distance, 4)
+            if t != 0:
+                risk_distance_pct = risk_distance / abs(t) * 100
+                fields["risk_distance_pct"] = round(risk_distance_pct, 3)
+        except (TypeError, ValueError):
+            pass
+
+    cp_to_inval: float | None = None
+    cp_to_inval_pct: float | None = None
+    if current_price is not None and invalidation is not None:
+        try:
+            cp = float(current_price)
+            i = float(invalidation)
+            cp_to_inval = cp - i
+            fields["current_price_to_invalidation"] = round(cp_to_inval, 4)
+            if cp != 0:
+                cp_to_inval_pct = cp_to_inval / abs(cp) * 100
+                fields["current_price_to_invalidation_pct"] = round(cp_to_inval_pct, 3)
+        except (TypeError, ValueError):
+            pass
+
+    # Cannot classify without risk_distance_pct
+    if risk_distance_pct is None:
+        return (
+            "unknown",
+            "Risk realism unknown; missing trigger, invalidation, or current price.",
+            fields,
+        )
+
+    # Impossible geometry — Phase 10 owns rejection. Mark informationally only.
+    if risk_distance is not None and risk_distance <= 0:
+        return (
+            "invalid",
+            "Risk geometry invalid; semantic gate owns rejection.",
+            fields,
+        )
+
+    # Classify by risk_distance_pct (most conservative wins)
+    if risk_distance_pct < 0.35:
+        state = "fragile"
+    elif risk_distance_pct < 0.75:
+        state = "tight"
+    else:
+        state = "healthy"
+
+    # current_price_to_invalidation_pct < 1.0 → escalate at least to tight.
+    # If price has already traded below invalidation, Phase 10 owns rejection,
+    # but for operator clarity we still mark this as fragile.
+    if cp_to_inval_pct is not None:
+        if cp_to_inval_pct < 0:
+            state = "fragile"
+        elif cp_to_inval_pct < 1.0:
+            if state == "healthy":
+                state = "tight"
+
+    if state == "fragile":
+        note = "Risk window is fragile; invalidation is very close."
+    elif state == "tight":
+        note = "Risk window is tight; verify live chart before entry."
+    else:
+        note = "Risk window is healthy."
+
+    return (state, note, fields)
+
+
+# ---------------------------------------------------------------------------
 # Downgrade cascade
 # ---------------------------------------------------------------------------
 
@@ -533,21 +764,38 @@ def validate(
         except (TypeError, ValueError):
             pass
 
+    # Phase 12B: conservative backfill of missing_conditions for NEAR_ENTRY when
+    # at least one sign of partial progress exists. Does not run for SNIPE_IT
+    # or STARTER. Hard vetoes downstream still fire — backfill never grants entry.
+    working_signal = dict(raw_signal)
+    if claude_tier == "NEAR_ENTRY":
+        existing_mc = working_signal.get("missing_conditions")
+        if not isinstance(existing_mc, list) or not existing_mc:
+            backfilled = _backfill_missing_conditions(working_signal)
+            if backfilled:
+                working_signal["missing_conditions"] = backfilled
+
     final_tier, downgrades, notes = _determine_final_tier(
-        claude_tier, raw_signal, prefilter_vetoes, score, config, current_price, key_features
+        claude_tier, working_signal, prefilter_vetoes, score, config, current_price, key_features
     )
 
     # applied_vetoes: prefilter vetoes + signal-derived vetoes (deduplicated)
     applied_vetoes = list(prefilter_vetoes)
-    for v in _signal_derived_vetoes(raw_signal):
+    for v in _signal_derived_vetoes(working_signal):
         if v not in applied_vetoes:
             applied_vetoes.append(v)
 
-    # Build corrected final_signal with deterministic routing applied
-    final_signal = dict(raw_signal)
+    # Build corrected final_signal with deterministic routing applied.
+    # Use working_signal so 12B-backfilled missing_conditions are visible.
+    final_signal = dict(working_signal)
     final_signal["tier"] = final_tier
     final_signal["discord_channel"] = CHANNEL_MAP[final_tier]
     final_signal["capital_action"] = CAPITAL_MAP[final_tier]
+
+    # Phase 12A: sanitize Claude prose so alerts cannot display tier-contradicting language
+    final_signal["sanitized_reason"] = _sanitize_reason_for_tier(
+        final_signal.get("reason"), final_tier
+    )
 
     # Phase 11: Freshness/drift fields — snapshot_only architecture.
     # scan_price is the last close at scan time (from prefilter key_features).
@@ -583,6 +831,22 @@ def validate(
     final_signal["freshness_note"] = (
         "Signal based on scan-time price; verify live chart before entry."
     )
+
+    # Phase 12C: Risk Realism informational fields. Operator-clarity only.
+    # Does NOT change final_tier, capital_action, discord_channel, or downgrades.
+    # Phase 10 _semantic_price_sanity_failures retains canonical authority over
+    # impossible-geometry rejection.
+    _rr_trigger = final_signal.get("trigger_level")
+    _rr_invalidation = final_signal.get("invalidation_level")
+    _rr_state, _rr_note, _rr_fields = _classify_risk_realism(
+        _rr_trigger, _rr_invalidation, current_price
+    )
+    final_signal["risk_distance"] = _rr_fields["risk_distance"]
+    final_signal["risk_distance_pct"] = _rr_fields["risk_distance_pct"]
+    final_signal["current_price_to_invalidation"] = _rr_fields["current_price_to_invalidation"]
+    final_signal["current_price_to_invalidation_pct"] = _rr_fields["current_price_to_invalidation_pct"]
+    final_signal["risk_realism_state"] = _rr_state
+    final_signal["risk_realism_note"] = _rr_note
 
     safe_for_alert = final_tier != "WAIT"
 

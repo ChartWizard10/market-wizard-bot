@@ -1163,3 +1163,466 @@ def test_cava_style_valid_geometry_but_damaging_current_acceptance_caps_starter(
     assert any("damaging" in d for d in result["downgrades"]), (
         f"Downgrade reason must mention 'damaging', got: {result['downgrades']}"
     )
+
+
+# ===========================================================================
+# Phase 12A — Alert Integrity / Sanitized Reason
+# ===========================================================================
+
+from src.tiering import _sanitize_reason_for_tier
+
+
+# 12A-1: sanitized_reason present in final_signal
+def test_12a_sanitized_reason_present_in_final_signal():
+    result = validate(_snipe_signal(), _pf(), _BASE_CONFIG)
+    assert "sanitized_reason" in result["final_signal"]
+
+
+# 12A-2: SNIPE_IT reason is preserved unchanged (no restrictions on SNIPE)
+def test_12a_snipe_it_reason_preserved():
+    signal = _snipe_signal(reason="All SNIPE_IT conditions met — execute full quality.")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert result["final_tier"] == "SNIPE_IT"
+    assert "All SNIPE_IT conditions met" in (fs["sanitized_reason"] or "")
+
+
+# 12A-3: STARTER final_tier removes SNIPE_IT-claiming language
+def test_12a_starter_sanitized_removes_snipe_language():
+    dirty = "All SNIPE_IT conditions met — execute at full quality."
+    clean = _sanitize_reason_for_tier(dirty, "STARTER")
+    assert "All SNIPE_IT conditions met" not in clean
+    assert "Starter-quality" in clean or "SNIPE confirmation not granted" in clean
+
+
+# 12A-4: NEAR_ENTRY sanitized removes capital-approved language
+def test_12a_near_entry_sanitized_removes_capital_language():
+    dirty = "Zone valid. Reducing conviction to STARTER tier only — retest not confirmed."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "STARTER tier only" not in clean
+    assert "watch-only" in clean.lower() or "confirmation pending" in clean.lower()
+
+
+# 12A-5: WAIT sanitized removes entry-approved language
+def test_12a_wait_sanitized_removes_entry_language():
+    dirty = "Full quality allowed — capital authorized to enter."
+    clean = _sanitize_reason_for_tier(dirty, "WAIT")
+    assert "capital authorized" not in clean.lower() or "no capital authorized" in clean.lower()
+    assert "full quality allowed" not in clean.lower() or "no capital authorized" in clean.lower()
+
+
+# 12A-6: STARTER validate call produces sanitized_reason in final_signal
+def test_12a_starter_validate_sanitized_reason_in_signal():
+    signal = _starter_signal(reason="All SNIPE_IT conditions met — reduced size only.")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    fs = result["final_signal"]
+    sanitized = fs.get("sanitized_reason") or ""
+    assert "All SNIPE_IT conditions met" not in sanitized
+
+
+# 12A-7: sanitize_reason_for_tier is a pure function (empty reason returns empty string)
+def test_12a_sanitize_empty_reason_returns_empty():
+    assert _sanitize_reason_for_tier("", "STARTER") == ""
+    assert _sanitize_reason_for_tier(None, "NEAR_ENTRY") == ""
+
+
+# 12A-8: Regression — replacement string that contains its banned phrase must
+# not cause the sanitizer to re-scan inserted replacement text. Previously the
+# while/find loop produced an infinite loop because "No capital authorized."
+# contains "capital authorized" and was matched again on every iteration.
+def test_12a_sanitizer_replacement_that_contains_banned_phrase_does_not_loop():
+    # Direct unit-level call — must terminate.
+    dirty = "Capital authorized — proceed to entry."
+    clean = _sanitize_reason_for_tier(dirty, "WAIT")
+    assert isinstance(clean, str)
+    # The misleading entry permission must be neutered. The sanitizer's intent
+    # is to ensure any reader sees "no capital authorized" wording, not raw
+    # "capital authorized" as a positive permission.
+    assert "no capital authorized" in clean.lower()
+
+    # Through validate() — must terminate, must keep WAIT, must populate sanitized_reason.
+    signal = _wait_signal(reason="Capital authorized — proceed to entry.")
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    fs = result["final_signal"]
+    sanitized = fs.get("sanitized_reason") or ""
+    assert "no capital authorized" in sanitized.lower()
+
+
+# 12A-9: NEAR_ENTRY equivalent — same self-containing replacement bug class.
+# NEAR_ENTRY has ("capital authorized", "no capital authorized") which is
+# structurally identical to the WAIT case.
+def test_12a_near_entry_capital_authorized_replacement_does_not_loop():
+    dirty = "Setup forming. Capital authorized once retest confirms."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert isinstance(clean, str)
+    assert "no capital authorized" in clean.lower()
+
+
+# ===========================================================================
+# Phase 12B: Conservative NEAR_ENTRY missing_conditions backfill
+# ===========================================================================
+
+# 12B-1: No backfill when both retest and hold are missing — no observable
+# progress, so missing_conditions stays empty and the existing veto runs the
+# signal down to WAIT.
+def test_12b_no_backfill_when_retest_and_hold_both_missing():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="missing",
+        hold_status="missing",
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["capital_action"] == "no_trade"
+    fs = result["final_signal"]
+    # Backfill must not invent items
+    assert fs.get("missing_conditions") in ([], None) or fs.get("missing_conditions") == []
+
+
+# 12B-2: Backfill runs when retest is partial — at least one sign of progress.
+def test_12b_backfills_missing_conditions_when_retest_partial():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="partial",
+        hold_status="missing",
+        invalidation_level=178.20,
+        trigger_level=182.50,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == "wait_no_capital"
+    fs = result["final_signal"]
+    backfilled = fs.get("missing_conditions") or []
+    assert isinstance(backfilled, list)
+    assert backfilled  # non-empty
+    # Hold is still missing, so "missing_hold" is the deterministic item
+    assert "missing_hold" in backfilled
+
+
+# 12B-3: Backfill runs when hold is partial — at least one sign of progress.
+def test_12b_backfills_missing_conditions_when_hold_partial():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="missing",
+        hold_status="partial",
+        invalidation_level=178.20,
+        trigger_level=182.50,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == "wait_no_capital"
+    fs = result["final_signal"]
+    backfilled = fs.get("missing_conditions") or []
+    assert isinstance(backfilled, list)
+    assert backfilled
+    assert "missing_retest" in backfilled
+
+
+# 12B-4: Backfill must NOT override Phase 10 semantic geometry failure.
+# Invalidation >= trigger is impossible bullish geometry — hard veto always wins.
+def test_12b_backfill_does_not_override_semantic_geometry_failure():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="partial",
+        hold_status="missing",
+        trigger_level=180.00,
+        invalidation_level=182.00,  # Above trigger — impossible bullish geometry
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["capital_action"] == "no_trade"
+    # The downgrade reason must mention the Phase 10 semantic sanity failure
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "semantic_price_sanity_failed" in downgrade_text
+
+
+# 12B-5: Backfill must NOT override Phase 10.1 current_acceptance damage cap.
+# Price below trigger ("damaging") downgrades SNIPE/STARTER → NEAR_ENTRY but
+# also stops NEAR_ENTRY from being escalated. For a NEAR_ENTRY claude_tier
+# under damaging acceptance with valid geometry, NEAR_ENTRY remains, never gets
+# converted into a capital-authorized state by Phase 12B's backfill.
+def test_12b_backfill_does_not_override_current_acceptance_failure():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="partial",
+        hold_status="missing",
+        trigger_level=182.50,
+        invalidation_level=178.20,
+    )
+    # current_price below trigger → damaging acceptance
+    pf = {"veto_flags": [], "key_features": {"current_price": 180.00}}
+    result = validate(signal, pf, _BASE_CONFIG)
+    # Capital must remain wait_no_capital regardless of backfill — NEAR_ENTRY
+    # tier never grants capital.
+    assert result["capital_action"] == "wait_no_capital"
+    # Tier itself stays NEAR_ENTRY (or downgrades to WAIT) but never escalates.
+    assert result["final_tier"] in ("NEAR_ENTRY", "WAIT")
+
+
+# 12B-6: SNIPE_IT and STARTER gates must be unchanged. The backfill only
+# applies to claude_tier=NEAR_ENTRY signals, so a valid SNIPE_IT and STARTER
+# fixture should produce the same result as before Phase 12B.
+def test_12b_snipe_and_starter_gates_unchanged():
+    snipe_result = validate(_snipe_signal(), _pf(), _BASE_CONFIG)
+    assert snipe_result["final_tier"] == "SNIPE_IT"
+    assert snipe_result["final_discord_channel"] == "#snipe-signals"
+    assert snipe_result["capital_action"] == "full_quality_allowed"
+
+    starter_result = validate(_starter_signal(), _pf(), _BASE_CONFIG)
+    assert starter_result["final_tier"] == "STARTER"
+    assert starter_result["final_discord_channel"] == "#starter-signals"
+    assert starter_result["capital_action"] == "starter_only"
+
+    # Even if we hand SNIPE_IT/STARTER an empty missing_conditions, Phase 12B
+    # backfill must not run for those tiers — their gates are independent.
+    snipe_empty_mc = validate(
+        _snipe_signal(missing_conditions=[]), _pf(), _BASE_CONFIG
+    )
+    assert snipe_empty_mc["final_tier"] == "SNIPE_IT"
+    starter_empty_mc = validate(
+        _starter_signal(missing_conditions=[]), _pf(), _BASE_CONFIG
+    )
+    assert starter_empty_mc["final_tier"] == "STARTER"
+
+
+# ===========================================================================
+# Phase 12C: Risk Realism informational fields
+# ===========================================================================
+
+from src.tiering import _classify_risk_realism
+
+
+# 12C-1: Tiny risk distance → fragile state. Final tier preserved.
+def test_12c_valid_geometry_tiny_stop_gets_fragile_risk_state():
+    # trigger=100.00, invalidation=99.70 → risk_distance=0.30, pct=0.30%
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=99.70,
+        targets=[{"label": "T1", "level": 105.00, "reason": "Prior swing high"}],
+        risk_reward=3.5,
+    )
+    kf = {"current_price": 101.50}
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "fragile"
+    assert "fragile" in fs["risk_realism_note"].lower()
+    # Phase 12C must NOT introduce semantic_price_sanity_failed for valid geometry
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "semantic_price_sanity_failed" not in downgrade_text
+    # Final tier must not be downgraded by Phase 12C alone
+    assert result["final_tier"] == "SNIPE_IT"
+
+
+# 12C-2: Risk distance between 0.35% and 0.75% → tight state.
+def test_12c_valid_geometry_tight_stop_gets_tight_risk_state():
+    # trigger=100.00, invalidation=99.50 → pct=0.50%
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=99.50,
+        targets=[{"label": "T1", "level": 105.00, "reason": "Prior swing high"}],
+        risk_reward=3.5,
+    )
+    kf = {"current_price": 102.00}
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "tight"
+    assert "tight" in fs["risk_realism_note"].lower()
+    assert result["final_tier"] == "SNIPE_IT"
+
+
+# 12C-3: Healthy risk window — risk_distance_pct >= 0.75% AND
+# current_price_to_invalidation_pct >= 1.0%.
+def test_12c_healthy_risk_window_gets_healthy_state():
+    # trigger=100.00, invalidation=98.00 → risk_distance_pct=2.0%
+    # current_price=102.00, cp - invalidation = 4.0, pct = 4.0/102 * 100 = 3.92%
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=98.00,
+        targets=[{"label": "T1", "level": 110.00, "reason": "Prior swing high"}],
+        risk_reward=5.0,
+    )
+    kf = {"current_price": 102.00}
+    result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "healthy"
+    assert "healthy" in fs["risk_realism_note"].lower()
+    assert fs["risk_distance"] == 2.0
+    assert fs["risk_distance_pct"] == 2.0
+
+
+# 12C-4: Missing trigger or invalidation → unknown, no crash, no downgrade.
+def test_12c_missing_fields_gets_unknown_without_downgrade():
+    # NEAR_ENTRY signal with no invalidation_level — should be "unknown"
+    signal = _near_entry_signal(invalidation_level=None)
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "unknown"
+    assert fs["risk_distance"] is None
+    assert fs["risk_distance_pct"] is None
+    # No new hard downgrade caused by risk realism
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "risk_realism" not in downgrade_text.lower()
+    assert "fragile" not in downgrade_text.lower()
+
+
+# 12C-5: Impossible geometry still produces canonical semantic_price_sanity_failed.
+# Phase 12C must NOT replace or compete with that rejection reason. risk_realism
+# may still mark the state as "invalid" informationally.
+def test_12c_impossible_geometry_still_uses_semantic_price_sanity_failed():
+    # invalidation=105.00 >= trigger=100.00 → impossible bullish geometry
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=105.00,
+        targets=[{"label": "T1", "level": 110.00, "reason": "Prior swing high"}],
+        risk_reward=3.5,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    # Canonical rejection reason still mentions semantic_price_sanity_failed
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "semantic_price_sanity_failed" in downgrade_text, (
+        f"Phase 10 semantic gate must own impossible-geometry rejection. "
+        f"Got downgrades: {result.get('downgrades')!r}"
+    )
+    # Final tier WAIT
+    assert result["final_tier"] == "WAIT"
+    # Phase 12C marks informationally — but does not own the rejection
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] == "invalid"
+
+
+# 12C-6: JBHT-style valid STARTER must remain STARTER. risk_realism is
+# informational and does not change tier or capital action.
+def test_12c_risk_realism_does_not_change_jbht_style_starter():
+    # JBHT: trigger=190.00, invalidation=185.50 → risk_distance_pct ≈ 2.37% → healthy
+    signal = _starter_signal(
+        ticker="JBHT",
+        structure_event="BOS",
+        setup_family="continuation",
+        trend_state="mature_continuation",
+        trigger_level=190.00,
+        invalidation_level=185.50,
+        targets=[{"label": "T1", "level": 205.00, "reason": "Prior swing high cluster"}],
+        risk_reward=3.2,
+        overhead_status="moderate",
+        retest_status="confirmed",
+        hold_status="confirmed",
+        sma_value_alignment="supportive",
+        score=78,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["capital_action"] == "starter_only"
+    fs = result["final_signal"]
+    assert fs["risk_realism_state"] in ("healthy", "tight")
+
+
+# 12C-7: Phase 10/10.1 regression — FORM/VFC/CAVA/JBHT scenarios still pass.
+# This test re-runs the canonical Phase 10/10.1 fixtures alongside Phase 12C
+# to prove that adding the risk_realism informational fields did not regress
+# any existing semantic gate or current-acceptance behavior.
+def test_12c_phase_10_1_form_vfc_cava_tests_still_pass():
+    # FORM-style: SNIPE with selling-into-zone (damaging) + valid geometry → NEAR_ENTRY cap
+    form_signal = _snipe_signal(
+        ticker="FORM",
+        trigger_level=50.00,
+        invalidation_level=46.00,
+        targets=[{"label": "T1", "level": 60.00, "reason": "Prior swing high"}],
+        risk_reward=3.0,
+        retest_status="confirmed",
+        hold_status="confirmed",
+    )
+    form_kf = {
+        "current_price": 47.50,
+        "current_bar_direction": "red",
+        "current_close_location_pct": 0.18,
+    }
+    form_result = validate(form_signal, _pf_with_key_features(form_kf), _BASE_CONFIG)
+    assert form_result["final_tier"] == "NEAR_ENTRY", (
+        "FORM-style damaging acceptance with valid geometry must cap to NEAR_ENTRY"
+    )
+
+    # VFC-style: price already through stop → WAIT
+    vfc_signal = _snipe_signal(
+        ticker="VFC",
+        trigger_level=15.00,
+        invalidation_level=14.20,
+        targets=[{"label": "T1", "level": 18.00, "reason": "Prior swing high"}],
+        risk_reward=3.5,
+    )
+    vfc_kf = {"current_price": 13.80}
+    vfc_result = validate(vfc_signal, _pf_with_key_features(vfc_kf), _BASE_CONFIG)
+    assert vfc_result["final_tier"] == "WAIT", (
+        "VFC-style price-through-stop must force WAIT"
+    )
+
+    # CAVA valid-geometry damaging → STARTER capped to NEAR_ENTRY
+    cava_signal = _starter_signal(
+        ticker="CAVA",
+        trigger_level=90.00,
+        invalidation_level=85.00,
+        targets=[{"label": "T1", "level": 105.00, "reason": "Prior swing high"}],
+        risk_reward=3.75,
+        retest_status="confirmed",
+        hold_status="confirmed",
+        score=78,
+    )
+    cava_kf = {
+        "current_price": 87.50,
+        "current_bar_direction": "red",
+        "current_close_location_pct": 0.22,
+    }
+    cava_result = validate(cava_signal, _pf_with_key_features(cava_kf), _BASE_CONFIG)
+    assert cava_result["final_tier"] == "NEAR_ENTRY", (
+        "CAVA valid-geometry damaging acceptance must cap STARTER to NEAR_ENTRY"
+    )
+
+    # JBHT valid STARTER preserved
+    jbht_signal = _starter_signal(
+        ticker="JBHT",
+        structure_event="BOS",
+        trigger_level=190.00,
+        invalidation_level=185.50,
+        targets=[{"label": "T1", "level": 205.00, "reason": "Prior swing high"}],
+        risk_reward=3.2,
+        overhead_status="moderate",
+        retest_status="confirmed",
+        hold_status="confirmed",
+        sma_value_alignment="supportive",
+        score=78,
+    )
+    jbht_result = validate(jbht_signal, _pf(), _BASE_CONFIG)
+    assert jbht_result["final_tier"] == "STARTER", (
+        "JBHT-style valid STARTER must remain STARTER under Phase 12C"
+    )
+
+
+# 12C-8: Direct unit test for _classify_risk_realism (no validate() coupling).
+def test_12c_classify_risk_realism_direct_units():
+    # Healthy
+    state, note, fields = _classify_risk_realism(100.0, 98.0, 102.0)
+    assert state == "healthy"
+    assert fields["risk_distance"] == 2.0
+    assert fields["risk_distance_pct"] == 2.0
+
+    # Tight
+    state, _, _ = _classify_risk_realism(100.0, 99.50, 101.50)
+    assert state == "tight"
+
+    # Fragile
+    state, _, _ = _classify_risk_realism(100.0, 99.80, 101.0)
+    assert state == "fragile"
+
+    # Invalid (impossible geometry — Phase 10 owns rejection, Phase 12C labels)
+    state, note, _ = _classify_risk_realism(100.0, 105.0, 101.0)
+    assert state == "invalid"
+    assert "semantic gate owns rejection" in note.lower()
+
+    # Unknown — missing trigger
+    state, _, fields = _classify_risk_realism(None, 98.0, 102.0)
+    assert state == "unknown"
+    assert fields["risk_distance"] is None
+
+    # Unknown — missing invalidation
+    state, _, _ = _classify_risk_realism(100.0, None, 102.0)
+    assert state == "unknown"
