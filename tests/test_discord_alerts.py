@@ -1130,3 +1130,199 @@ def test_12_2_existing_12_1_tests_still_pass():
     tr_st["final_discord_channel"] = "#starter-signals"
     text_st = format_alert(tr_st)
     assert "FORCED PARTICIPATION" in text_st
+
+
+# ===========================================================================
+# Phase 12.3 — NEAR_ENTRY Blocker Explanation Integrity + STARTER Wording
+# ===========================================================================
+
+# 12.3-D1: NEAR_ENTRY alert renders Blocker line
+def test_12_3_near_entry_alert_renders_blocker_note():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_not_confirmed"],
+        upgrade_trigger="Full zone retest with hold confirmation.",
+        reason="Zone valid — awaiting retest.",
+        sanitized_reason="Zone valid — awaiting retest.",
+        near_entry_blocker_note=(
+            "Blocker: retest is not fully confirmed; wait for full zone interaction and hold."
+        ),
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "Blocker:" in text
+    assert "retest is not fully confirmed" in text
+
+
+# 12.3-D2: NEAR_ENTRY alert does not render "Missing conditions: —"
+def test_12_3_near_entry_alert_missing_conditions_not_blank():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["trigger_acceptance — price is below trigger"],
+        upgrade_trigger="Price reclaims and holds above trigger with body-close confirmation.",
+        reason="Zone valid.",
+        sanitized_reason="Zone valid.",
+        near_entry_blocker_note=(
+            "Blocker: price is below trigger; wait for reclaim and hold above trigger."
+        ),
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "Missing conditions: —" not in text
+    assert "trigger_acceptance" in text
+
+
+# 12.3-D3: NEAR_ENTRY alert does not render "Upgrade trigger:    none"
+def test_12_3_near_entry_alert_upgrade_trigger_not_none():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_missing"],
+        upgrade_trigger="Full zone retest confirmed with body-close hold.",
+        reason="Zone valid.",
+        sanitized_reason="Zone valid.",
+        near_entry_blocker_note=(
+            "Blocker: retest is not fully confirmed; wait for full zone interaction and hold."
+        ),
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "Upgrade trigger:    none" not in text
+    assert "Full zone retest" in text
+
+
+# 12.3-D4: NEAR_ENTRY alert does not render "enter on confirmed close" language
+def test_12_3_near_entry_alert_no_enter_on_confirmed_close_language():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_status"],
+        upgrade_trigger="Full retest confirmation required.",
+        reason="Zone valid — enter on confirmed close above trigger.",
+        sanitized_reason="Zone valid — watch for confirmed close above trigger.",
+        near_entry_blocker_note="Blocker: retest is not fully confirmed.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "enter on confirmed close" not in text.lower()
+
+
+# 12.3-D5: NEAR_ENTRY alert does not render "stop below" language
+def test_12_3_near_entry_alert_no_stop_below_language():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_status"],
+        upgrade_trigger="Full retest confirmation required.",
+        reason="Zone valid — stop below 178.00.",
+        sanitized_reason="Zone valid — invalidation reference below 178.00.",
+        near_entry_blocker_note="Blocker: retest is not fully confirmed.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "stop below" not in text.lower()
+
+
+# 12.3-D6: STARTER alert does not contain "full SNIPE confirmation not granted"
+def test_12_3_starter_alert_replaces_snipe_denial_language():
+    tr = _tiering_result(
+        tier="STARTER",
+        score=78,
+        capital_action="starter_only",
+        reason="Setup satisfies all SNIPE_IT criteria.",
+        sanitized_reason="Starter-quality candidate; full-size confirmation not granted.",
+    )
+    tr["final_tier"] = "STARTER"
+    tr["final_discord_channel"] = "#starter-signals"
+    text = format_alert(tr)
+    assert "full snipe confirmation not granted" not in text.lower()
+    assert "full-size confirmation not granted" in text.lower()
+
+
+# 12.3-D7: STARTER and SNIPE_IT alerts do not render near_entry_blocker_note
+def test_12_3_starter_and_snipe_alerts_do_not_render_near_entry_blocker():
+    tr_st = _tiering_result(
+        tier="STARTER",
+        score=78,
+        capital_action="starter_only",
+        reason="Starter quality setup.",
+        sanitized_reason="Starter quality setup.",
+    )
+    tr_st["final_tier"] = "STARTER"
+    tr_st["final_discord_channel"] = "#starter-signals"
+    text_st = format_alert(tr_st)
+    assert "Blocker:" not in text_st
+
+    tr_sn = _tiering_result(
+        tier="SNIPE_IT",
+        reason="Clean MSS with FVG retest confirmed.",
+        sanitized_reason="Clean MSS with FVG retest confirmed.",
+    )
+    text_sn = format_alert(tr_sn)
+    assert "Blocker:" not in text_sn
+
+
+# 12.3-D8: Phase 12.2 language regressions still pass
+def test_12_3_phase_12_2_language_tests_still_pass():
+    from src.tiering import _sanitize_reason_for_tier
+
+    # 12.2 regression: NEAR_ENTRY removes SNIPE language
+    dirty = "All SNIPE_IT conditions satisfied."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "snipe_it" not in clean.lower()
+    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+
+    # Render in alert — NEAR_ENTRY with pre-cleaned sanitized_reason
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_not_confirmed"],
+        upgrade_trigger="Close above trigger with hold.",
+        reason="All SNIPE_IT conditions satisfied.",
+        sanitized_reason="Watchlist only until retest and hold confirm.",
+        near_entry_blocker_note="Blocker: retest is not fully confirmed.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "all snipe_it conditions" not in text.lower()
+    assert "watchlist only" in text.lower() or "retest and hold" in text.lower()
+
+    # 12.2 regression: STARTER alert uses STARTER not SNIPE language
+    tr2 = _tiering_result(
+        tier="STARTER",
+        score=78,
+        capital_action="starter_only",
+        reason="All SNIPE_IT conditions satisfied.",
+        sanitized_reason="All STARTER conditions met.",
+    )
+    tr2["final_tier"] = "STARTER"
+    tr2["final_discord_channel"] = "#starter-signals"
+    text2 = format_alert(tr2)
+    assert "all snipe_it conditions" not in text2.lower()
+    assert "all starter conditions met" in text2.lower()

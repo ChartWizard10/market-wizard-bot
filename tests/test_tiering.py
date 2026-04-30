@@ -1790,3 +1790,217 @@ def test_12_2_wait_removes_snipe_and_entry_language():
     clean = _sanitize_reason_for_tier(dirty, "WAIT")
     assert "snipe_it" not in clean.lower()
     assert "entry valid" not in clean.lower()
+
+
+# ===========================================================================
+# Phase 12.3 — NEAR_ENTRY Blocker Explanation Integrity + STARTER Wording
+# ===========================================================================
+
+from src.tiering import _build_near_entry_blocker_note
+
+
+# 12.3-1: NEAR_ENTRY with blank missing_conditions / upgrade_trigger gets blocker note
+def test_12_3_near_entry_blocker_added_when_missing_conditions_blank():
+    # retest confirmed, hold confirmed, healthy R:R, overhead clear
+    # missing_conditions blank, upgrade_trigger none
+    # Phase 12B backfills missing_conditions; Phase 12.3 backfills upgrade_trigger
+    signal = _near_entry_signal(
+        retest_status="confirmed",
+        hold_status="confirmed",
+        risk_reward=3.5,
+        overhead_status="clear",
+        missing_conditions=[],
+        upgrade_trigger="none",
+        invalidation_level=178.20,
+        targets=[{"label": "T1", "level": 195.0, "reason": "Prior swing"}],
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert "near_entry_blocker_note" in result["final_signal"]
+    assert "Blocker:" in result["final_signal"]["near_entry_blocker_note"]
+
+
+# Helper: prefilter result with current_price in key_features
+def _pf_price(price: float, vetoes: list | None = None) -> dict:
+    return {"veto_flags": vetoes or [], "key_features": {"current_price": price}}
+
+
+# 12.3-2: PVH-style — price below trigger backfills blocker note
+def test_12_3_pvh_style_near_entry_below_trigger_backfills_blocker():
+    signal = _near_entry_signal(
+        ticker="PVH",
+        trigger_level=91.90,
+        retest_status="confirmed",
+        hold_status="confirmed",
+        risk_reward=4.98,
+        overhead_status="clear",
+        missing_conditions=[],
+        upgrade_trigger="none",
+        invalidation_level=88.0,
+        targets=[{"label": "T1", "level": 98.0, "reason": "Prior swing high"}],
+    )
+    result = validate(signal, _pf_price(91.84), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    note = result["final_signal"]["near_entry_blocker_note"]
+    assert "price is below trigger" in note.lower()
+    assert "reclaim" in note.lower()
+
+
+# 12.3-3: PVH-style — missing_conditions not blank after backfill
+def test_12_3_pvh_style_missing_conditions_not_blank():
+    signal = _near_entry_signal(
+        ticker="PVH",
+        trigger_level=91.90,
+        retest_status="confirmed",
+        hold_status="confirmed",
+        risk_reward=4.98,
+        overhead_status="clear",
+        missing_conditions=[],
+        upgrade_trigger="none",
+        invalidation_level=88.0,
+        targets=[{"label": "T1", "level": 98.0, "reason": "Prior swing high"}],
+    )
+    result = validate(signal, _pf_price(91.84), _BASE_CONFIG)
+    mc = result["final_signal"].get("missing_conditions", [])
+    assert mc  # not blank
+    assert any("trigger_acceptance" in str(c).lower() for c in mc)
+
+
+# 12.3-4: PVH-style — upgrade_trigger not none after backfill
+def test_12_3_pvh_style_upgrade_trigger_not_none():
+    signal = _near_entry_signal(
+        ticker="PVH",
+        trigger_level=91.90,
+        retest_status="confirmed",
+        hold_status="confirmed",
+        risk_reward=4.98,
+        overhead_status="clear",
+        missing_conditions=[],
+        upgrade_trigger="none",
+        invalidation_level=88.0,
+        targets=[{"label": "T1", "level": 98.0, "reason": "Prior swing high"}],
+    )
+    result = validate(signal, _pf_price(91.84), _BASE_CONFIG)
+    ut = result["final_signal"].get("upgrade_trigger", "")
+    assert ut and str(ut).lower() != "none"
+    assert "reclaim" in ut.lower() or "trigger" in ut.lower()
+
+
+# 12.3-5: RMBS-style — missing retest/hold behavior preserved
+def test_12_3_rmbs_style_missing_retest_hold_behavior_preserved():
+    signal = _near_entry_signal(
+        ticker="RMBS",
+        retest_status="missing",
+        hold_status="missing",
+        missing_conditions=["retest_status", "hold_status"],
+        upgrade_trigger="Confirmed retest of FVG with hold above base.",
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    mc = result["final_signal"].get("missing_conditions", [])
+    assert mc
+    ut = result["final_signal"].get("upgrade_trigger", "")
+    assert ut and str(ut).lower() != "none"
+
+
+# 12.3-6: Retest partial — blocker references retest not fully confirmed
+def test_12_3_near_entry_retest_partial_blocker_specific():
+    signal = _near_entry_signal(
+        retest_status="partial",
+        hold_status="missing",
+        missing_conditions=["retest_partial", "hold_missing"],
+        upgrade_trigger="Full zone retest with body-close hold confirmation.",
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    note = result["final_signal"]["near_entry_blocker_note"]
+    assert "retest" in note.lower()
+    assert "not fully confirmed" in note.lower()
+
+
+# 12.3-7: Hold partial — blocker references hold not fully confirmed
+def test_12_3_near_entry_hold_partial_blocker_specific():
+    signal = _near_entry_signal(
+        retest_status="confirmed",
+        hold_status="partial",
+        missing_conditions=["hold_partial"],
+        upgrade_trigger="Body-close acceptance above zone base.",
+        invalidation_level=178.20,
+        targets=[{"label": "T1", "level": 195.0, "reason": "Prior swing"}],
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    note = result["final_signal"]["near_entry_blocker_note"]
+    assert "hold" in note.lower()
+    assert "not fully confirmed" in note.lower()
+
+
+# 12.3-8: R:R insufficient — blocker references R:R
+def test_12_3_near_entry_rr_blocker_specific():
+    signal = _near_entry_signal(
+        retest_status="confirmed",
+        hold_status="confirmed",
+        risk_reward=2.1,
+        missing_conditions=["rr_insufficient"],
+        upgrade_trigger="Wait for improved entry geometry.",
+        invalidation_level=178.20,
+        targets=[{"label": "T1", "level": 195.0, "reason": "Prior swing"}],
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    note = result["final_signal"]["near_entry_blocker_note"]
+    assert "r:r" in note.lower() or "risk" in note.lower()
+    assert "not sufficient" in note.lower()
+
+
+# 12.3-9: Overhead moderate — blocker references overhead / resistance
+def test_12_3_near_entry_overhead_blocker_specific():
+    signal = _near_entry_signal(
+        retest_status="confirmed",
+        hold_status="confirmed",
+        risk_reward=3.5,
+        overhead_status="moderate",
+        missing_conditions=["overhead_not_clear"],
+        upgrade_trigger="Reclaim through overhead resistance.",
+        invalidation_level=178.20,
+        targets=[{"label": "T1", "level": 195.0, "reason": "Prior swing"}],
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    note = result["final_signal"]["near_entry_blocker_note"]
+    assert "overhead" in note.lower() or "resistance" in note.lower()
+
+
+# 12.3-10: SNIPE_IT and STARTER do not receive near_entry_blocker_note
+def test_12_3_non_near_entry_does_not_add_blocker_note():
+    snipe_result = validate(_snipe_signal(), _pf(), _BASE_CONFIG)
+    assert snipe_result["final_tier"] == "SNIPE_IT"
+    assert "near_entry_blocker_note" not in snipe_result["final_signal"]
+
+    starter_result = validate(_starter_signal(), _pf(), _BASE_CONFIG)
+    assert starter_result["final_tier"] == "STARTER"
+    assert "near_entry_blocker_note" not in starter_result["final_signal"]
+
+
+# 12.3-11: NEAR_ENTRY sanitized_reason does not contain "enter on confirmed close"
+def test_12_3_near_entry_replaces_enter_on_confirmed_close_language():
+    dirty = "Zone valid — enter on confirmed close above trigger; invalidation below FVG base."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "enter on confirmed close" not in clean.lower()
+    assert "watch for confirmed close" in clean.lower()
+
+
+# 12.3-12: NEAR_ENTRY sanitized_reason does not contain "stop below"
+def test_12_3_near_entry_replaces_stop_below_language():
+    dirty = "Zone held — stop below 178.00 on daily close basis."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "stop below" not in clean.lower()
+    assert "invalidation reference below" in clean.lower()
+
+
+# 12.3-13: STARTER sanitized_reason does not contain "full SNIPE confirmation not granted"
+def test_12_3_starter_replaces_full_snipe_confirmation_not_granted():
+    dirty = "Setup satisfies all SNIPE_IT criteria; full SNIPE confirmation not granted."
+    clean = _sanitize_reason_for_tier(dirty, "STARTER")
+    assert "full snipe confirmation not granted" not in clean.lower()
+    assert "full-size confirmation not granted" in clean.lower()
