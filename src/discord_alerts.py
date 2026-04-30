@@ -229,7 +229,8 @@ def format_alert(
         _fmt_targets(targets),
     ]
 
-    if forced_part and forced_part.lower() not in ("none", "—", ""):
+    # Phase 12.1: NEAR_ENTRY never displays forced participation — no capital context
+    if final_tier != "NEAR_ENTRY" and forced_part and forced_part.lower() not in ("none", "—", ""):
         lines += ["──────────────────────────────", f"FORCED PARTICIPATION: {forced_part}"]
 
     if final_tier == "NEAR_ENTRY":
