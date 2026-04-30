@@ -12,6 +12,7 @@ from src.discord_alerts import (
     chunk_message,
     send_alert,
     _sanitize,
+    _clean_blocker_label,
 )
 
 
@@ -1326,3 +1327,171 @@ def test_12_3_phase_12_2_language_tests_still_pass():
     text2 = format_alert(tr2)
     assert "all snipe_it conditions" not in text2.lower()
     assert "all starter conditions met" in text2.lower()
+
+
+# ===========================================================================
+# Phase 12.3A — Clean Near-Entry Blocker Rendering
+# ===========================================================================
+
+_C_SIGNAL = {
+    "ticker": "C",
+    "timestamp_et": "2025-01-15T10:30:00-05:00",
+    "tier": "NEAR_ENTRY",
+    "score": 87,
+    "setup_family": "continuation",
+    "structure_event": "MSS",
+    "trend_state": "fresh_expansion",
+    "sma_value_alignment": "supportive",
+    "zone_type": "FVG",
+    "trigger_level": 128.44,
+    "retest_status": "confirmed",
+    "hold_status": "confirmed",
+    "invalidation_condition": "Daily close below FVG base",
+    "invalidation_level": None,
+    "targets": [{"label": "T1", "level": 140.0, "reason": "Prior swing"}],
+    "risk_reward": 4.60,
+    "overhead_status": "moderate",
+    "forced_participation": "none",
+    "missing_conditions": [],
+    "upgrade_trigger": "none",
+    "next_action": "Watch for reclaim above trigger.",
+    "discord_channel": "#near-entry-watch",
+    "capital_action": "wait_no_capital",
+    "reason": "Zone valid — awaiting trigger acceptance.",
+}
+_C_PF = {"veto_flags": [], "key_features": {"current_price": 128.35}}
+_C_CONFIG = {
+    "tiers": {
+        "snipe_it": {"min_score": 85, "min_rr": 3.0},
+        "starter": {"min_score": 75, "min_rr": 3.0},
+        "near_entry": {"min_score": 60},
+    }
+}
+
+
+# 12.3A-7: Rendered alert does not show double Blocker: prefix
+def test_12_3a_alert_no_double_blocker_prefix():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=87,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["trigger_acceptance — price is below trigger"],
+        upgrade_trigger="Price reclaims and holds above trigger with body-close confirmation.",
+        reason="Zone valid.",
+        sanitized_reason="Zone valid.",
+        near_entry_blocker_note=(
+            "Blocker: price is below trigger; wait for reclaim and hold above trigger."
+        ),
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    # Blocker label appears exactly once; note text is present without double prefix
+    assert "Blocker:" in text
+    assert "price is below trigger" in text
+    assert "Blocker: Blocker:" not in text
+
+
+# 12.3A-8: _clean_blocker_label strips one or more leading "Blocker:" prefixes
+def test_12_3a_clean_blocker_label_strips_prefix():
+    assert _clean_blocker_label("Blocker: price is below trigger.") == "price is below trigger."
+    assert _clean_blocker_label("Blocker:price is below trigger.") == "price is below trigger."
+    assert _clean_blocker_label("Blocker: Blocker: X") == "X"
+    assert _clean_blocker_label("blocker: Blocker: X") == "X"
+    assert _clean_blocker_label("no prefix here") == "no prefix here"
+    assert _clean_blocker_label("") == ""
+    assert _clean_blocker_label(None) == ""
+
+
+# 12.3A-9: C-style alert does not render "Missing conditions: —"
+def test_12_3a_alert_missing_conditions_not_dash_for_below_trigger():
+    from src.tiering import validate as tiering_validate
+
+    result = tiering_validate(dict(_C_SIGNAL), _C_PF, _C_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    text = format_alert(result)
+    assert "Missing conditions: —" not in text
+    assert "trigger_acceptance" in text
+
+
+# 12.3A-10: C-style alert does not render "Upgrade trigger:    none"
+def test_12_3a_alert_upgrade_trigger_not_none_for_below_trigger():
+    from src.tiering import validate as tiering_validate
+
+    result = tiering_validate(dict(_C_SIGNAL), _C_PF, _C_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    text = format_alert(result)
+    assert "Upgrade trigger:    none" not in text
+    assert "reclaims" in text.lower() or "trigger" in text.lower()
+
+
+# 12.3A-11: NEAR_ENTRY alert does not render "manage position" language
+def test_12_3a_alert_no_manage_position_language():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_status"],
+        upgrade_trigger="Full zone retest with hold confirmation.",
+        reason="Zone held — manage position if price attempts trigger.",
+        sanitized_reason="Zone held — No position management until capital is authorized.",
+        next_action="Watch zone — manage position if price attempts breakout.",
+        sanitized_next_action=(
+            "Watch zone — No position management until capital is authorized."
+        ),
+        near_entry_blocker_note="Blocker: retest is not fully confirmed.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "manage position" not in text.lower()
+    assert "no position management" in text.lower()
+    assert "capital is authorized" in text.lower()
+
+
+# 12.3A-12: PVH STARTER preserved; Phase 12.3 and 12.2 language regressions pass
+def test_12_3a_pvh_starter_language_preserved():
+    from src.tiering import _sanitize_reason_for_tier
+
+    # PVH STARTER: STARTER SIZE ONLY, full-size confirmation not granted, no Blocker:
+    tr_pvh = _tiering_result(
+        tier="STARTER",
+        score=82,
+        capital_action="starter_only",
+        reason="Setup satisfies all SNIPE_IT criteria.",
+        sanitized_reason="Starter-quality candidate; full-size confirmation not granted.",
+    )
+    tr_pvh["final_tier"] = "STARTER"
+    tr_pvh["final_discord_channel"] = "#starter-signals"
+    text_pvh = format_alert(tr_pvh)
+    assert "STARTER SIZE ONLY" in text_pvh
+    assert "full-size confirmation not granted" in text_pvh.lower()
+    assert "Blocker:" not in text_pvh
+
+    # Phase 12.3 regression: NEAR_ENTRY blocker note present but not double-prefixed
+    tr_ne = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_not_confirmed"],
+        upgrade_trigger="Full zone retest with hold.",
+        reason="Zone valid.",
+        sanitized_reason="Zone valid.",
+        near_entry_blocker_note=(
+            "Blocker: retest is not fully confirmed; wait for full zone interaction and hold."
+        ),
+    )
+    tr_ne["final_tier"] = "NEAR_ENTRY"
+    tr_ne["final_discord_channel"] = "#near-entry-watch"
+    text_ne = format_alert(tr_ne)
+    assert "Blocker:" in text_ne
+    assert "Blocker: Blocker:" not in text_ne
+
+    # Phase 12.2 regression: NEAR_ENTRY removes SNIPE language from reason
+    clean = _sanitize_reason_for_tier("All SNIPE_IT conditions satisfied.", "NEAR_ENTRY")
+    assert "snipe_it" not in clean.lower()
