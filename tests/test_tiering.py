@@ -1721,3 +1721,72 @@ def test_12_1_existing_phase_12_alerts_still_pass():
     assert result_c["final_signal"]["risk_realism_state"] in (
         "healthy", "tight", "fragile", "invalid", "unknown"
     )
+
+
+# ===========================================================================
+# Phase 12.2 — Final-Tier Language Sovereignty
+# ===========================================================================
+
+# 12.2-1: NEAR_ENTRY reason with "All SNIPE_IT conditions satisfied" is sanitized
+def test_12_2_near_entry_removes_all_snipe_conditions_satisfied():
+    dirty = "All SNIPE_IT conditions satisfied"
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "snipe_it" not in clean.lower()
+    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+
+
+# 12.2-2: NEAR_ENTRY reason with "satisfies all SNIPE_IT criteria" is sanitized
+def test_12_2_near_entry_removes_satisfies_all_snipe_criteria():
+    dirty = "Setup satisfies all SNIPE_IT criteria for entry"
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "snipe_it" not in clean.lower()
+    # "criteria" alone is acceptable but the SNIPE phrase must be gone
+    assert "snipe_it criteria" not in clean.lower()
+    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+
+
+# 12.2-3: NEAR_ENTRY reason with "entry valid" is sanitized
+def test_12_2_near_entry_removes_entry_valid_language():
+    dirty = "Zone defended cleanly — entry valid while price holds above the FVG bottom"
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "entry valid" not in clean.lower()
+    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+
+
+# 12.2-4: No duplicate "only until" when original phrase already ended with "only until X"
+def test_12_2_near_entry_does_not_duplicate_watchlist_replacement():
+    dirty = "entry valid only until the zone holds above 179"
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    # Cleanup regex must strip the dangling "only until..." tail
+    assert "confirm. only until" not in clean.lower()
+    assert clean.lower().count("only until") <= 1
+
+
+# 12.2-5: STARTER replaces SNIPE language with STARTER language
+def test_12_2_starter_replaces_snipe_language_with_starter_language():
+    dirty = "All SNIPE_IT conditions satisfied"
+    clean = _sanitize_reason_for_tier(dirty, "STARTER")
+    assert "snipe_it" not in clean.lower()
+    assert "all starter conditions met" in clean.lower()
+
+
+# 12.2-6: STARTER preserves starter-size language — not over-sanitized
+def test_12_2_starter_still_allows_starter_size_language():
+    dirty = "Partial zone interaction — starter size only"
+    clean = _sanitize_reason_for_tier(dirty, "STARTER")
+    assert "starter size only" in clean.lower()
+
+
+# 12.2-7: SNIPE_IT preserves SNIPE language (no banned list)
+def test_12_2_snipe_preserves_snipe_language():
+    dirty = "All SNIPE_IT conditions satisfied"
+    clean = _sanitize_reason_for_tier(dirty, "SNIPE_IT")
+    assert clean == dirty
+
+
+# 12.2-8: WAIT removes SNIPE and entry-valid language
+def test_12_2_wait_removes_snipe_and_entry_language():
+    dirty = "All SNIPE_IT conditions satisfied; entry valid"
+    clean = _sanitize_reason_for_tier(dirty, "WAIT")
+    assert "snipe_it" not in clean.lower()
+    assert "entry valid" not in clean.lower()
