@@ -419,6 +419,48 @@ def _sanitize_reason_for_tier(reason: str | None, final_tier: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 12B: Conservative NEAR_ENTRY missing_conditions backfill
+# ---------------------------------------------------------------------------
+# Doctrine: NEAR_ENTRY alerts must be explicit about what is missing, but the
+# bot must not invent progress. If both retest and hold are "missing", there is
+# no observable progress and the empty-list veto is allowed to downgrade the
+# signal to WAIT (existing behavior preserved). Backfill runs only when at
+# least one of retest_status / hold_status is "partial" or "confirmed".
+#
+# This backfill never overrides hard vetoes — semantic_price_sanity_failures,
+# current_acceptance_invalidated/damaging, prefilter blockers, and structure
+# absence still fire downstream in _determine_final_tier and can downgrade
+# NEAR_ENTRY → WAIT regardless of the missing_conditions list contents.
+#
+# This backfill is NEVER applied to SNIPE_IT or STARTER claude_tier. Those
+# tier gates remain exactly as before.
+
+def _backfill_missing_conditions(signal: dict) -> list[str]:
+    """Return a deterministic missing_conditions list, or [] if no progress.
+
+    Returns [] when both retest_status and hold_status are 'missing' so the
+    caller's empty-list veto can downgrade the signal to WAIT.
+    """
+    retest = signal.get("retest_status", "missing")
+    hold = signal.get("hold_status", "missing")
+
+    has_partial_progress = (
+        retest in ("partial", "confirmed") or hold in ("partial", "confirmed")
+    )
+    if not has_partial_progress:
+        return []
+
+    out: list[str] = []
+    if retest == "missing":
+        out.append("missing_retest")
+    if hold == "missing":
+        out.append("missing_hold")
+    if not out:
+        out.append("current_acceptance_needed")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Downgrade cascade
 # ---------------------------------------------------------------------------
 
@@ -614,18 +656,30 @@ def validate(
         except (TypeError, ValueError):
             pass
 
+    # Phase 12B: conservative backfill of missing_conditions for NEAR_ENTRY when
+    # at least one sign of partial progress exists. Does not run for SNIPE_IT
+    # or STARTER. Hard vetoes downstream still fire — backfill never grants entry.
+    working_signal = dict(raw_signal)
+    if claude_tier == "NEAR_ENTRY":
+        existing_mc = working_signal.get("missing_conditions")
+        if not isinstance(existing_mc, list) or not existing_mc:
+            backfilled = _backfill_missing_conditions(working_signal)
+            if backfilled:
+                working_signal["missing_conditions"] = backfilled
+
     final_tier, downgrades, notes = _determine_final_tier(
-        claude_tier, raw_signal, prefilter_vetoes, score, config, current_price, key_features
+        claude_tier, working_signal, prefilter_vetoes, score, config, current_price, key_features
     )
 
     # applied_vetoes: prefilter vetoes + signal-derived vetoes (deduplicated)
     applied_vetoes = list(prefilter_vetoes)
-    for v in _signal_derived_vetoes(raw_signal):
+    for v in _signal_derived_vetoes(working_signal):
         if v not in applied_vetoes:
             applied_vetoes.append(v)
 
-    # Build corrected final_signal with deterministic routing applied
-    final_signal = dict(raw_signal)
+    # Build corrected final_signal with deterministic routing applied.
+    # Use working_signal so 12B-backfilled missing_conditions are visible.
+    final_signal = dict(working_signal)
     final_signal["tier"] = final_tier
     final_signal["discord_channel"] = CHANNEL_MAP[final_tier]
     final_signal["capital_action"] = CAPITAL_MAP[final_tier]

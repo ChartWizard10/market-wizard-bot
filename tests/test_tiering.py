@@ -1257,3 +1257,130 @@ def test_12a_near_entry_capital_authorized_replacement_does_not_loop():
     clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
     assert isinstance(clean, str)
     assert "no capital authorized" in clean.lower()
+
+
+# ===========================================================================
+# Phase 12B: Conservative NEAR_ENTRY missing_conditions backfill
+# ===========================================================================
+
+# 12B-1: No backfill when both retest and hold are missing — no observable
+# progress, so missing_conditions stays empty and the existing veto runs the
+# signal down to WAIT.
+def test_12b_no_backfill_when_retest_and_hold_both_missing():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="missing",
+        hold_status="missing",
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["capital_action"] == "no_trade"
+    fs = result["final_signal"]
+    # Backfill must not invent items
+    assert fs.get("missing_conditions") in ([], None) or fs.get("missing_conditions") == []
+
+
+# 12B-2: Backfill runs when retest is partial — at least one sign of progress.
+def test_12b_backfills_missing_conditions_when_retest_partial():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="partial",
+        hold_status="missing",
+        invalidation_level=178.20,
+        trigger_level=182.50,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == "wait_no_capital"
+    fs = result["final_signal"]
+    backfilled = fs.get("missing_conditions") or []
+    assert isinstance(backfilled, list)
+    assert backfilled  # non-empty
+    # Hold is still missing, so "missing_hold" is the deterministic item
+    assert "missing_hold" in backfilled
+
+
+# 12B-3: Backfill runs when hold is partial — at least one sign of progress.
+def test_12b_backfills_missing_conditions_when_hold_partial():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="missing",
+        hold_status="partial",
+        invalidation_level=178.20,
+        trigger_level=182.50,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == "wait_no_capital"
+    fs = result["final_signal"]
+    backfilled = fs.get("missing_conditions") or []
+    assert isinstance(backfilled, list)
+    assert backfilled
+    assert "missing_retest" in backfilled
+
+
+# 12B-4: Backfill must NOT override Phase 10 semantic geometry failure.
+# Invalidation >= trigger is impossible bullish geometry — hard veto always wins.
+def test_12b_backfill_does_not_override_semantic_geometry_failure():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="partial",
+        hold_status="missing",
+        trigger_level=180.00,
+        invalidation_level=182.00,  # Above trigger — impossible bullish geometry
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["capital_action"] == "no_trade"
+    # The downgrade reason must mention the Phase 10 semantic sanity failure
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "semantic_price_sanity_failed" in downgrade_text
+
+
+# 12B-5: Backfill must NOT override Phase 10.1 current_acceptance damage cap.
+# Price below trigger ("damaging") downgrades SNIPE/STARTER → NEAR_ENTRY but
+# also stops NEAR_ENTRY from being escalated. For a NEAR_ENTRY claude_tier
+# under damaging acceptance with valid geometry, NEAR_ENTRY remains, never gets
+# converted into a capital-authorized state by Phase 12B's backfill.
+def test_12b_backfill_does_not_override_current_acceptance_failure():
+    signal = _near_entry_signal(
+        missing_conditions=[],
+        retest_status="partial",
+        hold_status="missing",
+        trigger_level=182.50,
+        invalidation_level=178.20,
+    )
+    # current_price below trigger → damaging acceptance
+    pf = {"veto_flags": [], "key_features": {"current_price": 180.00}}
+    result = validate(signal, pf, _BASE_CONFIG)
+    # Capital must remain wait_no_capital regardless of backfill — NEAR_ENTRY
+    # tier never grants capital.
+    assert result["capital_action"] == "wait_no_capital"
+    # Tier itself stays NEAR_ENTRY (or downgrades to WAIT) but never escalates.
+    assert result["final_tier"] in ("NEAR_ENTRY", "WAIT")
+
+
+# 12B-6: SNIPE_IT and STARTER gates must be unchanged. The backfill only
+# applies to claude_tier=NEAR_ENTRY signals, so a valid SNIPE_IT and STARTER
+# fixture should produce the same result as before Phase 12B.
+def test_12b_snipe_and_starter_gates_unchanged():
+    snipe_result = validate(_snipe_signal(), _pf(), _BASE_CONFIG)
+    assert snipe_result["final_tier"] == "SNIPE_IT"
+    assert snipe_result["final_discord_channel"] == "#snipe-signals"
+    assert snipe_result["capital_action"] == "full_quality_allowed"
+
+    starter_result = validate(_starter_signal(), _pf(), _BASE_CONFIG)
+    assert starter_result["final_tier"] == "STARTER"
+    assert starter_result["final_discord_channel"] == "#starter-signals"
+    assert starter_result["capital_action"] == "starter_only"
+
+    # Even if we hand SNIPE_IT/STARTER an empty missing_conditions, Phase 12B
+    # backfill must not run for those tiers — their gates are independent.
+    snipe_empty_mc = validate(
+        _snipe_signal(missing_conditions=[]), _pf(), _BASE_CONFIG
+    )
+    assert snipe_empty_mc["final_tier"] == "SNIPE_IT"
+    starter_empty_mc = validate(
+        _starter_signal(missing_conditions=[]), _pf(), _BASE_CONFIG
+    )
+    assert starter_empty_mc["final_tier"] == "STARTER"
