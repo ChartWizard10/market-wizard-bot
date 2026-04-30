@@ -1002,3 +1002,131 @@ def test_12_1_snipe_forced_participation_still_renders():
     text = format_alert(tr)
     assert "FORCED PARTICIPATION" in text
     assert "Full quality" in text
+
+
+# ===========================================================================
+# Phase 12.2 — Final-Tier Language Sovereignty (Discord rendering)
+# ===========================================================================
+
+# 12.2-D1: NEAR_ENTRY alert Why line does not render SNIPE_IT language
+def test_12_2_near_entry_alert_does_not_render_snipe_language():
+    # sanitized_reason carries already-cleaned text (as tiering.validate() produces)
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_not_confirmed"],
+        upgrade_trigger="Close above trigger with hold.",
+        reason="All SNIPE_IT conditions satisfied.",
+        sanitized_reason="Watchlist only until retest and hold confirm.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "snipe_it" not in text.lower()
+    assert "all snipe_it conditions" not in text.lower()
+    assert "watchlist only" in text.lower() or "retest and hold" in text.lower()
+
+
+# 12.2-D2: NEAR_ENTRY alert Why line does not render "entry valid"
+def test_12_2_near_entry_alert_does_not_render_entry_valid():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_not_confirmed"],
+        upgrade_trigger="Close above trigger with hold.",
+        reason="Zone defended — entry valid while zone holds.",
+        sanitized_reason="Zone defended — Watchlist only until retest and hold confirm. while zone holds.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "entry valid" not in text.lower()
+
+
+# 12.2-D3: NEAR_ENTRY alert always shows NO CAPITAL — WATCH ONLY
+def test_12_2_near_entry_alert_keeps_no_capital_watch_only():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_status"],
+        upgrade_trigger="Confirmed retest of FVG",
+        reason="Zone valid — awaiting retest.",
+        sanitized_reason="Zone valid — awaiting retest.",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "NO CAPITAL" in text
+    assert "WATCH ONLY" in text
+
+
+# 12.2-D4: STARTER alert Why line uses STARTER not SNIPE language
+def test_12_2_starter_alert_uses_starter_not_snipe_language():
+    tr = _tiering_result(
+        tier="STARTER",
+        score=78,
+        capital_action="starter_only",
+        reason="All SNIPE_IT conditions satisfied.",
+        sanitized_reason="All STARTER conditions met.",
+    )
+    tr["final_tier"] = "STARTER"
+    tr["final_discord_channel"] = "#starter-signals"
+    text = format_alert(tr)
+    # Why line should show STARTER replacement, not SNIPE
+    assert "snipe_it" not in text.lower()
+    assert "all starter conditions met" in text.lower()
+
+
+# 12.2-D5: SNIPE_IT alert preserves SNIPE language
+def test_12_2_snipe_alert_preserves_snipe_language():
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        reason="All SNIPE_IT conditions satisfied. Zone defended cleanly.",
+        sanitized_reason="All SNIPE_IT conditions satisfied. Zone defended cleanly.",
+    )
+    text = format_alert(tr)
+    assert "all snipe_it conditions satisfied" in text.lower()
+
+
+# 12.2-D6: Phase 12.1 tests still pass after Phase 12.2 additions
+def test_12_2_existing_12_1_tests_still_pass():
+    # 12.1-D1: FORCED PARTICIPATION suppressed for NEAR_ENTRY
+    tr_ne = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["retest_not_confirmed"],
+        upgrade_trigger="Close above trigger with hold.",
+        forced_participation="Full quality — zone held cleanly",
+        reason="MSS confirmed, zone present, awaiting retest.",
+        sanitized_reason="MSS confirmed, zone present, awaiting retest.",
+    )
+    tr_ne["final_tier"] = "NEAR_ENTRY"
+    tr_ne["capital_action"] = "wait_no_capital"
+    tr_ne["final_discord_channel"] = "#near-entry-watch"
+    text_ne = format_alert(tr_ne)
+    assert "FORCED PARTICIPATION" not in text_ne
+
+    # 12.1-D3: STARTER still renders FORCED PARTICIPATION
+    tr_st = _tiering_result(
+        tier="STARTER",
+        score=78,
+        capital_action="starter_only",
+        forced_participation="Reduced-size entry — zone quality partial",
+        reason="Partial zone interaction.",
+        sanitized_reason="Partial zone interaction.",
+    )
+    tr_st["final_tier"] = "STARTER"
+    tr_st["final_discord_channel"] = "#starter-signals"
+    text_st = format_alert(tr_st)
+    assert "FORCED PARTICIPATION" in text_st

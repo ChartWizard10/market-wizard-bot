@@ -5,6 +5,7 @@ downgrade logic, and routing corrections that Claude cannot override.
 """
 
 import logging
+import re
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -36,39 +37,118 @@ CAPITAL_MAP = {
 # Listed longest-first within each tier to prevent partial-match shadowing.
 # Format: (banned_phrase_lowercase_match, replacement_text)
 _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
+    # All lists are ordered longest-first so that compound phrases are matched
+    # before their sub-phrases. This prevents partial-match shadowing where a
+    # shorter pattern would consume part of a longer phrase first.
     "NEAR_ENTRY": [
-        # Phase 12A entries (longest-first to prevent partial-match shadowing)
+        # 40 chars — Phase 12A
         ("reducing conviction to starter tier only", "Watch-only; confirmation pending."),
-        # Phase 12.1 entries — capital/entry-implying phrases for NEAR_ENTRY
-        # Longer compound phrases must precede their sub-phrases.
-        ("starter allocation warranted", "Watchlist only until retest and hold confirm."),
-        ("all snipe_it conditions met",  "Watch-only; confirmation pending."),
-        ("all starter conditions met",   "Watch-only; confirmation pending."),
-        ("starter entry warranted",      "Watchlist only until retest and hold confirm."),
-        ("snipe_it conditions met",      "Watch-only; confirmation pending."),
-        ("snipe conditions met",         "Watch-only; confirmation pending."),
-        ("forced participation",         "Watchlist only until retest and hold confirm."),
-        ("full quality allowed",         "no capital authorized"),     # before "full quality"
-        ("allocation warranted",         "Watchlist only until retest and hold confirm."),
-        ("reduced-size entry",           "Watchlist only until retest and hold confirm."),
-        ("capital authorized",           "no capital authorized"),
-        ("capital justified",            "Watchlist only until retest and hold confirm."),
-        ("starter tier only",            "watch-only"),
-        ("starter warranted",            "Watchlist only until retest and hold confirm."),
-        ("entry warranted",              "Watchlist only until retest and hold confirm."),
-        ("reduced size",                 "Watchlist only until retest and hold confirm."),
-        ("full quality",                 "no capital authorized"),
+        # 33 chars — Phase 12.2: must precede "snipe_it conditions satisfied" (29)
+        ("all snipe_it conditions satisfied", "Watchlist only until retest and hold confirm."),
+        # 31 chars — Phase 12.2: must precede "snipe_it criteria" (17)
+        ("satisfies all snipe_it criteria",   "Watchlist only until retest and hold confirm."),
+        # 29 chars — Phase 12.2
+        ("snipe_it conditions satisfied",      "Watchlist only until retest and hold confirm."),
+        # 28 chars — Phase 12.1
+        ("starter allocation warranted",       "Watchlist only until retest and hold confirm."),
+        # 28 chars — Phase 12.2: must precede "snipe criteria" (14)
+        ("satisfies all snipe criteria",       "Watchlist only until retest and hold confirm."),
+        # 27 chars — Phase 12A: must precede "snipe_it conditions met" (23)
+        ("all snipe_it conditions met",        "Watch-only; confirmation pending."),
+        # 26 chars — Phase 12A
+        ("all starter conditions met",         "Watch-only; confirmation pending."),
+        # 23 chars — Phase 12.1
+        ("starter entry warranted",            "Watchlist only until retest and hold confirm."),
+        # 23 chars — Phase 12A
+        ("snipe_it conditions met",            "Watch-only; confirmation pending."),
+        # 22 chars — Phase 12.2
+        ("full-quality candidate",             "watch-only candidate"),
+        # 20 chars — Phase 12.1
+        ("snipe conditions met",               "Watch-only; confirmation pending."),
+        # 20 chars — Phase 12.1
+        ("forced participation",               "Watchlist only until retest and hold confirm."),
+        # 20 chars — Phase 12A: must precede "full quality" (12)
+        ("full quality allowed",               "no capital authorized"),
+        # 20 chars — Phase 12.1
+        ("allocation warranted",               "Watchlist only until retest and hold confirm."),
+        # 18 chars — Phase 12.1
+        ("reduced-size entry",                 "Watchlist only until retest and hold confirm."),
+        # 18 chars — Phase 12A
+        ("capital authorized",                 "no capital authorized"),
+        # 17 chars — Phase 12.1
+        ("capital justified",                  "Watchlist only until retest and hold confirm."),
+        # 17 chars — Phase 12.2
+        ("snipe_it criteria",                  "Watchlist only until retest and hold confirm."),
+        # 17 chars — Phase 12A
+        ("starter tier only",                  "watch-only"),
+        # 17 chars — Phase 12.1
+        ("starter warranted",                  "Watchlist only until retest and hold confirm."),
+        # 15 chars — Phase 12.1
+        ("entry warranted",                    "Watchlist only until retest and hold confirm."),
+        # 14 chars — Phase 12.2
+        ("snipe criteria",                     "Watchlist only until retest and hold confirm."),
+        # 12 chars — Phase 12.1
+        ("reduced size",                       "Watchlist only until retest and hold confirm."),
+        # 12 chars — Phase 12A: must follow "full quality allowed" above
+        ("full quality",                       "no capital authorized"),
+        # 11 chars — Phase 12.2
+        ("entry valid",                        "Watchlist only until retest and hold confirm."),
     ],
     "STARTER": [
-        ("all snipe_it conditions met", "Starter-quality candidate; full SNIPE confirmation not granted."),
-        ("snipe_it conditions met", "Starter-quality candidate; full SNIPE confirmation not granted."),
+        # 33 chars — Phase 12.2: must precede "snipe_it conditions satisfied" (29)
+        ("all snipe_it conditions satisfied",  "All STARTER conditions met."),
+        # 31 chars — Phase 12.2: must precede "snipe_it criteria" (17)
+        ("satisfies all snipe_it criteria",    "Starter-quality candidate; full SNIPE confirmation not granted."),
+        # 29 chars — Phase 12.2
+        ("snipe_it conditions satisfied",      "All STARTER conditions met."),
+        # 28 chars — Phase 12.2: must precede "snipe criteria" (14)
+        ("satisfies all snipe criteria",       "Starter-quality candidate; full SNIPE confirmation not granted."),
+        # 27 chars — Phase 12A: must precede "snipe_it conditions met" (23)
+        ("all snipe_it conditions met",        "Starter-quality candidate; full SNIPE confirmation not granted."),
+        # 23 chars — Phase 12A
+        ("snipe_it conditions met",            "Starter-quality candidate; full SNIPE confirmation not granted."),
+        # 17 chars — Phase 12.2: must precede "snipe criteria" (14)
+        ("snipe_it criteria",                  "starter criteria"),
+        # 14 chars — Phase 12.2
+        ("snipe criteria",                     "starter criteria"),
     ],
     "WAIT": [
-        ("capital authorized", "No capital authorized."),
-        ("full quality allowed", "No capital authorized."),
-        ("full quality", "no actionable setup"),
-        ("execute now", "No capital authorized."),
-        ("enter now", "No capital authorized."),
+        # Replacement-text hygiene for multi-pass safety:
+        # Only ("capital authorized" → "No capital authorized.") is allowed to
+        # produce "No capital authorized." because it is the SOLE phrase whose
+        # output contains "capital authorized" as a substring, and the
+        # non-overlapping scanner protects it within a single pass.
+        # All other entries use "No valid setup." or "no actionable setup" so
+        # that no earlier replacement inserts text matched by a later pass.
+        #
+        # 33 chars — Phase 12.2: must precede "snipe_it conditions satisfied" (29)
+        ("all snipe_it conditions satisfied",  "No valid setup."),
+        # 31 chars — Phase 12.2: must precede "snipe_it criteria" (17)
+        ("satisfies all snipe_it criteria",    "No valid setup."),
+        # 29 chars — Phase 12.2
+        ("snipe_it conditions satisfied",      "No valid setup."),
+        # 28 chars — Phase 12.2: must precede "snipe criteria" (14)
+        ("satisfies all snipe criteria",       "No valid setup."),
+        # 27 chars — Phase 12.2: must precede "snipe_it conditions met" (23)
+        ("all snipe_it conditions met",        "No valid setup."),
+        # 23 chars — Phase 12.2
+        ("snipe_it conditions met",            "No valid setup."),
+        # 20 chars — Phase 12A: must precede "full quality" (12); safe replacement
+        ("full quality allowed",               "no valid setup"),
+        # 18 chars — Phase 12A: ONLY entry allowed to produce "No capital authorized."
+        ("capital authorized",                 "No capital authorized."),
+        # 17 chars — Phase 12.2: must precede "snipe criteria" (14)
+        ("snipe_it criteria",                  "no actionable setup"),
+        # 14 chars — Phase 12.2
+        ("snipe criteria",                     "no actionable setup"),
+        # 12 chars — Phase 12A: must follow "full quality allowed" above
+        ("full quality",                       "no actionable setup"),
+        # 11 chars — Phase 12.2
+        ("entry valid",                        "No valid setup."),
+        # 11 chars — Phase 12A
+        ("execute now",                        "No valid setup."),
+        # 9 chars — Phase 12A
+        ("enter now",                          "No valid setup."),
     ],
 }
 
@@ -381,8 +461,18 @@ def _classify_current_acceptance(signal: dict, key_features: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase 12A: Sanitize reason text for final tier
+# Phase 12A/12.2: Sanitize reason text for final tier
 # ---------------------------------------------------------------------------
+
+# Phase 12.2: Post-replacement cleanup for NEAR_ENTRY.
+# Replacing "entry valid" with "Watchlist only until retest and hold confirm."
+# inside a phrase like "entry valid only until X" leaves a dangling
+# "only until X" tail.  This regex removes it.
+_WATCHLIST_TAIL_RE = re.compile(
+    r"(retest and hold confirm\.)\s+only until\b[^.]*\.?",
+    re.IGNORECASE,
+)
+
 
 def _replace_phrase_non_overlapping(text: str, banned_lower: str, replacement: str) -> str:
     """Replace every non-overlapping case-insensitive occurrence of `banned_lower`
@@ -429,6 +519,12 @@ def _sanitize_reason_for_tier(reason: str | None, final_tier: str) -> str:
     result = str(reason)
     for banned_lower, replacement in banned_list:
         result = _replace_phrase_non_overlapping(result, banned_lower, replacement)
+    # Phase 12.2: NEAR_ENTRY cleanup — strip dangling "only until..." tail that
+    # appears when a banned phrase (e.g. "entry valid") was embedded in a
+    # construction like "entry valid only until X", leaving
+    # "Watchlist only until retest and hold confirm. only until X".
+    if final_tier == "NEAR_ENTRY":
+        result = _WATCHLIST_TAIL_RE.sub(r"\1", result)
     return result
 
 
