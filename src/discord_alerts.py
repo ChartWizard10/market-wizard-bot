@@ -94,6 +94,18 @@ def _sanitize(text: str | None) -> str:
     return text
 
 
+def _clean_blocker_label(note: str | None) -> str:
+    """Strip one or more leading 'Blocker:' prefixes from a blocker note string.
+
+    _build_near_entry_blocker_note returns 'Blocker: X'; the renderer adds its
+    own 'Blocker:' label prefix. Without this helper the rendered line would be
+    'Blocker:            Blocker: X'. Stripping here keeps it clean.
+    """
+    if not note:
+        return ""
+    return re.sub(r"^(Blocker:\s*)+", "", note, flags=re.IGNORECASE).strip()
+
+
 # ---------------------------------------------------------------------------
 # Message formatting
 # ---------------------------------------------------------------------------
@@ -146,7 +158,7 @@ def format_alert(
     risk_reward        = signal.get("risk_reward")
     overhead_status    = _sanitize(str(signal.get("overhead_status", "—")))
     forced_part        = _sanitize(str(signal.get("forced_participation", "none")))
-    next_action        = _sanitize(str(signal.get("next_action", "—")))
+    next_action        = _sanitize(str(signal.get("sanitized_next_action") or signal.get("next_action", "—")))
     capital_action     = signal.get("capital_action", "no_trade")
     # Phase 12A: use sanitized_reason if present; fall back to raw reason
     reason             = _sanitize(str(signal.get("sanitized_reason") or signal.get("reason", "—")))
@@ -235,8 +247,11 @@ def format_alert(
 
     if final_tier == "NEAR_ENTRY":
         missing_str = ", ".join(_sanitize(str(c)) for c in missing_conditions) if missing_conditions else "—"
-        # Phase 12.3: render blocker note above missing conditions
-        blocker_note = _sanitize(str(signal.get("near_entry_blocker_note") or ""))
+        # Phase 12.3: render blocker note above missing conditions.
+        # Phase 12.3A: strip leading "Blocker:" prefix before adding our label
+        # so _build_near_entry_blocker_note's prefix does not double up.
+        raw_blocker = str(signal.get("near_entry_blocker_note") or "")
+        blocker_note = _sanitize(_clean_blocker_label(raw_blocker))
         lines += [
             "──────────────────────────────",
             "⚠️  NO CAPITAL YET",

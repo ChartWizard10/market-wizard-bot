@@ -2004,3 +2004,108 @@ def test_12_3_starter_replaces_full_snipe_confirmation_not_granted():
     clean = _sanitize_reason_for_tier(dirty, "STARTER")
     assert "full snipe confirmation not granted" not in clean.lower()
     assert "full-size confirmation not granted" in clean.lower()
+
+
+# ===========================================================================
+# Phase 12.3A — Clean Near-Entry Blocker Rendering
+# ===========================================================================
+
+# 12.3A-1: near_entry_blocker_note in validate() output is not double-prefixed
+def test_12_3a_near_entry_blocker_not_double_prefixed():
+    signal = _near_entry_signal(
+        ticker="C",
+        trigger_level=128.44,
+        retest_status="confirmed",
+        hold_status="confirmed",
+        risk_reward=4.60,
+        overhead_status="moderate",
+        missing_conditions=[],
+        upgrade_trigger="none",
+    )
+    result = validate(signal, _pf_price(128.35), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    note = result["final_signal"].get("near_entry_blocker_note", "")
+    assert note.startswith("Blocker:"), f"expected 'Blocker:' prefix, got: {note!r}"
+    # Must not be double-prefixed — renderer strips the prefix before adding its own
+    assert "Blocker: Blocker:" not in note
+
+
+# 12.3A-2: C-style below-trigger missing_conditions backfilled
+def test_12_3a_below_trigger_missing_conditions_backfilled():
+    signal = _near_entry_signal(
+        ticker="C",
+        trigger_level=128.44,
+        retest_status="confirmed",
+        hold_status="confirmed",
+        risk_reward=4.60,
+        overhead_status="moderate",
+        missing_conditions=[],
+        upgrade_trigger="none",
+    )
+    result = validate(signal, _pf_price(128.35), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    mc = result["final_signal"].get("missing_conditions", [])
+    assert mc, "missing_conditions must not be blank after below-trigger backfill"
+    assert any("trigger_acceptance" in str(c).lower() for c in mc)
+
+
+# 12.3A-3: C-style below-trigger upgrade_trigger backfilled
+def test_12_3a_below_trigger_upgrade_trigger_backfilled():
+    signal = _near_entry_signal(
+        ticker="C",
+        trigger_level=128.44,
+        retest_status="confirmed",
+        hold_status="confirmed",
+        risk_reward=4.60,
+        overhead_status="moderate",
+        missing_conditions=[],
+        upgrade_trigger="none",
+    )
+    result = validate(signal, _pf_price(128.35), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    ut = result["final_signal"].get("upgrade_trigger", "")
+    assert ut and str(ut).lower() != "none", "upgrade_trigger must not be 'none' after backfill"
+    assert "reclaims" in ut.lower() or "trigger" in ut.lower()
+
+
+# 12.3A-4: NEAR_ENTRY sanitizes "manage position" language in reason
+def test_12_3a_near_entry_sanitizes_manage_position_language():
+    dirty = "Zone held — manage position if price attempts breakout; no clear setup yet."
+    clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
+    assert "manage position" not in clean.lower()
+    assert "no position management" in clean.lower()
+    assert "capital is authorized" in clean.lower()
+
+
+# 12.3A-5: NEAR_ENTRY sanitizes trail stop, stop below, entry valid, enter on confirmed close
+def test_12_3a_near_entry_sanitizes_trail_stop_stop_below_entry_valid():
+    sfr = _sanitize_reason_for_tier
+
+    trail_clean = sfr("trail stop below 178.00.", "NEAR_ENTRY")
+    assert "trail stop" not in trail_clean.lower()
+    assert "invalidation reference" in trail_clean.lower()
+    # updated Phase 12.3A: trail stop replacement now includes no-position-management reference
+    assert "no position management" in trail_clean.lower()
+
+    assert "stop below" not in sfr("stop below 178.00 after entry.", "NEAR_ENTRY").lower()
+    assert "entry valid" not in sfr("entry valid only until retest confirmed.", "NEAR_ENTRY").lower()
+    assert "enter on confirmed close" not in sfr(
+        "enter on confirmed close above trigger.", "NEAR_ENTRY"
+    ).lower()
+
+
+# 12.3A-6: STARTER and SNIPE_IT are not affected by NEAR_ENTRY blocker/backfill
+def test_12_3a_starter_and_snipe_unchanged():
+    snipe_result = validate(_snipe_signal(), _pf(), _BASE_CONFIG)
+    assert snipe_result["final_tier"] == "SNIPE_IT"
+    assert "near_entry_blocker_note" not in snipe_result["final_signal"]
+
+    starter_result = validate(_starter_signal(), _pf(), _BASE_CONFIG)
+    assert starter_result["final_tier"] == "STARTER"
+    assert "near_entry_blocker_note" not in starter_result["final_signal"]
+
+    # STARTER: full-size confirmation not granted language preserved
+    dirty_starter = "Setup satisfies all SNIPE_IT criteria; full SNIPE confirmation not granted."
+    clean_starter = _sanitize_reason_for_tier(dirty_starter, "STARTER")
+    assert "full-size confirmation not granted" in clean_starter.lower()
+    assert "snipe confirmation not granted" not in clean_starter.lower()

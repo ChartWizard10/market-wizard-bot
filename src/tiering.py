@@ -87,6 +87,8 @@ _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
         ("starter warranted",                  "Watchlist only until retest and hold confirm."),
         # 15 chars — Phase 12.1
         ("entry warranted",                    "Watchlist only until retest and hold confirm."),
+        # 15 chars — Phase 12.3A: position-management language inappropriate for watchlist tier
+        ("manage position",                    "No position management until capital is authorized."),
         # 14 chars — Phase 12.2
         ("snipe criteria",                     "Watchlist only until retest and hold confirm."),
         # 12 chars — Phase 12.1
@@ -95,10 +97,13 @@ _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
         ("full quality",                       "no capital authorized"),
         # 11 chars — Phase 12.2
         ("entry valid",                        "Watchlist only until retest and hold confirm."),
-        # 10 chars — Phase 12.3: must follow all longer phrases
+        # 10 chars — Phase 12.3A: must precede "stop below" — "trail stop below" contains
+        # "stop below" as a sub-span; processing "trail stop" first prevents "stop below"
+        # from consuming the overlapping portion and blocking the trail-stop replacement.
+        # Updated Phase 12.3A: includes no-position-management reference.
+        ("trail stop",                         "use invalidation reference only; no position management until capital is authorized."),
+        # 10 chars — Phase 12.3: must follow "trail stop" above
         ("stop below",                         "invalidation reference below"),
-        # 10 chars — Phase 12.3
-        ("trail stop",                         "use invalidation reference only"),
     ],
     "STARTER": [
         # 35 chars — Phase 12.3: must precede "all snipe_it conditions satisfied" (33)
@@ -1041,6 +1046,11 @@ def validate(
     # Phase 12A: sanitize Claude prose so alerts cannot display tier-contradicting language
     final_signal["sanitized_reason"] = _sanitize_reason_for_tier(
         final_signal.get("reason"), final_tier
+    )
+
+    # Phase 12.3A: sanitize next_action to strip position-management language for NEAR_ENTRY
+    final_signal["sanitized_next_action"] = _sanitize_reason_for_tier(
+        final_signal.get("next_action"), final_tier
     )
 
     # Phase 12.3: NEAR_ENTRY blocker explanation — always explains why capital is not authorized.
