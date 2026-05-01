@@ -1,4 +1,4 @@
-"""Tests for Phase 13.1 — Alert History Backtest Runner (scripts/backtest_alert_history.py)."""
+"""Tests for Phase 13.1 / 13.2 — Alert History Backtest Runner (scripts/backtest_alert_history.py)."""
 
 from __future__ import annotations
 
@@ -530,3 +530,444 @@ def test_ambiguous_same_bar_surfaces_in_runner():
     assert len(out["results"]) == 1
     assert out["results"][0]["outcome_label"] == "AMBIGUOUS_SAME_BAR"
     assert out["summary"]["ambiguous"] == 1
+
+
+# ===========================================================================
+# Phase 13.2 tests — data quality reporting
+# ===========================================================================
+
+def _complete_alert(**kwargs) -> dict:
+    """Normalized alert with all fields populated — COMPLETE quality label."""
+    base = {
+        "ticker":             "AAPL",
+        "final_tier":         "SNIPE_IT",
+        "tier":               "SNIPE_IT",
+        "scan_price":         100.0,
+        "trigger_level":      100.0,
+        "invalidation_level": 95.0,
+        "targets":            [110.0],
+    }
+    base.update(kwargs)
+    return base
+
+
+# ===========================================================================
+# 19. get_alert_data_quality — COMPLETE
+# ===========================================================================
+def test_get_alert_data_quality_complete():
+    alert = _complete_alert()
+    dq = runner.get_alert_data_quality(alert)
+
+    assert dq["has_target"]          is True
+    assert dq["has_invalidation"]    is True
+    assert dq["has_reference_price"] is True
+    assert dq["has_trigger"]         is True
+    assert dq["has_tier"]            is True
+    assert dq["missing_fields"]      == []
+    assert dq["data_quality_label"]  == "COMPLETE"
+
+
+# ===========================================================================
+# 20. get_alert_data_quality — BACKTESTABLE (trigger missing)
+# ===========================================================================
+def test_get_alert_data_quality_backtestable_without_trigger():
+    # Has target, invalidation, scan_price (reference_price), tier but no trigger.
+    alert = {
+        "ticker":             "MSFT",
+        "final_tier":         "STARTER",
+        "tier":               "STARTER",
+        "scan_price":         200.0,
+        "trigger_level":      None,
+        "invalidation_level": 190.0,
+        "targets":            [220.0],
+    }
+    dq = runner.get_alert_data_quality(alert)
+
+    assert dq["has_target"]          is True
+    assert dq["has_invalidation"]    is True
+    assert dq["has_reference_price"] is True   # scan_price covers it
+    assert dq["has_trigger"]         is False
+    assert "trigger_level"           in dq["missing_fields"]
+    assert dq["data_quality_label"]  == "BACKTESTABLE"
+
+
+# ===========================================================================
+# 21. get_alert_data_quality — PARTIAL (no target)
+# ===========================================================================
+def test_get_alert_data_quality_partial_missing_target():
+    alert = {
+        "ticker":             "C",
+        "tier":               "NEAR_ENTRY",
+        "scan_price":         128.35,
+        "trigger_level":      128.44,
+        "invalidation_level": 126.84,
+        "targets":            [],       # empty — no target
+    }
+    dq = runner.get_alert_data_quality(alert)
+
+    assert dq["has_target"]         is False
+    assert dq["has_invalidation"]   is True
+    assert dq["data_quality_label"] == "PARTIAL"
+    assert "targets" in dq["missing_fields"]
+
+
+# ===========================================================================
+# 22. get_alert_data_quality — INSUFFICIENT
+# ===========================================================================
+def test_get_alert_data_quality_insufficient_missing_invalidation_and_reference():
+    # Missing invalidation, scan_price, trigger_level — and no targets either.
+    alert = {
+        "ticker":    "GHOST",
+        "tier":      "WAIT",
+        "reason":    "nothing here",
+        "score":     12,
+    }
+    dq = runner.get_alert_data_quality(alert)
+
+    assert dq["has_target"]          is False
+    assert dq["has_invalidation"]    is False
+    assert dq["has_reference_price"] is False
+    assert dq["data_quality_label"]  == "INSUFFICIENT"
+
+
+# ===========================================================================
+# 23. summarize_data_quality — missing_target count
+# ===========================================================================
+def test_summarize_data_quality_counts_missing_targets():
+    alerts = [
+        _complete_alert(ticker="A"),                       # has target
+        _complete_alert(ticker="B", targets=[]),            # missing target
+        _complete_alert(ticker="C", targets=None),          # missing target (None coerced to [])
+    ]
+    # normalize so targets=None becomes [] in the dict
+    normalized = [runner.normalize_alert_record(a) for a in alerts]
+    dq = runner.summarize_data_quality(normalized)
+
+    assert dq["total_alerts"]   == 3
+    assert dq["missing_target"] == 2   # B and C have no targets
+
+
+# ===========================================================================
+# 24. summarize_data_quality — by_tier grouping
+# ===========================================================================
+def test_summarize_data_quality_groups_by_tier():
+    alerts = [
+        runner.normalize_alert_record(_complete_alert(ticker="A", final_tier="SNIPE_IT", tier="SNIPE_IT")),
+        runner.normalize_alert_record(_complete_alert(ticker="B", final_tier="STARTER",  tier="STARTER", targets=[])),
+        runner.normalize_alert_record(_complete_alert(ticker="C", final_tier="NEAR_ENTRY", tier="NEAR_ENTRY")),
+    ]
+    dq = runner.summarize_data_quality(alerts)
+
+    assert "SNIPE_IT"   in dq["by_tier"]
+    assert "STARTER"    in dq["by_tier"]
+    assert "NEAR_ENTRY" in dq["by_tier"]
+    assert dq["by_tier"]["SNIPE_IT"]["complete"]        == 1
+    assert dq["by_tier"]["STARTER"]["missing_target"]   == 1
+    assert dq["by_tier"]["NEAR_ENTRY"]["complete"]      == 1
+
+
+# ===========================================================================
+# 25. summarize_data_quality — missing_fields_ranked
+# ===========================================================================
+def test_summarize_data_quality_ranks_missing_fields():
+    alerts = [
+        runner.normalize_alert_record(_complete_alert(ticker="A", targets=[])),
+        runner.normalize_alert_record(_complete_alert(ticker="B", targets=[])),
+        runner.normalize_alert_record(_complete_alert(ticker="C", targets=[], trigger_level=None)),
+    ]
+    dq = runner.summarize_data_quality(alerts)
+
+    ranked = dq["missing_fields_ranked"]
+    assert len(ranked) > 0
+    fields = [e["field"] for e in ranked]
+    assert "targets" in fields
+    # targets missing for all 3 — should rank first
+    targets_entry = next(e for e in ranked if e["field"] == "targets")
+    assert targets_entry["count"] == 3
+
+
+# ===========================================================================
+# 26. run_alert_history_backtest returns data_quality key
+# ===========================================================================
+def test_run_alert_history_backtest_returns_data_quality():
+    alerts = [_raw_alert(ticker="AAPL", scan_time="2026-01-01")]
+    bars   = {"AAPL": [{"date": "2026-01-02", "open": 100, "high": 111, "low": 99, "close": 110}]}
+    out    = runner.run_alert_history_backtest(alerts, bars)
+
+    assert "results"      in out
+    assert "summary"      in out
+    assert "data_quality" in out
+    dq = out["data_quality"]
+    assert "total_alerts"          in dq
+    assert "complete"              in dq
+    assert "missing_target"        in dq
+    assert "missing_fields_ranked" in dq
+    assert "by_tier"               in dq
+
+
+# ===========================================================================
+# 27. missing target → INVALID_DATA in results + counted in data_quality
+# ===========================================================================
+def test_run_alert_history_backtest_missing_target_counts_invalid_data():
+    alerts = [_raw_alert(ticker="AAPL", scan_time="2026-01-01", targets=[])]
+    bars   = {"AAPL": [{"date": "2026-01-02", "open": 100, "high": 111, "low": 99, "close": 110}]}
+    out    = runner.run_alert_history_backtest(alerts, bars)
+
+    assert out["results"][0]["outcome_label"] == "INVALID_DATA"
+    assert out["summary"]["invalid_results"]  == 1
+    assert out["data_quality"]["missing_target"] == 1
+
+
+# ===========================================================================
+# 28. format_backtest_summary — DATA QUALITY section present
+# ===========================================================================
+def test_format_backtest_summary_includes_data_quality_section():
+    summary = {
+        "total_alerts": 2, "valid_results": 2, "invalid_results": 0,
+        "wins": 1, "losses": 1, "open": 0, "no_trigger": 0, "ambiguous": 0,
+        "win_rate_valid": 50.0, "loss_rate_valid": 50.0,
+        "avg_mfe_pct": 3.0, "avg_mae_pct": -1.0,
+        "by_tier": {}, "by_risk_realism_state": {}, "by_retest_hold_combo": {},
+    }
+    data_quality = {
+        "total_alerts": 2, "complete": 1, "backtestable": 0, "partial": 1, "insufficient": 0,
+        "missing_target": 1, "missing_invalidation": 0, "missing_reference_price": 0,
+        "missing_trigger": 0, "missing_tier": 0,
+        "by_tier": {"SNIPE_IT": {"count": 2, "complete": 1, "backtestable": 0,
+                                  "partial": 1, "insufficient": 0,
+                                  "missing_target": 1, "missing_invalidation": 0,
+                                  "missing_reference_price": 0}},
+        "missing_fields_ranked": [{"field": "targets", "count": 1}],
+    }
+    text = runner.format_backtest_summary(summary, data_quality)
+
+    assert "DATA QUALITY"         in text
+    assert "Total alerts:"        in text
+    assert "Complete:"            in text
+    assert "Backtestable:"        in text
+    assert "Missing targets:"     in text
+    assert "BY TIER DATA QUALITY" in text
+    assert "MISSING FIELDS"       in text
+
+
+# ===========================================================================
+# 29. MISSING TARGET STRATEGY — "Do not fabricate targets" when targets missing
+# ===========================================================================
+def test_format_backtest_summary_includes_missing_target_strategy_when_targets_missing():
+    summary = {
+        "total_alerts": 1, "valid_results": 0, "invalid_results": 1,
+        "wins": 0, "losses": 0, "open": 0, "no_trigger": 0, "ambiguous": 0,
+        "win_rate_valid": None, "loss_rate_valid": None,
+        "avg_mfe_pct": None, "avg_mae_pct": None,
+        "by_tier": {}, "by_risk_realism_state": {}, "by_retest_hold_combo": {},
+    }
+    data_quality = {
+        "total_alerts": 1, "complete": 0, "backtestable": 0, "partial": 1, "insufficient": 0,
+        "missing_target": 1, "missing_invalidation": 0, "missing_reference_price": 0,
+        "missing_trigger": 0, "missing_tier": 0,
+        "by_tier": {}, "missing_fields_ranked": [{"field": "targets", "count": 1}],
+    }
+    text = runner.format_backtest_summary(summary, data_quality)
+
+    assert "MISSING TARGET STRATEGY"  in text
+    assert "Do not fabricate targets" in text
+    assert "target_1 / targets"       in text
+
+
+# ===========================================================================
+# 30. MISSING TARGET STRATEGY — "Targets available" when no missing targets
+# ===========================================================================
+def test_format_backtest_summary_targets_available_message_when_no_missing_targets():
+    summary = {
+        "total_alerts": 1, "valid_results": 1, "invalid_results": 0,
+        "wins": 1, "losses": 0, "open": 0, "no_trigger": 0, "ambiguous": 0,
+        "win_rate_valid": 100.0, "loss_rate_valid": 0.0,
+        "avg_mfe_pct": 5.0, "avg_mae_pct": -1.0,
+        "by_tier": {}, "by_risk_realism_state": {}, "by_retest_hold_combo": {},
+    }
+    data_quality = {
+        "total_alerts": 1, "complete": 1, "backtestable": 0, "partial": 0, "insufficient": 0,
+        "missing_target": 0, "missing_invalidation": 0, "missing_reference_price": 0,
+        "missing_trigger": 0, "missing_tier": 0,
+        "by_tier": {}, "missing_fields_ranked": [],
+    }
+    text = runner.format_backtest_summary(summary, data_quality)
+
+    assert "Targets available for all records." in text
+    assert "Do not fabricate targets"           not in text
+
+
+# ===========================================================================
+# 31. CLI main prints DATA QUALITY section
+# ===========================================================================
+def test_cli_main_prints_data_quality_section(tmp_path, capsys):
+    alerts_path = tmp_path / "alerts.json"
+    bars_path   = tmp_path / "bars.json"
+
+    alerts_path.write_text(json.dumps([_raw_alert(ticker="AAPL", scan_time="2026-01-01")]))
+    bars_path.write_text(json.dumps({
+        "AAPL": [{"date": "2026-01-02", "open": 100, "high": 111, "low": 99, "close": 110}]
+    }))
+
+    rc = runner.main(["--alerts", str(alerts_path), "--bars", str(bars_path)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DATA QUALITY"             in out
+    assert "MISSING TARGET STRATEGY"  in out
+
+
+# ===========================================================================
+# 32. Existing Phase 13.1 tests still pass — format_backtest_summary(summary) alone
+# ===========================================================================
+def test_existing_phase13_1_summary_still_works_without_data_quality():
+    summary = {
+        "total_alerts": 3, "valid_results": 3, "invalid_results": 0,
+        "wins": 2, "losses": 1, "open": 0, "no_trigger": 0, "ambiguous": 0,
+        "win_rate_valid": 66.67, "loss_rate_valid": 33.33,
+        "avg_mfe_pct": 4.5, "avg_mae_pct": -2.0,
+        "by_tier": {}, "by_risk_realism_state": {}, "by_retest_hold_combo": {},
+    }
+    text = runner.format_backtest_summary(summary)   # no data_quality argument
+
+    assert "Backtest Summary"  in text
+    assert "total_alerts:"     in text
+    assert "wins:"             in text
+    assert "DATA QUALITY"      not in text           # absent when not passed
+
+
+# ===========================================================================
+# 33. No target fabrication
+# ===========================================================================
+def test_no_target_fabrication():
+    # Alert with no target field at all.
+    alert_raw = {
+        "ticker":             "C",
+        "tier":               "NEAR_ENTRY",
+        "scan_price":         128.35,
+        "trigger_level":      128.44,
+        "invalidation_level": 126.84,
+    }
+    normalized = runner.normalize_alert_record(alert_raw)
+    assert normalized["targets"] == []   # empty — not fabricated
+
+    dq = runner.get_alert_data_quality(normalized)
+    assert dq["has_target"]         is False
+    assert "targets" in dq["missing_fields"]
+
+    bars = {"C": [{"date": "2026-01-02", "open": 128.4, "high": 135.0, "low": 128.0, "close": 134.0}]}
+    out  = runner.run_alert_history_backtest([alert_raw], bars)
+
+    result = out["results"][0]
+    assert result["outcome_label"]         == "INVALID_DATA"   # no target → cannot classify WIN
+    assert out["data_quality"]["missing_target"] == 1
+
+
+# ===========================================================================
+# 34. Regression: script still does not import live scanner / discord (Phase 13.2)
+# ===========================================================================
+def test_script_still_does_not_import_live_scanner_or_discord():
+    path = _SCRIPTS_DIR / "backtest_alert_history.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    forbidden_modules = {
+        "discord", "yfinance", "anthropic",
+        "src.scheduler", "src.discord_alerts", "src.tiering", "src.main",
+        "src.state_store", "src.claude_client", "src.market_data",
+        "src.indicators", "src.prefilter",
+    }
+    seen: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                seen.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                seen.add(node.module)
+
+    bad = forbidden_modules.intersection(seen)
+    assert not bad, f"Script imports forbidden modules: {bad}"
+    assert "src.backtest" in seen
+
+
+# ===========================================================================
+# 35. Regression: no network imports (Phase 13.2)
+# ===========================================================================
+def test_script_still_has_no_network_imports():
+    path = _SCRIPTS_DIR / "backtest_alert_history.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    forbidden = {"urllib", "urllib.request", "urllib.parse", "http", "http.client",
+                 "requests", "httpx", "aiohttp", "socket", "yfinance"}
+    seen: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                seen.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                seen.add(node.module)
+
+    bad = forbidden.intersection(seen)
+    assert not bad, f"Script imports network modules: {bad}"
+
+
+# ===========================================================================
+# 36. Regression: no file writes (Phase 13.2)
+# ===========================================================================
+def test_script_still_has_no_file_writes():
+    path   = _SCRIPTS_DIR / "backtest_alert_history.py"
+    source = path.read_text(encoding="utf-8")
+
+    forbidden_substrings = [
+        ".write_text(", ".write_bytes(", "open(", "json.dump(",
+        "shutil.copy", "shutil.move", "os.remove", "os.rename",
+    ]
+    found = [s for s in forbidden_substrings if s in source]
+    assert not found, f"Script contains write-capable call sites: {found}"
+
+
+# ===========================================================================
+# 37. Realistic state-store record (C NEAR_ENTRY without target)
+# ===========================================================================
+def test_data_quality_for_realistic_alert_state_record_without_target():
+    raw = {
+        "ticker":             "C",
+        "tier":               "NEAR_ENTRY",
+        "alerted_at":         "2026-04-15T15:30:00",
+        "trigger_level":      128.44,
+        "invalidation_level": 126.84,
+        "score":              87,
+        "reason":             "near-entry setup with blocker below trigger",
+        "dedup_key":          "C|NEAR_ENTRY|128.44|126.84",
+        "scan_id":            "scan-20260415-153000",
+    }
+    normalized = runner.normalize_alert_record(raw)
+    dq = runner.get_alert_data_quality(normalized)
+
+    assert dq["has_target"]         is False         # no target stored
+    assert "targets"                in dq["missing_fields"]
+    # trigger_level exists → reference_price falls back to trigger
+    assert dq["has_reference_price"] is True
+    assert dq["has_trigger"]         is True
+    # No targets → not COMPLETE or BACKTESTABLE; has invalidation and reference → PARTIAL
+    assert dq["data_quality_label"]  == "PARTIAL"
+
+    # Confirm no target was fabricated during normalization
+    assert normalized["targets"] == []
+
+
+# ===========================================================================
+# 38. No-analysis-paralysis: no alert-suppression / scanner-gating words
+# ===========================================================================
+def test_data_quality_preserves_no_analysis_paralysis():
+    path   = _SCRIPTS_DIR / "backtest_alert_history.py"
+    source = path.read_text(encoding="utf-8")
+
+    forbidden_words = [
+        "block_alert",
+        "suppress_alert",
+        "change_tier",
+        "tune_score",
+    ]
+    found = [w for w in forbidden_words if w in source]
+    assert not found, f"Script contains gating/suppression logic: {found}"
