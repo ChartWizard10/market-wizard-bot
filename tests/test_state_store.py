@@ -616,3 +616,266 @@ def test_within_cooldown_recent():
 def test_within_cooldown_expired():
     old = (datetime.utcnow() - timedelta(minutes=120)).isoformat()
     assert _within_cooldown(old, 60) is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.3B — record_alert field storage contract (23 tests)
+# ---------------------------------------------------------------------------
+
+def test_record_alert_stores_targets():
+    targets = [{"label": "T1", "level": 192.0, "reason": "FVG top"}]
+    tr = _tiering(targets=targets)
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["targets"] == targets
+
+
+def test_record_alert_missing_targets_stored_as_empty_list():
+    tr_none = _tiering(targets=None)
+    state_none = record_alert("AAPL", tr_none, _empty(), _cfg())
+    assert state_none["tickers"]["AAPL"]["alert_history"][0]["targets"] == []
+
+    tr_absent = _tiering()
+    state_absent = record_alert("AAPL", tr_absent, _empty(), _cfg())
+    assert state_absent["tickers"]["AAPL"]["alert_history"][0]["targets"] == []
+
+
+def test_record_alert_stores_scan_price():
+    tr = _tiering(scan_price=183.50)
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["scan_price"] == 183.50
+
+
+def test_record_alert_scan_price_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["scan_price"] is None
+
+
+def test_record_alert_stores_risk_reward():
+    tr = _tiering(risk_reward=3.8)
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["risk_reward"] == 3.8
+
+
+def test_record_alert_stores_risk_realism_state():
+    tr = _tiering(risk_realism_state="realistic")
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["risk_realism_state"] == "realistic"
+
+
+def test_record_alert_stores_risk_distance_fields():
+    tr = _tiering(risk_distance=4.30, risk_distance_pct=2.35)
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["risk_distance"] == 4.30
+    assert rec["risk_distance_pct"] == 2.35
+
+
+def test_record_alert_stores_price_to_invalidation_fields():
+    tr = _tiering(
+        current_price_to_invalidation=3.80,
+        current_price_to_invalidation_pct=2.10,
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["current_price_to_invalidation"] == 3.80
+    assert rec["current_price_to_invalidation_pct"] == 2.10
+
+
+def test_record_alert_stores_retest_and_hold_status():
+    tr = _tiering(retest_status="confirmed", hold_status="confirmed")
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["retest_status"] == "confirmed"
+    assert rec["hold_status"] == "confirmed"
+
+
+def test_record_alert_stores_current_acceptance():
+    tr = _tiering(current_acceptance="strong")
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["current_acceptance"] == "strong"
+
+
+def test_record_alert_stores_overhead_status():
+    tr = _tiering(overhead_status="clear")
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["overhead_status"] == "clear"
+
+
+def test_record_alert_stores_setup_context_fields():
+    tr = _tiering(
+        setup_family="continuation",
+        structure_event="BOS",
+        trend_state="fresh_expansion",
+        zone_type="FVG",
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["setup_family"] == "continuation"
+    assert rec["structure_event"] == "BOS"
+    assert rec["trend_state"] == "fresh_expansion"
+    assert rec["zone_type"] == "FVG"
+
+
+def test_record_alert_stores_sma_value_alignment():
+    tr = _tiering(sma_value_alignment="supportive")
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["sma_value_alignment"] == "supportive"
+
+
+def test_record_alert_stores_near_entry_fields():
+    tr = _tiering(
+        missing_conditions=["retest_needed"],
+        upgrade_trigger="Close above 182 on volume",
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["missing_conditions"] == ["retest_needed"]
+    assert rec["upgrade_trigger"] == "Close above 182 on volume"
+
+
+def test_record_alert_stores_capital_action():
+    tr = _tiering(capital_action="full_quality_allowed")
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["capital_action"] == "full_quality_allowed"
+
+
+def test_record_alert_stores_sanitized_fields():
+    tr = _tiering(
+        sanitized_reason="Reclaim above 182 FVG with volume expansion",
+        sanitized_next_action="Wait for confirmed retest before entry",
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["sanitized_reason"] == "Reclaim above 182 FVG with volume expansion"
+    assert rec["sanitized_next_action"] == "Wait for confirmed retest before entry"
+
+
+def test_record_alert_stores_original_claude_tier():
+    tr = _tiering()
+    tr["original_claude_tier"] = "SNIPE_IT"
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["original_claude_tier"] == "SNIPE_IT"
+
+
+def test_record_alert_stores_applied_vetoes():
+    tr = _tiering()
+    tr["applied_vetoes"] = ["rr_too_low", "retest_missing"]
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["applied_vetoes"] == ["rr_too_low", "retest_missing"]
+
+
+def test_record_alert_old_9field_record_still_readable():
+    """Old 9-field history record coexists correctly with new 32-field records."""
+    old_record = {
+        "ticker": "AAPL", "tier": "NEAR_ENTRY",
+        "alerted_at": "2024-01-01T09:00:00",
+        "trigger_level": 180.0, "invalidation_level": 175.0,
+        "score": 65, "reason": "old alert",
+        "dedup_key": "AAPL|NEAR_ENTRY|180.0|175.0", "scan_id": "s0",
+    }
+    state = _empty()
+    state["tickers"]["AAPL"] = {
+        "last_alerted_tier": "NEAR_ENTRY",
+        "last_alerted_at": "2024-01-01T09:00:00",
+        "last_trigger_level": 180.0,
+        "last_invalidation_level": 175.0,
+        "last_score": 65,
+        "last_reason": "old alert",
+        "last_discord_channel": "#near-entry-watch",
+        "last_dedup_key": "AAPL|NEAR_ENTRY|180.0|175.0",
+        "scan_id": "s0",
+        "alert_history": [old_record],
+    }
+    tr = _tiering(targets=[{"label": "T1", "level": 192.0, "reason": "FVG"}])
+    state = record_alert("AAPL", tr, state, _cfg())
+    history = state["tickers"]["AAPL"]["alert_history"]
+    assert len(history) == 2
+    assert history[0]["tier"] == "NEAR_ENTRY"
+    assert history[0]["score"] == 65
+    assert "targets" not in history[0]
+    assert history[1]["tier"] == "SNIPE_IT"
+    assert history[1]["targets"] == [{"label": "T1", "level": 192.0, "reason": "FVG"}]
+
+
+def test_record_alert_stores_final_discord_channel():
+    tr = _tiering(channel="#snipe-signals")
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["final_discord_channel"] == "#snipe-signals"
+
+
+def test_record_alert_backtest_round_trip(tmp_path):
+    """Record → normalize → evaluate_alert_outcome is not INVALID_DATA when targets present."""
+    import sys as _sys
+    scripts_dir = str(pathlib.Path(__file__).resolve().parent.parent / "scripts")
+    if scripts_dir not in _sys.path:
+        _sys.path.insert(0, scripts_dir)
+    import backtest_alert_history as _bah
+    from src.backtest import evaluate_alert_outcome, INVALID_DATA, WIN_T1_BEFORE_INVALIDATION
+
+    targets = [{"label": "T1", "level": 200.0, "reason": "FVG top"}]
+    tr = _tiering(
+        trigger=182.50, invalidation=178.20,
+        scan_price=183.50, targets=targets,
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg(tmp_path))
+    raw_rec = state["tickers"]["AAPL"]["alert_history"][0]
+
+    normalized = _bah.normalize_alert_record(raw_rec)
+    future_bars = [{"open": 184.0, "high": 205.0, "low": 183.0, "close": 200.0}]
+    result = evaluate_alert_outcome(normalized, future_bars)
+
+    assert result["outcome_label"] != INVALID_DATA
+    assert result["outcome_label"] == WIN_T1_BEFORE_INVALIDATION
+
+
+def test_record_alert_baseline_fields_unchanged():
+    """All 9 Phase 6 baseline fields are still present and correct after 13.3B expansion."""
+    tr = _tiering(ticker="AAPL", final_tier="SNIPE_IT", score=90,
+                  trigger=182.50, invalidation=178.20)
+    state = record_alert("AAPL", tr, _empty(), _cfg(), scan_id="scan-001")
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["ticker"] == "AAPL"
+    assert rec["tier"] == "SNIPE_IT"
+    assert "alerted_at" in rec
+    assert rec["trigger_level"] == 182.50
+    assert rec["invalidation_level"] == 178.20
+    assert rec["score"] == 90
+    assert rec["reason"] == "Test signal"
+    assert "dedup_key" in rec
+    assert rec["scan_id"] == "scan-001"
+
+
+def test_record_alert_no_live_behavior_keywords():
+    """state_store.py must not import or invoke live network, API, or Discord behavior."""
+    source_path = pathlib.Path(__file__).resolve().parent.parent / "src" / "state_store.py"
+    lines = source_path.read_text().splitlines()
+    non_comment = [ln for ln in lines if not ln.strip().startswith("#")]
+    joined = "\n".join(non_comment)
+    # Check executable usage patterns (imports and call sites), not bare words that
+    # may appear in docstrings stating what the module deliberately avoids.
+    forbidden = [
+        "import yfinance",
+        "yfinance.",
+        "import anthropic",
+        "anthropic.",
+        "discord.send",
+        "requests.get",
+        "urllib.request",
+    ]
+    for keyword in forbidden:
+        assert keyword not in joined, (
+            f"Forbidden live-behavior keyword {keyword!r} found in state_store.py"
+        )
