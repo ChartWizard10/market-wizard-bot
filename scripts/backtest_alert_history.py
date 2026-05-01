@@ -81,6 +81,17 @@ def _coerce_targets(record: dict) -> list:
     return []
 
 
+def _can_float(value) -> bool:
+    """Return True if value can be converted to a float (non-None, non-string-garbage)."""
+    if value is None:
+        return False
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Normalizers
 # ---------------------------------------------------------------------------
@@ -168,6 +179,153 @@ def normalize_ohlc_bars(raw_bars) -> list[dict]:
         except TypeError:
             pass
     return out
+
+
+# ---------------------------------------------------------------------------
+# Data quality
+# ---------------------------------------------------------------------------
+
+def get_alert_data_quality(alert: dict) -> dict:
+    """Assess data completeness for backtest evaluation.
+
+    Input:
+        Normalized alert dict (from normalize_alert_record).
+
+    Output dict keys:
+        has_target:          bool — non-empty targets list present.
+        has_invalidation:    bool — numeric invalidation_level present.
+        has_reference_price: bool — scan_price or trigger_level present (numeric).
+        has_trigger:         bool — numeric trigger_level present.
+        has_tier:            bool — final_tier or tier string present.
+        missing_fields:      list[str] — field names that are absent.
+        data_quality_label:  "COMPLETE" | "BACKTESTABLE" | "PARTIAL" | "INSUFFICIENT"
+
+    Labels:
+        COMPLETE:     target + invalidation + reference_price + trigger + tier all present.
+        BACKTESTABLE: target + invalidation + reference_price present; trigger/tier may be missing.
+        PARTIAL:      some of {target, invalidation, reference_price} present but not all three.
+        INSUFFICIENT: none of {target, invalidation, reference_price} present.
+    """
+    targets_val = alert.get("targets")
+    has_target = bool(targets_val) and isinstance(targets_val, list)
+
+    has_invalidation    = _can_float(alert.get("invalidation_level"))
+    has_scan_price      = _can_float(alert.get("scan_price"))
+    has_trigger         = _can_float(alert.get("trigger_level"))
+    has_reference_price = has_scan_price or has_trigger
+    has_tier            = bool(alert.get("final_tier") or alert.get("tier"))
+
+    missing_fields: list[str] = []
+    if not has_target:
+        missing_fields.append("targets")
+    if not has_invalidation:
+        missing_fields.append("invalidation_level")
+    if not has_scan_price:
+        missing_fields.append("scan_price")
+    if not has_trigger:
+        missing_fields.append("trigger_level")
+    if not has_tier:
+        missing_fields.append("tier")
+
+    if has_target and has_invalidation and has_reference_price and has_trigger and has_tier:
+        label = "COMPLETE"
+    elif has_target and has_invalidation and has_reference_price:
+        label = "BACKTESTABLE"
+    elif has_target or has_invalidation or has_reference_price:
+        label = "PARTIAL"
+    else:
+        label = "INSUFFICIENT"
+
+    return {
+        "has_target":          has_target,
+        "has_invalidation":    has_invalidation,
+        "has_reference_price": has_reference_price,
+        "has_trigger":         has_trigger,
+        "has_tier":            has_tier,
+        "missing_fields":      missing_fields,
+        "data_quality_label":  label,
+    }
+
+
+def summarize_data_quality(alerts: list) -> dict:
+    """Aggregate data-quality assessment across a list of normalized alert dicts.
+
+    Returns counts by quality label, per-field missing counts, and per-tier breakdowns.
+    Does not modify alerts. Does not fabricate targets.
+    """
+    total = complete = backtestable = partial = insufficient = 0
+    missing_target = missing_invalidation = missing_reference_price = 0
+    missing_trigger = missing_tier_count = 0
+    field_missing_counts: dict[str, int] = {}
+    by_tier: dict[str, dict] = {}
+
+    for alert in alerts:
+        if not isinstance(alert, dict):
+            continue
+        total += 1
+        dq    = get_alert_data_quality(alert)
+        label = dq["data_quality_label"]
+
+        if label == "COMPLETE":
+            complete += 1
+        elif label == "BACKTESTABLE":
+            backtestable += 1
+        elif label == "PARTIAL":
+            partial += 1
+        else:
+            insufficient += 1
+
+        if not dq["has_target"]:
+            missing_target += 1
+        if not dq["has_invalidation"]:
+            missing_invalidation += 1
+        if not dq["has_reference_price"]:
+            missing_reference_price += 1
+        if not dq["has_trigger"]:
+            missing_trigger += 1
+        if not dq["has_tier"]:
+            missing_tier_count += 1
+
+        for field in dq["missing_fields"]:
+            field_missing_counts[field] = field_missing_counts.get(field, 0) + 1
+
+        tier = alert.get("final_tier") or alert.get("tier") or "unknown"
+        if tier not in by_tier:
+            by_tier[tier] = {
+                "count": 0, "complete": 0, "backtestable": 0,
+                "partial": 0, "insufficient": 0,
+                "missing_target": 0, "missing_invalidation": 0,
+                "missing_reference_price": 0,
+            }
+        by_tier[tier]["count"] += 1
+        by_tier[tier][label.lower()] += 1
+        if not dq["has_target"]:
+            by_tier[tier]["missing_target"] += 1
+        if not dq["has_invalidation"]:
+            by_tier[tier]["missing_invalidation"] += 1
+        if not dq["has_reference_price"]:
+            by_tier[tier]["missing_reference_price"] += 1
+
+    missing_fields_ranked = sorted(
+        [{"field": f, "count": c} for f, c in field_missing_counts.items()],
+        key=lambda x: x["count"],
+        reverse=True,
+    )
+
+    return {
+        "total_alerts":          total,
+        "complete":              complete,
+        "backtestable":          backtestable,
+        "partial":               partial,
+        "insufficient":          insufficient,
+        "missing_target":        missing_target,
+        "missing_invalidation":  missing_invalidation,
+        "missing_reference_price": missing_reference_price,
+        "missing_trigger":       missing_trigger,
+        "missing_tier":          missing_tier_count,
+        "by_tier":               by_tier,
+        "missing_fields_ranked": missing_fields_ranked,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -327,8 +485,9 @@ def run_alert_history_backtest(
         result["scan_time"] = pair["alert"].get("scan_time")
         results.append(result)
 
-    summary = summarize_backtest_results(results)
-    return {"results": results, "summary": summary}
+    data_quality = summarize_data_quality(normalized_alerts)
+    summary      = summarize_backtest_results(results)
+    return {"results": results, "summary": summary, "data_quality": data_quality}
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +524,15 @@ def _format_group(title: str, group: dict) -> list[str]:
     return lines
 
 
-def format_backtest_summary(summary: dict) -> str:
-    """Return a deterministic, human-readable text report of a summary dict."""
+def format_backtest_summary(summary: dict, data_quality: dict | None = None) -> str:
+    """Return a deterministic, human-readable text report of a summary dict.
+
+    When data_quality is provided, appends a DATA QUALITY section including
+    per-field missing counts, per-tier quality breakdown, and a MISSING TARGET
+    STRATEGY note.
+
+    Backward compatible: works with summary only (data_quality defaults to None).
+    """
     if not isinstance(summary, dict):
         return "Backtest Summary\n  (no summary)\n"
 
@@ -385,6 +551,57 @@ def format_backtest_summary(summary: dict) -> str:
     lines.extend(_format_group("by_tier",               summary.get("by_tier", {})))
     lines.extend(_format_group("by_risk_realism_state", summary.get("by_risk_realism_state", {})))
     lines.extend(_format_group("by_retest_hold_combo",  summary.get("by_retest_hold_combo", {})))
+
+    if isinstance(data_quality, dict):
+        lines.append("")
+        lines.append("DATA QUALITY")
+        lines.append(f"  Total alerts:         {data_quality.get('total_alerts', 0)}")
+        lines.append(f"  Complete:             {data_quality.get('complete', 0)}")
+        lines.append(f"  Backtestable:         {data_quality.get('backtestable', 0)}")
+        lines.append(f"  Partial:              {data_quality.get('partial', 0)}")
+        lines.append(f"  Insufficient:         {data_quality.get('insufficient', 0)}")
+        lines.append(f"  Missing targets:      {data_quality.get('missing_target', 0)}")
+        lines.append(f"  Missing invalidation: {data_quality.get('missing_invalidation', 0)}")
+        lines.append(f"  Missing ref price:    {data_quality.get('missing_reference_price', 0)}")
+        lines.append(f"  Missing trigger:      {data_quality.get('missing_trigger', 0)}")
+        lines.append(f"  Missing tier:         {data_quality.get('missing_tier', 0)}")
+
+        ranked = data_quality.get("missing_fields_ranked") or []
+        if ranked:
+            lines.append("")
+            lines.append("MISSING FIELDS")
+            for entry in ranked:
+                lines.append(f"  {entry['field']}:  {entry['count']}")
+
+        by_tier_dq = data_quality.get("by_tier") or {}
+        if by_tier_dq:
+            lines.append("")
+            lines.append("BY TIER DATA QUALITY")
+            for tier in sorted(by_tier_dq.keys()):
+                s = by_tier_dq[tier]
+                lines.append(
+                    f"  {tier}: count={s['count']}, complete={s['complete']}, "
+                    f"backtestable={s.get('backtestable', 0)}, "
+                    f"missing_target={s['missing_target']}"
+                )
+
+        lines.append("")
+        lines.append("MISSING TARGET STRATEGY")
+        missing_target_n = data_quality.get("missing_target", 0)
+        if missing_target_n > 0:
+            lines.append(
+                "  Targets are missing from some alert-history records. "
+                "These alerts cannot be truthfully classified under the "
+                "T1-before-invalidation outcome law unless a target is supplied "
+                "from a richer historical dump or future alert storage."
+            )
+            lines.append(
+                "  Do not fabricate targets. Store target_1 / targets in future "
+                "alert history if full outcome testing is required."
+            )
+        else:
+            lines.append("  Targets available for all records.")
+
     return "\n".join(lines) + "\n"
 
 
@@ -441,7 +658,7 @@ def main(argv=None) -> int:
         bars_by_ticker,
         horizon_bars=args.horizon,
     )
-    print(format_backtest_summary(output["summary"]))
+    print(format_backtest_summary(output["summary"], output.get("data_quality")))
     return 0
 
 
