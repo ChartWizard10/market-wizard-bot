@@ -14,6 +14,24 @@ This module:
 This module imports nothing from live scanner files except src.backtest.
 It does not write files. It does not call Discord, Claude, yfinance, the
 scheduler, the state store, or the tiering module.
+
+STATE-STORE PATH — VERIFY BEFORE RUNNING
+-----------------------------------------
+Do not assume the alert history path. Two paths exist in the codebase:
+
+  Live/deployed (source of truth):  .state/alert_history.json
+    Set by doctrine_config.yaml → state.state_file
+    Confirmed via !status in Discord: "State store: .state/alert_history.json"
+
+  Code fallback (if config absent):  data/alert_state.json
+    Defined in src/state_store.py → _DEFAULT_STATE_PATH
+    Only used when config is missing or broken — not the deployed path.
+
+Always verify the active path via !status or by reading
+config/doctrine_config.yaml before passing --alerts to this script.
+Use the path reported by !status as the source of truth for the deployed bot.
+
+See scripts/BACKTEST_RUNBOOK.md for full operator instructions.
 """
 
 from __future__ import annotations
