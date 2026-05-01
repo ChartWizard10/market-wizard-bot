@@ -285,15 +285,45 @@ def record_alert(
 
     history = ticker_state.setdefault("alert_history", [])
     history.append({
-        "ticker":            ticker,
-        "tier":              final_tier,
-        "alerted_at":        now,
-        "trigger_level":     trigger_level,
+        # ---- Phase 6 baseline fields (unchanged) ----
+        "ticker":             ticker,
+        "tier":               final_tier,
+        "alerted_at":         now,
+        "trigger_level":      trigger_level,
         "invalidation_level": invalidation_level,
-        "score":             score,
-        "reason":            reason,
-        "dedup_key":         dedup_key,
-        "scan_id":           scan_id,
+        "score":              score,
+        "reason":             reason,
+        "dedup_key":          dedup_key,
+        "scan_id":            scan_id,
+
+        # ---- Phase 13.3B: REQUIRED_FOR_OUTCOME ----
+        "scan_price":         final_signal.get("scan_price"),
+        "targets":            final_signal.get("targets") or [],
+
+        # ---- Phase 13.3B: REQUIRED_FOR_DIAGNOSTICS ----
+        "risk_reward":                       final_signal.get("risk_reward"),
+        "risk_realism_state":                final_signal.get("risk_realism_state"),
+        "risk_distance":                     final_signal.get("risk_distance"),
+        "risk_distance_pct":                 final_signal.get("risk_distance_pct"),
+        "current_price_to_invalidation":     final_signal.get("current_price_to_invalidation"),
+        "current_price_to_invalidation_pct": final_signal.get("current_price_to_invalidation_pct"),
+        "retest_status":                     final_signal.get("retest_status"),
+        "hold_status":                       final_signal.get("hold_status"),
+        "current_acceptance":                final_signal.get("current_acceptance"),
+        "overhead_status":                   final_signal.get("overhead_status"),
+        "setup_family":                      final_signal.get("setup_family"),
+        "structure_event":                   final_signal.get("structure_event"),
+        "trend_state":                       final_signal.get("trend_state"),
+        "zone_type":                         final_signal.get("zone_type"),
+        "sma_value_alignment":               final_signal.get("sma_value_alignment"),
+        "missing_conditions":                final_signal.get("missing_conditions"),
+        "upgrade_trigger":                   final_signal.get("upgrade_trigger"),
+        "capital_action":                    final_signal.get("capital_action"),
+        "sanitized_reason":                  final_signal.get("sanitized_reason"),
+        "sanitized_next_action":             final_signal.get("sanitized_next_action"),
+        "original_claude_tier":              tiering_result.get("original_claude_tier"),
+        "applied_vetoes":                    tiering_result.get("applied_vetoes") or [],
+        "final_discord_channel":             tiering_result.get("final_discord_channel"),
     })
     if len(history) > max_entries:
         ticker_state["alert_history"] = history[-max_entries:]
