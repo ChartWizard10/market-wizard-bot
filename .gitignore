@@ -8,3 +8,9 @@ __pycache__/
 dist/
 build/
 .DS_Store
+
+# Local runtime/backtest data — never commit
+data/alert_state.json
+data/backtest_bars.json
+data/backtest_*.json
+data/*_bars.json
