@@ -45,7 +45,9 @@ _CAPITAL_LABEL = {
 _TIER_ACTION_LABEL = {
     "SNIPE_IT":   "All SNIPE_IT conditions met.",
     "STARTER":    "All STARTER conditions met.",
-    "NEAR_ENTRY": "NEAR_ENTRY conditions met; wait for missing confirmations.",
+    # Phase 13.6A: removed "wait for missing confirmations" — inaccurate when
+    # retest/hold are confirmed but an overhead or acceptance blocker remains.
+    "NEAR_ENTRY": "Near-entry watch — no capital until blocker resolves.",
     "WAIT":       "WAIT — no actionable setup.",
 }
 
@@ -92,6 +94,66 @@ def _sanitize(text: str | None) -> str:
     text = _MENTION_RE.sub(lambda m: "@​" + m.group(1), text)
     text = _ROLE_USER_MENTION_RE.sub("[mention]", text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.6A: Post-render consistency guard
+# ---------------------------------------------------------------------------
+# Forbidden phrases per tier in the fully rendered alert text.
+# Format: (lowercase_match, safe_replacement)
+# Ordered longest-first within each tier to prevent partial-match shadowing.
+_GUARD_RULES: dict[str, list[tuple[str, str]]] = {
+    # Ordered longest-first within each tier to prevent partial-match shadowing.
+    "NEAR_ENTRY": [
+        # SNIPE_IT affirmation variants — longest first to prevent shadowing.
+        # Replacements use "Watch-only; no capital." (not "no capital authorized")
+        # so the "capital authorized" sanitizer rule cannot re-fire on guard output.
+        ("all snipe_it conditions satisfied", "Watch-only; no capital."),
+        ("all snipe_it conditions are met",   "Watch-only; no capital."),
+        ("all snipe_it conditions met.",      "Watch-only; no capital."),
+        ("all snipe_it conditions met",       "Watch-only; no capital."),
+        ("snipe_it conditions are met",       "Watch-only; no capital."),
+        ("snipe_it conditions met",           "Watch-only; no capital."),
+        # STARTER capital label must never appear in NEAR_ENTRY text
+        ("starter size only",                 "NO CAPITAL — WATCH ONLY"),
+        # Live bug HWKN: "making this a STARTER" must not appear in NEAR_ENTRY
+        ("making this a starter",             "Watch-only; no capital."),
+        # SNIPE_IT capital label; must follow "starter size only" above
+        ("full quality",                      "no capital"),
+    ],
+    "STARTER": [
+        # NEAR_ENTRY capital label must never appear in STARTER text
+        ("no capital — watch only",           "STARTER SIZE ONLY"),
+        # SNIPE_IT action label variants — longest first
+        ("all snipe_it conditions satisfied", "All STARTER conditions met."),
+        ("all snipe_it conditions are met",   "All STARTER conditions met."),
+        ("all snipe_it conditions met.",      "All STARTER conditions met."),
+        ("all snipe_it conditions met",       "All STARTER conditions met."),
+        # SNIPE_IT capital label must never appear in STARTER text
+        ("full quality",                      "STARTER SIZE ONLY"),
+    ],
+}
+
+
+def _consistency_guard(text: str, final_tier: str) -> str:
+    """Phase 13.6A: final-pass safety net on the fully rendered alert text.
+
+    Replaces tier-contradicting phrases that survived upstream sanitization.
+    Logs a warning for every hit — each hit indicates a gap in tiering.py's
+    _sanitize_reason_for_tier that should be patched upstream.
+    """
+    rules = _GUARD_RULES.get(final_tier)
+    if not rules:
+        return text
+    result = text
+    for match_lower, replacement in rules:
+        if match_lower in result.lower():
+            log.warning(
+                "CONSISTENCY_GUARD: tier=%s — found forbidden phrase %r; replacing.",
+                final_tier, match_lower,
+            )
+            result = re.sub(re.escape(match_lower), replacement, result, flags=re.IGNORECASE)
+    return result
 
 
 def _clean_blocker_label(note: str | None) -> str:
@@ -304,7 +366,10 @@ def format_alert(
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    return "\n".join(lines)
+    # Phase 13.6A: final-pass guard — removes any tier-contradicting phrases
+    # that survived upstream sanitization.
+    rendered = "\n".join(lines)
+    return _consistency_guard(rendered, final_tier)
 
 
 # ---------------------------------------------------------------------------

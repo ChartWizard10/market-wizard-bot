@@ -41,62 +41,82 @@ _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
     # before their sub-phrases. This prevents partial-match shadowing where a
     # shorter pattern would consume part of a longer phrase first.
     "NEAR_ENTRY": [
+        # Replacement-text hygiene for multi-pass safety:
+        # Only ("capital authorized" → "no capital authorized") is allowed to
+        # produce "no capital authorized" because it is the SOLE entry whose
+        # output contains "capital authorized" as a substring, and the
+        # non-overlapping scanner protects it within a single pass.
+        # All other entries use "Watch-only; no capital." (without "authorized")
+        # or "no capital" so that no earlier replacement inserts text that is
+        # then re-matched by the "capital authorized" rule in a later pass.
+        #
         # 40 chars — Phase 12A
         ("reducing conviction to starter tier only", "Watch-only; confirmation pending."),
         # 38 chars — Phase 12.3: must precede "all snipe_it conditions satisfied" (33)
         ("enter on confirmed close above trigger", "watch for confirmed close above trigger"),
-        # 33 chars — Phase 12.2: must precede "snipe_it conditions satisfied" (29)
-        ("all snipe_it conditions satisfied", "Watchlist only until retest and hold confirm."),
+        # 33 chars — Phase 12.2: must precede "all snipe_it conditions are met" (32)
+        ("all snipe_it conditions satisfied", "Watch-only; no capital."),
+        # 32 chars — Phase 13.6A: "are met" variant missed by prior sanitizer (live bug: GEV)
+        # Must precede "all snipe_it conditions met" (27) and "snipe_it conditions are met" (26)
+        ("all snipe_it conditions are met", "Watch-only; no capital."),
         # 31 chars — Phase 12.2: must precede "snipe_it criteria" (17)
-        ("satisfies all snipe_it criteria",   "Watchlist only until retest and hold confirm."),
+        ("satisfies all snipe_it criteria",   "Watch-only; no capital."),
         # 29 chars — Phase 12.2
-        ("snipe_it conditions satisfied",      "Watchlist only until retest and hold confirm."),
+        ("snipe_it conditions satisfied",      "Watch-only; no capital."),
         # 28 chars — Phase 12.1
-        ("starter allocation warranted",       "Watchlist only until retest and hold confirm."),
+        ("starter allocation warranted",       "Watch-only; no capital."),
         # 28 chars — Phase 12.2: must precede "snipe criteria" (14)
-        ("satisfies all snipe criteria",       "Watchlist only until retest and hold confirm."),
-        # 27 chars — Phase 12A: must precede "snipe_it conditions met" (23)
+        ("satisfies all snipe criteria",       "Watch-only; no capital."),
+        # 27 chars — Phase 12A: must precede "snipe_it conditions are met" (26)
         ("all snipe_it conditions met",        "Watch-only; confirmation pending."),
         # 26 chars — Phase 12A
         ("all starter conditions met",         "Watch-only; confirmation pending."),
+        # 26 chars — Phase 13.6A: "are met" variant; must precede "snipe_it conditions met" (23)
+        ("snipe_it conditions are met",        "Watch-only; no capital."),
         # 23 chars — Phase 12.1
-        ("starter entry warranted",            "Watchlist only until retest and hold confirm."),
+        ("starter entry warranted",            "Watch-only; no capital."),
         # 23 chars — Phase 12A
         ("snipe_it conditions met",            "Watch-only; confirmation pending."),
         # 22 chars — Phase 12.2
         ("full-quality candidate",             "watch-only candidate"),
+        # 21 chars — Phase 13.6A: live bug HWKN — "making this a STARTER" in NEAR_ENTRY reason
+        ("making this a starter",              "Watch-only; no capital."),
         # 20 chars — Phase 12.1
         ("snipe conditions met",               "Watch-only; confirmation pending."),
         # 20 chars — Phase 12.1
-        ("forced participation",               "Watchlist only until retest and hold confirm."),
+        ("forced participation",               "Watch-only; no capital."),
         # 20 chars — Phase 12A: must precede "full quality" (12)
-        ("full quality allowed",               "no capital authorized"),
+        ("full quality allowed",               "no capital"),
         # 20 chars — Phase 12.1
-        ("allocation warranted",               "Watchlist only until retest and hold confirm."),
+        ("allocation warranted",               "Watch-only; no capital."),
         # 18 chars — Phase 12.1
-        ("reduced-size entry",                 "Watchlist only until retest and hold confirm."),
-        # 18 chars — Phase 12A
+        ("reduced-size entry",                 "Watch-only; no capital."),
+        # 18 chars — Phase 12A: ONLY entry allowed to produce "no capital authorized"
         ("capital authorized",                 "no capital authorized"),
         # 17 chars — Phase 12.1
-        ("capital justified",                  "Watchlist only until retest and hold confirm."),
+        ("capital justified",                  "Watch-only; no capital."),
         # 17 chars — Phase 12.2
-        ("snipe_it criteria",                  "Watchlist only until retest and hold confirm."),
+        ("snipe_it criteria",                  "Watch-only; no capital."),
         # 17 chars — Phase 12A
         ("starter tier only",                  "watch-only"),
         # 17 chars — Phase 12.1
-        ("starter warranted",                  "Watchlist only until retest and hold confirm."),
+        ("starter warranted",                  "Watch-only; no capital."),
+        # 17 chars — Phase 13.6A: must precede "starter size" (12)
+        ("starter size only",                  "Watch-only; no capital."),
         # 15 chars — Phase 12.1
-        ("entry warranted",                    "Watchlist only until retest and hold confirm."),
+        ("entry warranted",                    "Watch-only; no capital."),
         # 15 chars — Phase 12.3A: position-management language inappropriate for watchlist tier
         ("manage position",                    "No position management until capital is authorized."),
         # 14 chars — Phase 12.2
-        ("snipe criteria",                     "Watchlist only until retest and hold confirm."),
+        ("snipe criteria",                     "Watch-only; no capital."),
         # 12 chars — Phase 12.1
-        ("reduced size",                       "Watchlist only until retest and hold confirm."),
+        ("reduced size",                       "Watch-only; no capital."),
+        # 12 chars — Phase 13.6A: must follow "starter size only" (17) above
+        ("starter size",                       "Watch-only; no capital."),
         # 12 chars — Phase 12A: must follow "full quality allowed" above
-        ("full quality",                       "no capital authorized"),
+        ("full quality",                       "no capital"),
         # 11 chars — Phase 12.2
-        ("entry valid",                        "Watchlist only until retest and hold confirm."),
+        ("entry valid",                        "Watch-only; no capital."),
         # 10 chars — Phase 12.3A: must precede "stop below" — "trail stop below" contains
         # "stop below" as a sub-span; processing "trail stop" first prevents "stop below"
         # from consuming the overlapping portion and blocking the trail-stop replacement.
