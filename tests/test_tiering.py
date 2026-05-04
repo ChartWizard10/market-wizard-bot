@@ -1393,9 +1393,10 @@ def test_12b_snipe_and_starter_gates_unchanged():
 from src.tiering import _classify_risk_realism
 
 
-# 12C-1: Tiny risk distance → fragile state. Final tier preserved.
+# 12C-1 / 13.7A: Tiny risk distance → fragile state. Phase 13.7A blocks SNIPE_IT.
+# trigger=100.00, invalidation=99.70 → risk_distance_pct=0.30% < 0.35% floor.
+# All other SNIPE_IT gates pass, so cascade stops at STARTER.
 def test_12c_valid_geometry_tiny_stop_gets_fragile_risk_state():
-    # trigger=100.00, invalidation=99.70 → risk_distance=0.30, pct=0.30%
     signal = _snipe_signal(
         trigger_level=100.00,
         invalidation_level=99.70,
@@ -1405,13 +1406,16 @@ def test_12c_valid_geometry_tiny_stop_gets_fragile_risk_state():
     kf = {"current_price": 101.50}
     result = validate(signal, _pf_with_key_features(kf), _BASE_CONFIG)
     fs = result["final_signal"]
+    # Risk realism field still reports fragile (informational layer unchanged)
     assert fs["risk_realism_state"] == "fragile"
     assert "fragile" in fs["risk_realism_note"].lower()
-    # Phase 12C must NOT introduce semantic_price_sanity_failed for valid geometry
+    # Phase 13.7A: fragile stop now blocks SNIPE_IT → cascade to STARTER
+    assert result["final_tier"] == "STARTER"
     downgrade_text = " ".join(result.get("downgrades", []))
+    assert "fragile" in downgrade_text.lower()
+    assert "snipe_it" in downgrade_text.lower()
+    # Valid geometry must not produce semantic_price_sanity_failed
     assert "semantic_price_sanity_failed" not in downgrade_text
-    # Final tier must not be downgraded by Phase 12C alone
-    assert result["final_tier"] == "SNIPE_IT"
 
 
 # 12C-2: Risk distance between 0.35% and 0.75% → tight state.
@@ -2109,3 +2113,138 @@ def test_12_3a_starter_and_snipe_unchanged():
     clean_starter = _sanitize_reason_for_tier(dirty_starter, "STARTER")
     assert "full-size confirmation not granted" in clean_starter.lower()
     assert "snipe confirmation not granted" not in clean_starter.lower()
+
+
+# ===========================================================================
+# Phase 13.7A: Fragile Risk / Fake R:R Governor
+# ===========================================================================
+#
+# A microscopic stop (risk_distance_pct < 0.35%) produces an artificially high
+# R:R without real risk absorption capacity — "fake asymmetry". Phase 13.7A
+# adds a gate in _snipe_gate_failures() that blocks SNIPE_IT when the stop is
+# fragile, cascading to STARTER (which still allows reduced-size capital).
+#
+# CSX live bug: trigger=44.70, invalidation=44.68, risk_distance=$0.02 (0.045%),
+# risk_reward=73.80 — all other SNIPE_IT gates passed; bot classified SNIPE_IT.
+
+
+# 13.7A-1: CSX-style fixture — microscopic stop → SNIPE_IT blocked → STARTER
+def test_13_7a_csx_style_fragile_stop_blocks_snipe_it():
+    # risk_distance = 44.70 - 44.68 = 0.02, pct ≈ 0.045% → far below 0.35% floor
+    signal = _snipe_signal(
+        ticker="CSX",
+        trigger_level=44.70,
+        invalidation_level=44.68,
+        targets=[{"label": "T1", "level": 46.00, "reason": "Prior supply zone"}],
+        risk_reward=73.80,
+        reason="Clean MSS with confirmed FVG retest and hold.",
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    # SNIPE_IT must be blocked; STARTER cascade should succeed (score=90 > 75)
+    assert result["final_tier"] == "STARTER"
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "fragile" in downgrade_text.lower()
+    assert "snipe_it" in downgrade_text.lower()
+    # The informational risk_realism_state field also reports fragile
+    assert result["final_signal"]["risk_realism_state"] == "fragile"
+
+
+# 13.7A-2: Healthy stop — risk_distance_pct well above floor → SNIPE_IT passes
+def test_13_7a_healthy_stop_does_not_block_snipe_it():
+    # trigger=100.00, invalidation=98.00 → risk_distance_pct=2.0% → healthy
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=98.00,
+        targets=[{"label": "T1", "level": 110.00, "reason": "Prior swing high"}],
+        risk_reward=5.0,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "fragile" not in downgrade_text.lower()
+    assert result["final_signal"]["risk_realism_state"] == "healthy"
+
+
+# 13.7A-3: Stop well above threshold (0.50%) — not blocked (gate is strictly <)
+def test_13_7a_stop_above_threshold_is_not_blocked():
+    # trigger=100.00, invalidation=99.50 → risk_distance=0.50, pct=0.50% > 0.35%
+    # Uses a value safely above the threshold to avoid float representation edge cases
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=99.50,
+        targets=[{"label": "T1", "level": 106.00, "reason": "Prior swing high"}],
+        risk_reward=4.0,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "fragile" not in downgrade_text.lower()
+
+
+# 13.7A-4: Just below threshold (0.34%) → blocked
+def test_13_7a_stop_just_below_threshold_is_blocked():
+    # trigger=100.00, invalidation=99.66 → risk_distance=0.34, pct=0.34% < 0.35%
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=99.66,
+        targets=[{"label": "T1", "level": 106.00, "reason": "Prior swing high"}],
+        risk_reward=4.0,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    # SNIPE_IT blocked; STARTER passes (score=90 > 75, no fragile check in starter gate)
+    assert result["final_tier"] == "STARTER"
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "fragile" in downgrade_text.lower()
+
+
+# 13.7A-5: Fragile stop + other SNIPE_IT failures → cascade to NEAR_ENTRY or WAIT
+# If all SNIPE_IT conditions pass except fragile, starter can still accept the trade.
+# But if STARTER also fails (e.g. score too low), it cascades further.
+def test_13_7a_fragile_stop_plus_low_score_cascades_to_near_entry():
+    # score=77 passes STARTER (>75) but not SNIPE_IT (>85)
+    # risk_distance_pct=0.30% < 0.35% adds the fragile failure to snipe gate
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=99.70,
+        score=77,
+        targets=[{"label": "T1", "level": 106.00, "reason": "Prior swing high"}],
+        risk_reward=4.0,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    # SNIPE_IT: fails (score < 85 AND fragile risk)
+    # STARTER: passes (score=77 > 75, no fragile check in starter gate)
+    assert result["final_tier"] == "STARTER"
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "snipe_it" in downgrade_text.lower()
+
+
+# 13.7A-6: NEAR_ENTRY signal with fragile geometry — fragile gate never fires
+# (_snipe_gate_failures is not called on the NEAR_ENTRY path)
+def test_13_7a_near_entry_fragile_geometry_no_spurious_downgrade():
+    # NEAR_ENTRY with a very tight trigger/invalidation — fragile gate must not fire
+    signal = _near_entry_signal(
+        trigger_level=44.70,
+        invalidation_level=44.68,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    # Should remain NEAR_ENTRY (fragile check is snipe-gate-only)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "fragile" not in downgrade_text.lower()
+
+
+# 13.7A-7: Missing invalidation_level — fragile gate skipped safely (no crash)
+def test_13_7a_missing_invalidation_level_no_crash():
+    signal = _snipe_signal(
+        trigger_level=100.00,
+        invalidation_level=None,
+        invalidation_condition="",
+        risk_reward=None,
+    )
+    result = validate(signal, _pf(), _BASE_CONFIG)
+    # invalidation_level=None hits entry gate ("invalidation_level null")
+    # regardless of fragile gate — tier lands at NEAR_ENTRY or WAIT
+    assert result["final_tier"] in ("NEAR_ENTRY", "WAIT")
+    # No crash; no "fragile" in downgrades (fragile gate skipped due to None)
+    downgrade_text = " ".join(result.get("downgrades", []))
+    assert "fragile" not in downgrade_text.lower()

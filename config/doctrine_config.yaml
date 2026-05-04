@@ -47,6 +47,7 @@ tiers:
   snipe_it:
     min_score: 85
     min_rr: 3.0
+    min_risk_distance_pct: 0.35        # < 0.35% stop = fragile/fake-asymmetry → blocks SNIPE_IT
     requires_retest: true
     requires_hold: true
     requires_invalidation: true
