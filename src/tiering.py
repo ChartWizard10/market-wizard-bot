@@ -326,6 +326,33 @@ def _snipe_gate_failures(
     if acceptance == "unproven":
         failures.append("current_acceptance=unproven (zone defense unconfirmed for SNIPE_IT)")
 
+    # Phase 13.7A: Fragile risk window blocks SNIPE_IT / full-quality capital.
+    # A microscopic stop inflates R:R arithmetically without real risk absorption
+    # capacity — this is fake asymmetry, not edge. Inline computation mirrors
+    # _classify_risk_realism() so the check runs inside _determine_final_tier()
+    # before that function is called.
+    _trig = signal.get("trigger_level")
+    _inval = signal.get("invalidation_level")
+    if _trig is not None and _inval is not None:
+        try:
+            _t = float(_trig)
+            _i = float(_inval)
+            _risk_dist = _t - _i
+            if _t != 0 and _risk_dist > 0:
+                _risk_dist_pct = _risk_dist / abs(_t) * 100
+                _min_risk_pct = (
+                    config.get("tiers", {})
+                    .get("snipe_it", {})
+                    .get("min_risk_distance_pct", 0.35)
+                )
+                if _risk_dist_pct < _min_risk_pct:
+                    failures.append(
+                        f"risk_window=fragile (risk_distance_pct={_risk_dist_pct:.3f}%"
+                        f" < min={_min_risk_pct}%); fake-asymmetry risk blocks SNIPE_IT"
+                    )
+        except (TypeError, ValueError):
+            pass
+
     return failures
 
 
