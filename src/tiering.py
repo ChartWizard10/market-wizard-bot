@@ -50,10 +50,18 @@ _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
         # or "no capital" so that no earlier replacement inserts text that is
         # then re-matched by the "capital authorized" rule in a later pass.
         #
+        # 44 chars — Phase 13.6B: old replacement text that Claude now outputs literally
+        # (live bug: ELA — next_action said "Watchlist only until retest and hold confirm.")
+        ("watchlist only until retest and hold confirm", "Watch-only; no capital."),
         # 40 chars — Phase 12A
         ("reducing conviction to starter tier only", "Watch-only; confirmation pending."),
+        # 39 chars — Phase 13.6B: tier-degradation language (live bug: ELA — "degrading this
+        # from SNIPE_IT to STARTER" in NEAR_ENTRY reason). Must precede shorter variants below.
+        ("degrading this from snipe_it to starter", "Watch-only; no capital."),
         # 38 chars — Phase 12.3: must precede "all snipe_it conditions satisfied" (33)
         ("enter on confirmed close above trigger", "watch for confirmed close above trigger"),
+        # 35 chars — Phase 13.6B: must precede "from snipe_it to starter" (24)
+        ("downgraded from snipe_it to starter",    "Watch-only; no capital."),
         # 33 chars — Phase 12.2: must precede "all snipe_it conditions are met" (32)
         ("all snipe_it conditions satisfied", "Watch-only; no capital."),
         # 32 chars — Phase 13.6A: "are met" variant missed by prior sanitizer (live bug: GEV)
@@ -61,6 +69,8 @@ _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
         ("all snipe_it conditions are met", "Watch-only; no capital."),
         # 31 chars — Phase 12.2: must precede "snipe_it criteria" (17)
         ("satisfies all snipe_it criteria",   "Watch-only; no capital."),
+        # 29 chars — Phase 13.6B: must precede "snipe_it to starter" (19)
+        ("snipe_it downgrade to starter",      "Watch-only; no capital."),
         # 29 chars — Phase 12.2
         ("snipe_it conditions satisfied",      "Watch-only; no capital."),
         # 28 chars — Phase 12.1
@@ -73,6 +83,9 @@ _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
         ("all starter conditions met",         "Watch-only; confirmation pending."),
         # 26 chars — Phase 13.6A: "are met" variant; must precede "snipe_it conditions met" (23)
         ("snipe_it conditions are met",        "Watch-only; no capital."),
+        # 24 chars — Phase 13.6B: catches "from SNIPE_IT to STARTER" without "degrading this"
+        # Must precede "snipe_it to starter" (19)
+        ("from snipe_it to starter",           "Watch-only; no capital."),
         # 23 chars — Phase 12.1
         ("starter entry warranted",            "Watch-only; no capital."),
         # 23 chars — Phase 12A
@@ -81,14 +94,24 @@ _TIER_BANNED_PHRASES: dict[str, list[tuple[str, str]]] = {
         ("full-quality candidate",             "watch-only candidate"),
         # 21 chars — Phase 13.6A: live bug HWKN — "making this a STARTER" in NEAR_ENTRY reason
         ("making this a starter",              "Watch-only; no capital."),
+        # 21 chars — Phase 13.6B: downgraded form
+        ("downgraded to starter",              "Watch-only; no capital."),
         # 20 chars — Phase 12.1
         ("snipe conditions met",               "Watch-only; confirmation pending."),
         # 20 chars — Phase 12.1
         ("forced participation",               "Watch-only; no capital."),
         # 20 chars — Phase 12A: must precede "full quality" (12)
         ("full quality allowed",               "no capital"),
+        # 20 chars — Phase 13.6B: must precede "snipe_it to starter" (19)
+        ("downgrade to starter",               "Watch-only; no capital."),
+        # 20 chars — Phase 13.6B: catch-all for "Watchlist only until X" variants;
+        # must follow all longer "watchlist only until ..." entries above
+        ("watchlist only until",               "Watch-only; no capital."),
         # 20 chars — Phase 12.1
         ("allocation warranted",               "Watch-only; no capital."),
+        # 19 chars — Phase 13.6B: catches "SNIPE_IT to STARTER" without "from"/"degrading"
+        # Must follow all longer entries that contain "snipe_it to starter" as a sub-phrase
+        ("snipe_it to starter",                "Watch-only; no capital."),
         # 18 chars — Phase 12.1
         ("reduced-size entry",                 "Watch-only; no capital."),
         # 18 chars — Phase 12A: ONLY entry allowed to produce "no capital authorized"
@@ -503,13 +526,40 @@ def _classify_current_acceptance(signal: dict, key_features: dict) -> str:
 # ---------------------------------------------------------------------------
 
 # Phase 12.2: Post-replacement cleanup for NEAR_ENTRY.
-# Replacing "entry valid" with "Watchlist only until retest and hold confirm."
-# inside a phrase like "entry valid only until X" leaves a dangling
-# "only until X" tail.  This regex removes it.
+# "entry valid only until X" was previously sanitized to
+# "Watchlist only until retest and hold confirm. only until X"; this regex
+# stripped the dangling tail.  Retained as a safety net — fires if any path
+# still produces "retest and hold confirm." followed by " only until ...".
 _WATCHLIST_TAIL_RE = re.compile(
     r"(retest and hold confirm\.)\s+only until\b[^.]*\.?",
     re.IGNORECASE,
 )
+
+# Phase 13.6B: Additional post-replacement cleanup patterns for NEAR_ENTRY.
+# Each pattern strips a dangling fragment that can appear when a banned phrase
+# occupies the start of a longer input and the remainder is appended verbatim.
+_NEAR_ENTRY_CLEANUP_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # "manage position X" → replacement text + dangling " X" fragment.
+    # e.g. "Manage position to OB low." becomes
+    #      "No position management until capital is authorized. to OB low."
+    # Strip everything after the complete replacement sentence.
+    (
+        re.compile(
+            r"(no position management until capital is authorized\.)\s+\S[^\n]*",
+            re.IGNORECASE,
+        ),
+        r"\1",
+    ),
+    # "entry valid only until X" → "Watch-only; no capital. only until X"
+    # after the Phase 13.6A replacement change.  Strip the tail.
+    (
+        re.compile(
+            r"(Watch-only; no capital\.)\s+only until\b[^.]*\.?",
+            re.IGNORECASE,
+        ),
+        r"\1",
+    ),
+]
 
 
 def _near_entry_blocker_backfill(signal: dict, current_price: float | None) -> None:
@@ -624,7 +674,9 @@ def _build_near_entry_blocker_note(signal: dict, current_price: float | None) ->
 
     # F: fallback
     return (
-        "Blocker: watchlist only until trigger acceptance, retest, and hold confirm."
+        # Phase 13.6B: rewritten — "watchlist only until" is banned language for
+        # NEAR_ENTRY; this fallback fires when all specific blockers have cleared.
+        "Blocker: watch for trigger acceptance and full zone confirmation."
     )
 
 
@@ -673,12 +725,12 @@ def _sanitize_reason_for_tier(reason: str | None, final_tier: str) -> str:
     result = str(reason)
     for banned_lower, replacement in banned_list:
         result = _replace_phrase_non_overlapping(result, banned_lower, replacement)
-    # Phase 12.2: NEAR_ENTRY cleanup — strip dangling "only until..." tail that
-    # appears when a banned phrase (e.g. "entry valid") was embedded in a
-    # construction like "entry valid only until X", leaving
-    # "Watchlist only until retest and hold confirm. only until X".
     if final_tier == "NEAR_ENTRY":
+        # Phase 12.2: strip dangling "only until..." tail (safety net, kept for legacy paths)
         result = _WATCHLIST_TAIL_RE.sub(r"\1", result)
+        # Phase 13.6B: strip trailing fragments from known replacement artifacts
+        for pattern, repl in _NEAR_ENTRY_CLEANUP_PATTERNS:
+            result = pattern.sub(repl, result)
     return result
 
 

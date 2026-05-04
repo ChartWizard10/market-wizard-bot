@@ -105,19 +105,37 @@ def _sanitize(text: str | None) -> str:
 _GUARD_RULES: dict[str, list[tuple[str, str]]] = {
     # Ordered longest-first within each tier to prevent partial-match shadowing.
     "NEAR_ENTRY": [
-        # SNIPE_IT affirmation variants — longest first to prevent shadowing.
+        # Ordered longest-first to prevent partial-match shadowing.
         # Replacements use "Watch-only; no capital." (not "no capital authorized")
         # so the "capital authorized" sanitizer rule cannot re-fire on guard output.
+
+        # Phase 13.6B: old replacement text that Claude now outputs literally
+        ("watchlist only until retest and hold confirm", "Watch-only; no capital."),
+        # Phase 13.6B: tier-degradation language (live bug: ELA)
+        ("degrading this from snipe_it to starter",     "Watch-only; no capital."),
+        ("downgraded from snipe_it to starter",         "Watch-only; no capital."),
+        # SNIPE_IT affirmation variants (Phase 13.6A)
         ("all snipe_it conditions satisfied", "Watch-only; no capital."),
         ("all snipe_it conditions are met",   "Watch-only; no capital."),
         ("all snipe_it conditions met.",      "Watch-only; no capital."),
         ("all snipe_it conditions met",       "Watch-only; no capital."),
+        # Phase 13.6B: must precede "snipe_it to starter" (19)
+        ("snipe_it downgrade to starter",     "Watch-only; no capital."),
         ("snipe_it conditions are met",       "Watch-only; no capital."),
         ("snipe_it conditions met",           "Watch-only; no capital."),
+        # Phase 13.6B: shorter degradation variants
+        ("from snipe_it to starter",          "Watch-only; no capital."),
         # STARTER capital label must never appear in NEAR_ENTRY text
         ("starter size only",                 "NO CAPITAL — WATCH ONLY"),
-        # Live bug HWKN: "making this a STARTER" must not appear in NEAR_ENTRY
+        # Live bug HWKN (Phase 13.6A)
         ("making this a starter",             "Watch-only; no capital."),
+        # Phase 13.6B
+        ("downgraded to starter",             "Watch-only; no capital."),
+        ("downgrade to starter",              "Watch-only; no capital."),
+        # Phase 13.6B: catch-all for "Watchlist only until X"
+        ("watchlist only until",              "Watch-only; no capital."),
+        # Phase 13.6B: must follow longer "snipe_it ... to starter" entries above
+        ("snipe_it to starter",               "Watch-only; no capital."),
         # SNIPE_IT capital label; must follow "starter size only" above
         ("full quality",                      "no capital"),
     ],

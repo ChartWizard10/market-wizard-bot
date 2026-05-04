@@ -1013,7 +1013,9 @@ def test_12_1_snipe_forced_participation_still_renders():
 
 # 12.2-D1: NEAR_ENTRY alert Why line does not render SNIPE_IT language
 def test_12_2_near_entry_alert_does_not_render_snipe_language():
-    # sanitized_reason carries already-cleaned text (as tiering.validate() produces)
+    # sanitized_reason carries already-cleaned text (as tiering.validate() produces).
+    # Phase 13.6B: old "Watchlist only until retest and hold confirm." is now also a
+    # banned phrase — use the current replacement text "Watch-only; no capital."
     tr = _tiering_result(
         tier="NEAR_ENTRY",
         score=65,
@@ -1022,7 +1024,7 @@ def test_12_2_near_entry_alert_does_not_render_snipe_language():
         missing_conditions=["retest_not_confirmed"],
         upgrade_trigger="Close above trigger with hold.",
         reason="All SNIPE_IT conditions satisfied.",
-        sanitized_reason="Watchlist only until retest and hold confirm.",
+        sanitized_reason="Watch-only; no capital.",
     )
     tr["final_tier"] = "NEAR_ENTRY"
     tr["capital_action"] = "wait_no_capital"
@@ -1030,7 +1032,7 @@ def test_12_2_near_entry_alert_does_not_render_snipe_language():
     text = format_alert(tr)
     assert "snipe_it" not in text.lower()
     assert "all snipe_it conditions" not in text.lower()
-    assert "watchlist only" in text.lower() or "retest and hold" in text.lower()
+    assert "watch-only" in text.lower() or "no capital" in text.lower()
 
 
 # 12.2-D2: NEAR_ENTRY alert Why line does not render "entry valid"
@@ -1297,7 +1299,9 @@ def test_12_3_phase_12_2_language_tests_still_pass():
     assert "snipe_it" not in clean.lower()
     assert "watch-only" in clean.lower() or "no capital" in clean.lower()
 
-    # Render in alert — NEAR_ENTRY with pre-cleaned sanitized_reason
+    # Render in alert — NEAR_ENTRY with pre-cleaned sanitized_reason.
+    # Phase 13.6B: old "Watchlist only until retest and hold confirm." is now a
+    # banned phrase in the guard; use the current replacement text instead.
     tr = _tiering_result(
         tier="NEAR_ENTRY",
         score=65,
@@ -1306,7 +1310,7 @@ def test_12_3_phase_12_2_language_tests_still_pass():
         missing_conditions=["retest_not_confirmed"],
         upgrade_trigger="Close above trigger with hold.",
         reason="All SNIPE_IT conditions satisfied.",
-        sanitized_reason="Watchlist only until retest and hold confirm.",
+        sanitized_reason="Watch-only; no capital.",
         near_entry_blocker_note="Blocker: retest is not fully confirmed.",
     )
     tr["final_tier"] = "NEAR_ENTRY"
@@ -1314,7 +1318,7 @@ def test_12_3_phase_12_2_language_tests_still_pass():
     tr["final_discord_channel"] = "#near-entry-watch"
     text = format_alert(tr)
     assert "all snipe_it conditions" not in text.lower()
-    assert "watchlist only" in text.lower() or "retest and hold" in text.lower()
+    assert "watch-only" in text.lower() or "no capital" in text.lower()
 
     # 12.2 regression: STARTER alert uses STARTER not SNIPE language
     tr2 = _tiering_result(
