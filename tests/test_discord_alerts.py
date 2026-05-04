@@ -522,7 +522,9 @@ def test_near_entry_alert_uses_near_entry_language():
     tr["final_tier"] = "NEAR_ENTRY"
     tr["final_discord_channel"] = "#near-entry-watch"
     text = format_alert(tr)
-    assert "NEAR_ENTRY conditions met; wait for missing confirmations." in text
+    # Phase 13.6A: label updated — no longer says "wait for missing confirmations"
+    # (inaccurate when retest/hold confirmed but overhead/acceptance blocks capital)
+    assert "Near-entry watch — no capital until blocker resolves." in text
 
 
 # 11-9: WAIT never posts — but if format_alert called directly it shows WAIT language
@@ -1293,7 +1295,7 @@ def test_12_3_phase_12_2_language_tests_still_pass():
     dirty = "All SNIPE_IT conditions satisfied."
     clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
     assert "snipe_it" not in clean.lower()
-    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+    assert "watch-only" in clean.lower() or "no capital" in clean.lower()
 
     # Render in alert — NEAR_ENTRY with pre-cleaned sanitized_reason
     tr = _tiering_result(

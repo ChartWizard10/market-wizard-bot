@@ -1637,7 +1637,7 @@ def test_12_1_near_entry_removes_reduced_size_language():
     dirty = "Partial zone interaction — reduced size justified here."
     clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
     assert "reduced size" not in clean.lower()
-    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+    assert "watch-only" in clean.lower() or "no capital" in clean.lower()
 
 
 # 12.1-2: NEAR_ENTRY reason with "starter allocation warranted" is sanitized
@@ -1646,7 +1646,7 @@ def test_12_1_near_entry_removes_starter_allocation_language():
     clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
     assert "starter allocation" not in clean.lower()
     assert "allocation warranted" not in clean.lower()
-    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+    assert "watch-only" in clean.lower() or "no capital" in clean.lower()
 
 
 # 12.1-3: NEAR_ENTRY reason with "capital justified" is sanitized
@@ -1654,7 +1654,7 @@ def test_12_1_near_entry_removes_capital_justified_language():
     dirty = "Setup is developing — capital justified once retest occurs."
     clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
     assert "capital justified" not in clean.lower()
-    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+    assert "watch-only" in clean.lower() or "no capital" in clean.lower()
 
 
 # 12.1-4: NEAR_ENTRY reason with "entry warranted" is sanitized
@@ -1732,7 +1732,7 @@ def test_12_2_near_entry_removes_all_snipe_conditions_satisfied():
     dirty = "All SNIPE_IT conditions satisfied"
     clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
     assert "snipe_it" not in clean.lower()
-    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+    assert "watch-only" in clean.lower() or "no capital" in clean.lower()
 
 
 # 12.2-2: NEAR_ENTRY reason with "satisfies all SNIPE_IT criteria" is sanitized
@@ -1742,7 +1742,7 @@ def test_12_2_near_entry_removes_satisfies_all_snipe_criteria():
     assert "snipe_it" not in clean.lower()
     # "criteria" alone is acceptable but the SNIPE phrase must be gone
     assert "snipe_it criteria" not in clean.lower()
-    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+    assert "watch-only" in clean.lower() or "no capital" in clean.lower()
 
 
 # 12.2-3: NEAR_ENTRY reason with "entry valid" is sanitized
@@ -1750,7 +1750,7 @@ def test_12_2_near_entry_removes_entry_valid_language():
     dirty = "Zone defended cleanly — entry valid while price holds above the FVG bottom"
     clean = _sanitize_reason_for_tier(dirty, "NEAR_ENTRY")
     assert "entry valid" not in clean.lower()
-    assert "watchlist only" in clean.lower() or "retest and hold" in clean.lower()
+    assert "watch-only" in clean.lower() or "no capital" in clean.lower()
 
 
 # 12.2-4: No duplicate "only until" when original phrase already ended with "only until X"
