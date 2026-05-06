@@ -341,6 +341,115 @@ def _clean_blocker_label(note: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 13.7D: Human-facing text renderer for missing conditions,
+# upgrade triggers, and blocker notes.
+# ---------------------------------------------------------------------------
+
+# Exact-match translation map: internal engine label → human-readable string.
+# Used for labels produced by _backfill_missing_conditions and
+# _near_entry_blocker_backfill.
+_CONDITION_LABEL_MAP: dict[str, str] = {
+    "missing_retest":            "Retest not yet confirmed",
+    "missing_hold":              "Hold not yet confirmed",
+    "current_acceptance_needed": "Awaiting zone acceptance confirmation",
+    "retest_not_confirmed":      "Retest not yet confirmed",
+    "hold_not_confirmed":        "Hold not yet confirmed",
+    "retest_partial":            "Retest partially confirmed — awaiting full confirmation",
+    "hold_partial":              "Hold partially confirmed — awaiting full confirmation",
+    "overhead_path_not_clean":   "Overhead path not clean enough for capital",
+    "overhead_blocked":          "Overhead resistance blocking capital",
+}
+
+# Strips raw diagnostic "key_name: " prefixes produced when Claude embeds
+# field names in free-text fields (e.g. "retest_status: price has not returned…").
+_RAW_FIELD_LABEL_RE = re.compile(
+    r"\b(retest_status|hold_status|price_in_zone|trigger_status|overhead_status)\s*:\s*",
+    re.IGNORECASE,
+)
+
+# Matches "upgrade to TIER / upgrading to TIER" patterns.
+_UPGRADE_TIER_RE = re.compile(
+    r"\b(?:upgrade(?:s|d|ing)?\s+to|upgrading\s+to)\s+(SNIPE_IT|STARTER|NEAR_ENTRY)\b",
+    re.IGNORECASE,
+)
+
+# Human replacement for tier-name references inside NEAR_ENTRY upgrade trigger.
+_UPGRADE_TIER_HUMAN: dict[str, str] = {
+    "snipe_it":   "confirms the setup for review on the next alert cycle",
+    "starter":    "improves conviction for the next alert cycle",
+    "near_entry": "improves conviction for the next alert cycle",
+}
+
+
+def _humanize_missing_condition(cond: str) -> str:
+    """Translate a single missing-condition label to human-readable text.
+
+    Handles three forms in priority order:
+      1. Exact internal label → translation map ("missing_retest" → "Retest not yet confirmed")
+      2. "label — description" format → use description part (capitalized), or map if label matches
+      3. Raw diagnostic prefix ("retest_status: …") → strip prefix, capitalize remainder
+      4. Unknown label → return as-is (preserves existing behavior)
+    """
+    s = str(cond).strip()
+    if not s:
+        return s
+
+    lower = s.lower()
+
+    # 1. Exact match
+    if lower in _CONDITION_LABEL_MAP:
+        return _CONDITION_LABEL_MAP[lower]
+
+    # 2. "label — description" em-dash format
+    if " — " in s:
+        label_part, _, desc_part = s.partition(" — ")
+        map_val = _CONDITION_LABEL_MAP.get(label_part.strip().lower())
+        if map_val:
+            return map_val
+        desc_part = desc_part.strip()
+        if desc_part:
+            return desc_part[0].upper() + desc_part[1:]
+
+    # 3. Strip raw field-label prefix
+    cleaned = _RAW_FIELD_LABEL_RE.sub("", s).strip()
+    if cleaned != s:
+        return cleaned[0].upper() + cleaned[1:] if cleaned else cleaned
+
+    # 4. Fallback — return unchanged
+    return s
+
+
+def _humanize_upgrade_trigger(text: str, final_tier: str) -> str:
+    """Strip raw field labels and, for NEAR_ENTRY, replace tier-name references.
+
+    For NEAR_ENTRY: "upgrade to STARTER" → neutral watchlist guidance so
+    subscribers see trader-facing language, not tier mechanics.
+    For other tiers: only strips raw diagnostic prefixes.
+    """
+    if not text or text in ("—", "none", "None"):
+        return text
+
+    result = _RAW_FIELD_LABEL_RE.sub("", text).strip()
+
+    if final_tier == "NEAR_ENTRY":
+        def _replace_tier(m: re.Match) -> str:
+            return _UPGRADE_TIER_HUMAN.get(
+                m.group(1).lower(),
+                "improves conviction for the next alert cycle",
+            )
+        result = _UPGRADE_TIER_RE.sub(_replace_tier, result)
+
+    return result
+
+
+def _humanize_blocker_note(text: str) -> str:
+    """Strip raw diagnostic key_name: prefixes from a blocker note string."""
+    if not text:
+        return text
+    return _RAW_FIELD_LABEL_RE.sub("", text).strip()
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.7B: Context-aware overhead label
 # ---------------------------------------------------------------------------
 
@@ -437,7 +546,9 @@ def format_alert(
     # Phase 12A: use sanitized_reason if present; fall back to raw reason
     reason             = _sanitize(str(signal.get("sanitized_reason") or signal.get("reason", "—")))
     missing_conditions = signal.get("missing_conditions") or []
-    upgrade_trigger    = _sanitize(str(signal.get("upgrade_trigger", "—")))
+    # Phase 13.7D: humanize upgrade trigger before sanitization
+    _upgrade_trigger_raw = str(signal.get("upgrade_trigger", "—"))
+    upgrade_trigger    = _sanitize(_humanize_upgrade_trigger(_upgrade_trigger_raw, final_tier))
     targets            = signal.get("targets", [])
 
     # Phase 11: freshness fields (snapshot_only in current architecture)
@@ -531,11 +642,15 @@ def format_alert(
         lines += ["──────────────────────────────", f"FORCED PARTICIPATION: {forced_part}"]
 
     if final_tier == "NEAR_ENTRY":
-        missing_str = ", ".join(_sanitize(str(c)) for c in missing_conditions) if missing_conditions else "—"
+        # Phase 13.7D: humanize missing-condition labels before rendering.
+        missing_str = ", ".join(
+            _sanitize(_humanize_missing_condition(str(c))) for c in missing_conditions
+        ) if missing_conditions else "—"
         # Phase 12.3: render blocker note above missing conditions.
         # Phase 12.3A: strip leading "Blocker:" prefix before adding our label
         # so _build_near_entry_blocker_note's prefix does not double up.
-        blocker_note = _sanitize(_clean_blocker_label(raw_blocker_str))
+        # Phase 13.7D: also strip raw field-label prefixes from the blocker note.
+        blocker_note = _sanitize(_humanize_blocker_note(_clean_blocker_label(raw_blocker_str)))
         lines += [
             "──────────────────────────────",
             "⚠️  NO CAPITAL YET",

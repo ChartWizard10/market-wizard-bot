@@ -1184,7 +1184,10 @@ def test_12_3_near_entry_alert_missing_conditions_not_blank():
     tr["final_discord_channel"] = "#near-entry-watch"
     text = format_alert(tr)
     assert "Missing conditions: —" not in text
-    assert "trigger_acceptance" in text
+    # Phase 13.7D: raw "trigger_acceptance" label is now humanized — verify the
+    # description part ("price is below trigger") is present instead.
+    assert "trigger_acceptance" not in text.lower()
+    assert "price is below trigger" in text.lower()
 
 
 # 12.3-D3: NEAR_ENTRY alert does not render "Upgrade trigger:    none"
@@ -1419,7 +1422,10 @@ def test_12_3a_alert_missing_conditions_not_dash_for_below_trigger():
     assert result["final_tier"] == "NEAR_ENTRY"
     text = format_alert(result)
     assert "Missing conditions: —" not in text
-    assert "trigger_acceptance" in text
+    # Phase 13.7D: raw "trigger_acceptance" label is now humanized — verify the
+    # description part ("price is below trigger" or "price is below") is present.
+    assert "trigger_acceptance" not in text.lower()
+    assert "price is below" in text.lower() or "below trigger" in text.lower()
 
 
 # 12.3A-10: C-style alert does not render "Upgrade trigger:    none"
