@@ -245,8 +245,8 @@ def test_starter_capital_language_correct():
     # Must say STARTER capital language
     assert "STARTER SIZE ONLY" in text
 
-    # Must say STARTER action label
-    assert "All STARTER conditions met." in text
+    # Must say STARTER action label (Phase 13.7B contract headline)
+    assert "STARTER conditions met." in text
 
     # Must NOT say NEAR_ENTRY capital language
     assert "NO CAPITAL — WATCH ONLY" not in text
@@ -278,8 +278,8 @@ def test_snipe_it_capital_and_action_language_correct():
     )
     text = format_alert(tr)
 
-    # Must say SNIPE_IT action label
-    assert "All SNIPE_IT conditions met." in text
+    # Must say SNIPE_IT action label (Phase 13.7B contract headline)
+    assert "SNIPE_IT conditions met." in text
 
     # Must say FULL QUALITY capital label
     assert "FULL QUALITY" in text

@@ -496,18 +496,18 @@ def test_starter_alert_does_not_say_all_snipe_conditions_met():
     tr["final_tier"] = "STARTER"
     tr["capital_action"] = "starter_only"
     text = format_alert(tr)
-    # Deterministic tier label must say STARTER
-    assert "All STARTER conditions met." in text
+    # Deterministic tier label must say STARTER (Phase 13.7B contract headline)
+    assert "STARTER conditions met." in text
     # SNIPE_IT label must NOT appear in this STARTER alert
     assert "All SNIPE_IT conditions met." not in text
 
 
-# 11-7: SNIPE_IT alert correctly shows "All SNIPE_IT conditions met."
+# 11-7: SNIPE_IT alert correctly shows "SNIPE_IT conditions met." (Phase 13.7B contract)
 def test_snipe_alert_says_all_snipe_conditions_met():
     tr = _tiering_result(tier="SNIPE_IT", reason="Clean zone defense, full quality.")
     text = format_alert(tr)
-    assert "All SNIPE_IT conditions met." in text
-    assert "All STARTER conditions met." not in text
+    assert "SNIPE_IT conditions met." in text
+    assert "STARTER conditions met." not in text
 
 
 # 11-8: NEAR_ENTRY alert uses NEAR_ENTRY action language
@@ -555,8 +555,8 @@ def test_final_tier_controls_alert_language_not_claude_reason():
     tr["final_tier"] = "STARTER"
     tr["capital_action"] = "starter_only"
     text = format_alert(tr)
-    # Deterministic label must be STARTER (from final_tier)
-    assert "All STARTER conditions met." in text
+    # Deterministic label must be STARTER (from final_tier — Phase 13.7B contract)
+    assert "STARTER conditions met." in text
     # The badge must say STARTER too
     assert "🟡 STARTER" in text
 
@@ -928,7 +928,7 @@ def test_12d_starter_alert_language_still_not_snipe():
     text = format_alert(tr)
     # Deterministic STARTER action label is used; the SNIPE label must not appear
     assert "All SNIPE_IT conditions met" not in text
-    assert "All STARTER conditions met" in text
+    assert "STARTER conditions met" in text  # Phase 13.7B contract headline
 
 
 # ===========================================================================
@@ -1454,9 +1454,14 @@ def test_12_3a_alert_no_manage_position_language():
     tr["capital_action"] = "wait_no_capital"
     tr["final_discord_channel"] = "#near-entry-watch"
     text = format_alert(tr)
+    # Phase 12.3A: "manage position" is removed upstream by tiering sanitizer
     assert "manage position" not in text.lower()
-    assert "no position management" in text.lower()
-    assert "capital is authorized" in text.lower()
+    # Phase 13.7B: "no position management until capital is authorized" is now itself a
+    # forbidden NEAR_ENTRY phrase — the contract guard replaces it with the watch fallback.
+    assert "no position management" not in text.lower()
+    assert "capital is authorized" not in text.lower()
+    # Replacement must be watch-safe language
+    assert "watch-only" in text.lower() or "blocker resolution" in text.lower()
 
 
 # 12.3A-12: PVH STARTER preserved; Phase 12.3 and 12.2 language regressions pass
