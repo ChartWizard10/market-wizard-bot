@@ -93,24 +93,59 @@ CAPITAL_CONTRACT: dict[str, dict] = {
         "capital_state": "starter_only",
         # Forbidden in STARTER alert text — longest first.
         "forbidden": [
+            # 50
             ("no position management until capital is authorized",
              "Maintain starter-only sizing until upgrade conditions are met."),
+            # 37 — KOS bug (Phase 13.7C): "are satisfied" variant missing from 13.7B.
+            ("all snipe_it conditions are satisfied",
+             "STARTER conditions met; full-size authorization not granted."),
+            # 33
             ("all snipe_it conditions satisfied",   "STARTER conditions met."),
+            # 33 — "are satisfied" variant for the non-"all" form
+            ("snipe_it conditions are satisfied",
+             "STARTER conditions met; full-size authorization not granted."),
+            # 31
             ("all snipe_it conditions are met",     "STARTER conditions met."),
-            ("all snipe_it conditions met.",        "STARTER conditions met."),
+            # 31
+            ("all snipe_it conditions cleared",
+             "STARTER conditions met; full-size authorization not granted."),
+            # 30
+            ("all snipe_it conditions passed",
+             "STARTER conditions met; full-size authorization not granted."),
+            # 29
             ("snipe_it conditions satisfied",       "STARTER conditions met."),
-            ("snipe_it conditions are met",         "STARTER conditions met."),
+            # 28
+            ("all snipe_it conditions met.",        "STARTER conditions met."),
+            # 27
             ("all snipe_it conditions met",         "STARTER conditions met."),
+            # 27 — "all six snipe_it …" phrase seen in live output
+            ("all six snipe_it conditions",
+             "STARTER conditions met; full-size authorization not granted."),
+            # 27
+            ("snipe_it conditions are met",         "STARTER conditions met."),
+            # 23
             ("no capital — watch only",             "STARTER SIZE ONLY"),
+            # 23
             ("snipe_it conditions met",             "STARTER conditions met."),
+            # 16
             ("near-entry watch",
              "Maintain starter-only sizing until upgrade conditions are met."),
+            # 17
+            ("full-size allowed",                   "STARTER SIZE ONLY"),
+            # 17
+            ("full size allowed",                   "STARTER SIZE ONLY"),
+            # 18
             ("capital authorized",                  "reduced-size capital allocated"),
+            # 12
             ("full quality",                        "STARTER SIZE ONLY"),
             # "full-size" / "full size" intentionally excluded — "full-size confirmation
             # not granted" is legitimate STARTER denial language; the bare substring
             # would produce false positives. "full quality" catches the real risk.
+            # 10
+            ("enter long",                          "Monitor entry conditions."),
+            # 10
             ("no capital",                          "STARTER SIZE ONLY"),
+            # 10
             ("watch only",                          "STARTER SIZE ONLY"),
         ],
     },
@@ -149,6 +184,8 @@ CAPITAL_CONTRACT: dict[str, dict] = {
             ("from snipe_it to starter",          "Watch-only; no capital."),
             # 23
             ("snipe_it conditions met",           "Watch-only; no capital."),
+            # 22
+            ("starter conditions met",            "Watch-only; no capital."),
             # 21
             ("downgraded to starter",             "Watch-only; no capital."),
             ("making this a starter",             "Watch-only; no capital."),
@@ -158,6 +195,8 @@ CAPITAL_CONTRACT: dict[str, dict] = {
             # 19
             ("position management",               "Watch-only; wait for blocker resolution."),
             ("snipe_it to starter",               "Watch-only; no capital."),
+            # 21 — must precede shorter "capital authorized" (18 chars)
+            ("capital is authorized",             "no capital"),
             # 18
             ("capital authorized",                "no capital"),
             # 17
@@ -252,6 +291,40 @@ def _apply_contract_guard(text: str, final_tier: str) -> str:
                 final_tier, match_lower,
             )
             result = re.sub(re.escape(match_lower), replacement, result, flags=re.IGNORECASE)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.7C: Normalization helpers — applied after contract guard pass.
+# ---------------------------------------------------------------------------
+
+_REPEATED_NO_CAPITAL_RE = re.compile(
+    r"\b(?:no\s+){2,}capital(?:[^\n.]*)?",
+    re.IGNORECASE,
+)
+_DOUBLE_PERIOD_RE = re.compile(r"\.{2,}")
+
+
+def _normalize_repeated_capital_language(text: str) -> str:
+    """Collapse 'no no capital' / 'no no no capital …' guard artifacts."""
+    return _REPEATED_NO_CAPITAL_RE.sub("Watch-only; no capital.", text)
+
+
+def _normalize_duplicate_punctuation(text: str) -> str:
+    """Collapse '..' / '...' runs produced by sequential replacements."""
+    return _DOUBLE_PERIOD_RE.sub(".", text)
+
+
+def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
+    """Chain: contract guard → repeated-capital normalizer → punctuation normalizer.
+
+    Order matters: the contract guard may produce 'no no capital' when
+    'capital authorized' appears inside an already-negated phrase (LSTR bug).
+    Normalization runs after to clean those artifacts.
+    """
+    result = _apply_contract_guard(body, final_tier)
+    result = _normalize_repeated_capital_language(result)
+    result = _normalize_duplicate_punctuation(result)
     return result
 
 
@@ -515,166 +588,10 @@ def format_alert(
 
     lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    # Phase 13.7B: contract guard — deterministic final pass.
-    # Removes any tier-contradicting phrases that survived all upstream sanitization.
+    # Phase 13.7C: final body contract guard — contract guard then normalization.
+    # Removes tier-contradicting phrases and cleans up any replacement artifacts.
     rendered = "\n".join(lines)
-    return _apply_contract_guard(rendered, final_tier)
-
-
-# ---------------------------------------------------------------------------
-# Chunking
-# ---------------------------------------------------------------------------
-
-def chunk_message(text: str, max_len: int = _DISCORD_MAX_CHARS) -> list[str]:
-    """Split text into chunks ≤ max_len chars, breaking on line boundaries."""
-    if len(text) <= max_len:
-        return [text]
-
-    chunks: list[str] = []
-    current_lines: list[str] = []
-    current_len = 0
-
-    for line in text.split("\n"):
-        # Hard-split a single line that exceeds max_len
-        while len(line) > max_len:
-            chunks.append(line[:max_len])
-            line = line[max_len:]
-
-        line_with_newline = len(line) + 1  # +1 for the \n
-        if current_len + line_with_newline > max_len and current_lines:
-            chunks.append("\n".join(current_lines))
-            current_lines = []
-            current_len = 0
-
-        current_lines.append(line)
-        current_len += line_with_newline
-
-    if current_lines:
-        chunks.append("\n".join(current_lines))
-
-    return chunks
-
-
-# ---------------------------------------------------------------------------
-# Send-guard helpers
-# ---------------------------------------------------------------------------
-
-def _sendable(tiering_result: dict, dedup_decision: dict | None) -> tuple[bool, str]:
-    """Return (sendable, skip_reason). All hard blocks checked here."""
-    final_tier = tiering_result.get("final_tier", "WAIT")
-    safe       = tiering_result.get("safe_for_alert", False)
-
-    if final_tier == "WAIT":
-        return False, "wait_no_alert"
-    if not safe:
-        return False, "unsafe_for_alert"
-    if final_tier not in ("SNIPE_IT", "STARTER", "NEAR_ENTRY"):
-        return False, f"unknown_tier:{final_tier}"
-
-    if dedup_decision is not None and not dedup_decision.get("should_alert", True):
-        return False, dedup_decision.get("reason", "dedup_suppressed")
-
-    return True, ""
-
-
-def _not_sendable(skip_reason: str, final_tier: str) -> dict:
-    return {
-        "ok": True,
-        "sent": False,
-        "channel_id": None,
-        "final_tier": final_tier,
-        "message_count": 0,
-        "error_type": None,
-        "error_message": None,
-        "skipped_reason": skip_reason,
-    }
-
-
-def _missing_channel(final_tier: str, ticker: str) -> dict:
-    log.warning("ROUTING_FAILURE: %s %s — channel not configured", final_tier, ticker)
-    return {
-        "ok": True,
-        "sent": False,
-        "channel_id": None,
-        "final_tier": final_tier,
-        "message_count": 0,
-        "error_type": "routing_failure",
-        "error_message": f"channel not configured for tier {final_tier}",
-        "skipped_reason": "channel_not_configured",
-    }
-
-
-def _send_error(channel_id: int, final_tier: str, exc: Exception) -> dict:
-    log.error("DISCORD_SEND_FAILED: %s channel=%s: %s", final_tier, channel_id, exc)
-    return {
-        "ok": False,
-        "sent": False,
-        "channel_id": channel_id,
-        "final_tier": final_tier,
-        "message_count": 0,
-        "error_type": "discord_send_error",
-        "error_message": str(exc),
-        "skipped_reason": None,
-    }
-
-
-def _send_ok(channel_id: int, final_tier: str, message_count: int) -> dict:
-    return {
-        "ok": True,
-        "sent": True,
-        "channel_id": channel_id,
-        "final_tier": final_tier,
-        "message_count": message_count,
-        "error_type": None,
-        "error_message": None,
-        "skipped_reason": None,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Public async entry point
-# ---------------------------------------------------------------------------
-
-async def send_alert(
-    tiering_result: dict,
-    dedup_decision: dict | None,
-    bot,
-    config: dict,
-    scan_id: str = "",
-) -> dict:
-    """Format and send a validated signal alert to the appropriate Discord channel.
-
-    Returns a structured result dict; never raises.
-    WAIT is never posted. Null channel IDs are safe.
-    """
-    final_tier = tiering_result.get("final_tier", "WAIT")
-    signal     = tiering_result.get("final_signal") or {}
-    ticker     = str(signal.get("ticker") or tiering_result.get("ticker", "UNKNOWN"))
-
-    ok, skip_reason = _sendable(tiering_result, dedup_decision)
-    if not ok:
-        return _not_sendable(skip_reason, final_tier)
-
-    channel_id = resolve_channel_id(final_tier, config)
-    if channel_id is None:
-        return _missing_channel(final_tier, ticker)
-
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        log.warning("ROUTING_FAILURE: %s %s — bot.get_channel(%s) returned None", final_tier, ticker, channel_id)
-        return _missing_channel(final_tier, ticker)
-
-    text   = format_alert(tiering_result, dedup_decision, scan_id)
-    chunks = chunk_message(text)
-
-    try:
-        for chunk in chunks:
-            await channel.send(chunk)
-        log.info("Alert sent: %s %s → channel %s (%d chunk(s))", final_tier, ticker, channel_id, len(chunks))
-        return _send_ok(channel_id, final_tier, len(chunks))
-    except Exception as exc:
-        return _send_error(channel_id, final_tier, exc)
-
+    return _apply_final_body_contract_guard(final_tier, rendered)
 
 
 # ---------------------------------------------------------------------------
