@@ -321,10 +321,87 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
     Order matters: the contract guard may produce 'no no capital' when
     'capital authorized' appears inside an already-negated phrase (LSTR bug).
     Normalization runs after to clean those artifacts.
+    Phase 13.7E: NEAR_ENTRY adds a final hardening pass to catch any upgrade-
+    language that slipped through field-level neutralization.
     """
     result = _apply_contract_guard(body, final_tier)
     result = _normalize_repeated_capital_language(result)
     result = _normalize_duplicate_punctuation(result)
+    if final_tier == "NEAR_ENTRY":
+        result = _finalize_near_entry_body_text(result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.7E: NEAR_ENTRY-only upgrade-language seal + dangling tail cleaner.
+# ---------------------------------------------------------------------------
+
+# Matches prose fragments that reference upgrading to SNIPE_IT or STARTER inside
+# a NEAR_ENTRY alert.  Applied to individual prose fields (reason, next_action)
+# before rendering, so structural label prefixes ("  Why:  ", "  Next: ") are not
+# consumed.
+_NE_UPGRADE_SENTENCE_RE = re.compile(
+    # "upgrade/upgrades/upgraded/upgrading to SNIPE_IT/STARTER [or SNIPE_IT/STARTER]
+    # [consideration]" and "SNIPE_IT/STARTER consideration".
+    # Note: "upgrading" = upgrad+ing (no 'e'), so it cannot be written as
+    # "upgrade" + suffix — the two branches handle both root spellings.
+    r"[^.\n]*"
+    r"\b(?:"
+    r"(?:upgrade[sd]?|upgrading)\s+(?:conviction\s+)?to\s+"
+    r"(?:SNIPE_IT|STARTER)(?:\s+or\s+(?:SNIPE_IT|STARTER))?"
+    r"(?:\s+consideration)?"
+    r"|(?:SNIPE_IT|STARTER)\s+consideration"
+    r")\b"
+    r"[^.\n]*\.?",
+    re.IGNORECASE,
+)
+_NE_UPGRADE_REPLACEMENT = "If confirmed, conviction improves for the next alert cycle."
+
+# Matches "no capital" followed by artifact tails produced by sequential guard
+# replacements, e.g. "no capital.01." or "no capital. only." or "no capital only."
+_NE_CAPITAL_TAIL_RE = re.compile(
+    r"(no\s+capital)"
+    r"(?:"
+    r"\.\s+only\.?"
+    r"|\.\d+\.?"
+    r"|\s+only\.?"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _neutralize_near_entry_upgrade_language(text: str) -> str:
+    """Replace upgrade-tier sentences in a NEAR_ENTRY prose field.
+
+    Applied to individual fields before rendering so structural label prefixes
+    are not consumed.  Collapses duplicate replacement sentences produced when
+    a field contains more than one upgrade-language fragment.
+    """
+    cleaned = _NE_UPGRADE_SENTENCE_RE.sub(_NE_UPGRADE_REPLACEMENT, text)
+    # Collapse repeated replacement sentence produced by multiple sub() matches.
+    replacement_escaped = re.escape(_NE_UPGRADE_REPLACEMENT)
+    cleaned = re.sub(
+        rf"(?:{replacement_escaped}\s*){{2,}}",
+        _NE_UPGRADE_REPLACEMENT,
+        cleaned,
+    )
+    return cleaned.strip()
+
+
+def _clean_near_entry_dangling_tails(text: str) -> str:
+    """Remove artifact tails attached to 'no capital' left by guard replacements."""
+    return _NE_CAPITAL_TAIL_RE.sub(r"\1.", text)
+
+
+def _finalize_near_entry_body_text(text: str) -> str:
+    """Safety-net pass for NEAR_ENTRY fully-rendered text.
+
+    Catches any upgrade-language that slipped through field-level neutralization
+    (e.g. in blocker notes or missing-condition strings), then cleans dangling
+    tails.  Called inside _apply_final_body_contract_guard for NEAR_ENTRY only.
+    """
+    result = _NE_UPGRADE_SENTENCE_RE.sub(_NE_UPGRADE_REPLACEMENT, text)
+    result = _clean_near_entry_dangling_tails(result)
     return result
 
 
@@ -549,6 +626,13 @@ def format_alert(
     # Phase 13.7D: humanize upgrade trigger before sanitization
     _upgrade_trigger_raw = str(signal.get("upgrade_trigger", "—"))
     upgrade_trigger    = _sanitize(_humanize_upgrade_trigger(_upgrade_trigger_raw, final_tier))
+
+    # Phase 13.7E: field-level upgrade-language neutralization for NEAR_ENTRY.
+    # Applied before rendering so structural label prefixes are not consumed by
+    # the sentence-level regex.
+    if final_tier == "NEAR_ENTRY":
+        reason      = _neutralize_near_entry_upgrade_language(reason)
+        next_action = _neutralize_near_entry_upgrade_language(next_action)
     targets            = signal.get("targets", [])
 
     # Phase 11: freshness fields (snapshot_only in current architecture)
