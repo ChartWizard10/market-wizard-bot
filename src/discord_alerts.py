@@ -323,12 +323,15 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
     Normalization runs after to clean those artifacts.
     Phase 13.7E: NEAR_ENTRY adds a final hardening pass to catch any upgrade-
     language that slipped through field-level neutralization.
+    Phase 13.7F: diagnostic label sanitizer runs last for all tiers, catching
+    any field-label phrase that slipped through the field-level pre-pass.
     """
     result = _apply_contract_guard(body, final_tier)
     result = _normalize_repeated_capital_language(result)
     result = _normalize_duplicate_punctuation(result)
     if final_tier == "NEAR_ENTRY":
         result = _finalize_near_entry_body_text(result)
+    result = _sanitize_diagnostic_labels(result)
     return result
 
 
@@ -527,6 +530,142 @@ def _humanize_blocker_note(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 13.7F: Residual diagnostic label sanitizer — all tiers.
+#
+# Converts raw internal field-label phrases leaking into Claude prose fields
+# into human-readable equivalents.  Two connector forms are handled:
+#   "field_name is value"  (the AMKR live defect — "retest_status is partial")
+#   "field_name: value"    (colon form, now with full translation)
+# Applied field-level (reason, next_action, all tiers) and as a final-body
+# safety-net inside _apply_final_body_contract_guard().
+# ---------------------------------------------------------------------------
+
+# (field_lower, value_lower) → human-readable phrase.
+_DIAG_IS_MAP: dict[tuple[str, str], str] = {
+    # retest_status
+    ("retest_status",    "partial"):          "retest is only partially confirmed",
+    ("retest_status",    "confirmed"):        "retest is confirmed",
+    ("retest_status",    "missing"):          "retest has not yet been confirmed",
+    ("retest_status",    "failed"):           "retest failed",
+    # hold_status
+    ("hold_status",      "partial"):          "hold is only partially confirmed",
+    ("hold_status",      "confirmed"):        "hold is confirmed",
+    ("hold_status",      "missing"):          "hold has not yet been confirmed",
+    ("hold_status",      "failed"):           "hold failed",
+    # price_in_zone
+    ("price_in_zone",    "true"):             "price is inside the zone",
+    ("price_in_zone",    "false"):            "price is not yet inside the zone",
+    # trigger_status
+    ("trigger_status",   "below_trigger"):    "price remains below trigger",
+    ("trigger_status",   "above_trigger"):    "price is above trigger",
+    ("trigger_status",   "at_trigger"):       "price is at trigger",
+    # overhead_status
+    ("overhead_status",  "moderate"):         "overhead is moderate",
+    ("overhead_status",  "blocked"):          "overhead is blocked",
+    ("overhead_status",  "clear"):            "overhead is clear",
+    # invalidation_level special values (underscore and space forms)
+    ("invalidation_level", "not_applicable"): "executable invalidation pending live zone confirmation",
+    ("invalidation_level", "not applicable"): "executable invalidation pending live zone confirmation",
+    # risk_state
+    ("risk_state",       "tight"):            "risk window is tight relative to zone",
+    ("risk_state",       "healthy"):          "risk window is healthy",
+    ("risk_state",       "wide"):             "risk window is wide",
+}
+
+# Fallback human field name for values not in the map.
+_FIELD_HUMAN_NAME: dict[str, str] = {
+    "retest_status":      "retest",
+    "hold_status":        "hold",
+    "price_in_zone":      "price-in-zone",
+    "trigger_status":     "trigger status",
+    "overhead_status":    "overhead",
+    "invalidation_level": "invalidation",
+    "risk_state":         "risk state",
+}
+
+# "field_name is value" — value is a single word (including underscore words like
+# "below_trigger").  Single-word only to prevent matching conjunctions like "and"
+# when two field phrases appear in the same sentence.
+_DIAG_LABEL_IS_RE = re.compile(
+    r"\b(retest_status|hold_status|price_in_zone|trigger_status|"
+    r"overhead_status|invalidation_level|risk_state)"
+    r"\s+is\s+([\w]+)\b",
+    re.IGNORECASE,
+)
+
+# "field_name: value" — colon form; single-word value capture.
+_DIAG_LABEL_COLON_RE = re.compile(
+    r"\b(retest_status|hold_status|price_in_zone|trigger_status|"
+    r"overhead_status|invalidation_level|risk_state)"
+    r"\s*:\s*([\w]+)\b",
+    re.IGNORECASE,
+)
+
+# "invalidation_level: not applicable" — colon + two-word value; handled before
+# the general colon pass to guarantee the two-word key is matched intact.
+_INVAL_NOT_APPLICABLE_RE = re.compile(
+    r"\binvalidation_level\s*:\s*not\s+applicable\b",
+    re.IGNORECASE,
+)
+
+# "invalidation_level is not applicable" — "is" connector + two-word value;
+# handled before the general "is" pass for the same reason.
+_INVAL_IS_NOT_APPLICABLE_RE = re.compile(
+    r"\binvalidation_level\s+is\s+not\s+applicable\b",
+    re.IGNORECASE,
+)
+
+
+def _replace_diag_phrase(field_raw: str, value_raw: str) -> str:
+    """Translate a (field, value) pair to human-readable text."""
+    field_lower = field_raw.lower()
+    value_lower = value_raw.lower().strip()
+    key = (field_lower, value_lower)
+    if key in _DIAG_IS_MAP:
+        return _DIAG_IS_MAP[key]
+    # Fallback: use human field name with value (underscores stripped).
+    human_field = _FIELD_HUMAN_NAME.get(field_lower, field_lower.replace("_", " "))
+    human_value = value_lower.replace("_", " ")
+    return f"{human_field} is {human_value}"
+
+
+def _sanitize_diagnostic_labels(text: str) -> str:
+    """Replace raw internal field-label phrases with human-readable equivalents.
+
+    Handles three forms in order:
+    1. "invalidation_level: not applicable" — two-word colon value (special-cased
+       to guarantee the lookup key is matched before the general colon pass).
+    2. "field_name is value"  — e.g. "retest_status is partial" (AMKR live defect).
+    3. "field_name: value"    — colon form with full translation.
+
+    Applied field-level to reason/next_action for all tiers, and as a final-body
+    safety-net inside _apply_final_body_contract_guard().
+    """
+    if not text:
+        return text
+
+    # 1. Two-word forms handled first (before single-word pass captures partial match).
+    result = _INVAL_NOT_APPLICABLE_RE.sub(
+        "executable invalidation pending live zone confirmation", text
+    )
+    result = _INVAL_IS_NOT_APPLICABLE_RE.sub(
+        "executable invalidation pending live zone confirmation", result
+    )
+
+    # 2. "field_name is value" (single word)
+    result = _DIAG_LABEL_IS_RE.sub(
+        lambda m: _replace_diag_phrase(m.group(1), m.group(2)), result
+    )
+
+    # 3. "field_name: value"
+    result = _DIAG_LABEL_COLON_RE.sub(
+        lambda m: _replace_diag_phrase(m.group(1), m.group(2)), result
+    )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.7B: Context-aware overhead label
 # ---------------------------------------------------------------------------
 
@@ -626,6 +765,12 @@ def format_alert(
     # Phase 13.7D: humanize upgrade trigger before sanitization
     _upgrade_trigger_raw = str(signal.get("upgrade_trigger", "—"))
     upgrade_trigger    = _sanitize(_humanize_upgrade_trigger(_upgrade_trigger_raw, final_tier))
+
+    # Phase 13.7F: strip residual internal diagnostic labels from prose fields
+    # (all tiers).  Runs before the 13.7E NEAR_ENTRY pass so both operate on
+    # already-cleaned inputs.
+    reason      = _sanitize_diagnostic_labels(reason)
+    next_action = _sanitize_diagnostic_labels(next_action)
 
     # Phase 13.7E: field-level upgrade-language neutralization for NEAR_ENTRY.
     # Applied before rendering so structural label prefixes are not consumed by
