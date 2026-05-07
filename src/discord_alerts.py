@@ -325,6 +325,8 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
     language that slipped through field-level neutralization.
     Phase 13.7F: diagnostic label sanitizer runs last for all tiers, catching
     any field-label phrase that slipped through the field-level pre-pass.
+    Phase 13.7H: NEAR_ENTRY capital-language firewall runs as the absolute
+    final pass, neutralizing capital/action phrases and residual diagnostics.
     """
     result = _apply_contract_guard(body, final_tier)
     result = _normalize_repeated_capital_language(result)
@@ -333,6 +335,8 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
         result = _finalize_near_entry_body_text(result)
     result = _sanitize_diagnostic_labels(result)
     result = _humanize_bare_gate_keys(result)
+    if final_tier == "NEAR_ENTRY":
+        result = _apply_near_entry_capital_firewall(result)
     return result
 
 
@@ -797,6 +801,72 @@ def _seal_near_entry_classification_language(text: str) -> str:
     if not text:
         return text
     return _NE_CLASSIFICATION_RE.sub(_ne_classify_replace, text)
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.7H: NEAR_ENTRY capital-language final firewall + residual diagnostic
+# safety net.
+#
+# Neutralizes capital/action phrases that survived all prior passes (CAPITAL_CONTRACT
+# forbidden list, 13.7E upgrade seal, 13.7F diagnostic sanitizer, 13.7G gate-key
+# humanizer).  Also provides a last-resort catch for raw diagnostic field phrases.
+# Applied as a NEAR_ENTRY-only final pass at the end of _apply_final_body_contract_guard().
+# ---------------------------------------------------------------------------
+
+# (pattern, replacement) — longest / most-specific phrases first within each group
+# to prevent partial-match shadowing.
+_NE_CAPITAL_ACTION_FIREWALL: list[tuple[str, str]] = [
+    # Sizing language
+    (r"\bbefore\s+adding\s+size\b",
+     "before the next alert review"),
+    (r"\bsize\s+can\s+be\s+reviewed\b",
+     "setup can be reconsidered on the next alert review"),
+    (r"\badding\s+size\b",
+     "reconsidering on the next alert review"),
+    (r"\badd\s+size\b",
+     "reconsider on the next alert review"),
+    # Entry language
+    (r"\benter\s+on\s+confirmation\b",
+     "wait for confirmation; no capital until blocker resolves"),
+    (r"\benter\s+on\b",
+     "wait for confirmation"),
+    (r"\bentry\s+valid\b",
+     "setup remains on watch"),
+    # Capital / position management
+    (r"\bcapital\s+commitment\b",
+     "watch commitment"),
+    (r"\btrail\s+stop\b",
+     "use invalidation reference only"),
+    # Residual diagnostic field-label phrases — safety net for 13.7F body-pass misses.
+    # Single-word "is" form only (two-word "not applicable" is handled by 13.7F).
+    (r"\bretest_status\s+is\s+partial\b",   "retest is only partial"),
+    (r"\bretest_status\s+is\s+missing\b",   "retest is missing"),
+    (r"\bhold_status\s+is\s+partial\b",     "hold is not fully confirmed"),
+    (r"\bhold_status\s+is\s+missing\b",     "hold is missing"),
+    (r"\bprice_in_zone\s+is\s+true\b",      "price is inside the zone"),
+    (r"\bprice_in_zone\s+is\s+false\b",     "price is not inside the zone"),
+]
+
+# Pre-compiled patterns for runtime efficiency.
+_NE_CAPITAL_ACTION_FIREWALL_COMPILED: list[tuple[re.Pattern, str]] = [
+    (re.compile(pattern, re.IGNORECASE), replacement)
+    for pattern, replacement in _NE_CAPITAL_ACTION_FIREWALL
+]
+
+
+def _apply_near_entry_capital_firewall(text: str) -> str:
+    """Final NEAR_ENTRY-only pass: neutralize capital/action language and
+    catch residual diagnostic field phrases that survived all prior passes.
+
+    Must run after _sanitize_diagnostic_labels() and _humanize_bare_gate_keys()
+    so it operates on already-cleaned text.  NEAR_ENTRY only.
+    """
+    if not text:
+        return text
+    result = text
+    for pattern_re, replacement in _NE_CAPITAL_ACTION_FIREWALL_COMPILED:
+        result = pattern_re.sub(replacement, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
