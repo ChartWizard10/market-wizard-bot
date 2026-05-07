@@ -332,6 +332,7 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
     if final_tier == "NEAR_ENTRY":
         result = _finalize_near_entry_body_text(result)
     result = _sanitize_diagnostic_labels(result)
+    result = _humanize_bare_gate_keys(result)
     return result
 
 
@@ -401,10 +402,12 @@ def _finalize_near_entry_body_text(text: str) -> str:
 
     Catches any upgrade-language that slipped through field-level neutralization
     (e.g. in blocker notes or missing-condition strings), then cleans dangling
-    tails.  Called inside _apply_final_body_contract_guard for NEAR_ENTRY only.
+    tails, then seals any tier-mechanics classification language.
+    Called inside _apply_final_body_contract_guard for NEAR_ENTRY only.
     """
     result = _NE_UPGRADE_SENTENCE_RE.sub(_NE_UPGRADE_REPLACEMENT, text)
     result = _clean_near_entry_dangling_tails(result)
+    result = _seal_near_entry_classification_language(result)
     return result
 
 
@@ -666,6 +669,137 @@ def _sanitize_diagnostic_labels(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 13.7G: Bare gate-key humanizer + NEAR_ENTRY classification-language seal.
+#
+# Converts bare snake_case gate keys (e.g. "retest_confirmed", "hold_confirmed")
+# that appear in missing_conditions lists, blocker notes, or prose fields into
+# human-readable text.  Also neutralizes tier-mechanics classification language
+# in NEAR_ENTRY narrative fields.
+# ---------------------------------------------------------------------------
+
+# Maps bare snake_case gate keys → human text (missing/not-met context).
+# Used by _humanize_bare_gate_keys(); entries matched as whole words.
+_GATE_KEY_MAP: dict[str, str] = {
+    "retest_confirmed":          "Retest not confirmed",
+    "hold_confirmed":            "Hold not confirmed",
+    "price_in_zone":             "Price has not returned to the zone",
+    "trigger_confirmed":         "Trigger acceptance not confirmed",
+    "overhead_clear":            "Overhead path not clean",
+    "risk_realism_valid":        "Risk window not valid",
+    "asymmetry_valid":           "R:R / asymmetry not valid",
+    "invalidation_clarity":      "Invalidation not clear",
+    "volume_confirmed":          "Volume confirmation missing",
+    "sma_alignment_supportive":  "SMA alignment not supportive",
+    "acceptance_confirmed":      "Acceptance not confirmed",
+    "break_confirmed":           "Break confirmation missing",
+    # missing_ prefix variants
+    "missing_retest":            "Retest not confirmed",
+    "missing_hold":              "Hold not confirmed",
+    "missing_price_in_zone":     "Price has not returned to the zone",
+    "missing_trigger":           "Trigger acceptance not confirmed",
+    "missing_overhead_clear":    "Overhead path not clean",
+    "missing_risk_realism":      "Risk window not valid",
+}
+
+# Build whole-word regex from the map — longest keys first to prevent partial
+# shadowing (e.g. "missing_retest" before bare "retest_confirmed").
+_GATE_KEYS_PATTERN = "|".join(
+    re.escape(k) for k in sorted(_GATE_KEY_MAP.keys(), key=len, reverse=True)
+)
+_GATE_KEY_WORD_RE = re.compile(
+    rf"\b({_GATE_KEYS_PATTERN})\b",
+    re.IGNORECASE,
+)
+
+
+def _humanize_bare_gate_keys(text: str) -> str:
+    """Replace bare snake_case gate keys with human-readable equivalents.
+
+    Handles comma/semicolon-separated lists as well as inline sentence use.
+    Applied field-level to reason, next_action, upgrade_trigger, and blocker_note,
+    and as a final-body safety-net inside _apply_final_body_contract_guard().
+    """
+    if not text:
+        return text
+
+    def _replace(m: re.Match) -> str:
+        return _GATE_KEY_MAP.get(m.group(1).lower(), m.group(1))
+
+    return _GATE_KEY_WORD_RE.sub(_replace, text)
+
+
+def _parse_missing_conditions(raw) -> list[str]:
+    """Normalize missing_conditions from a string or list to individual tokens.
+
+    Handles:
+    - list of strings: ["retest_confirmed", "hold_confirmed"]
+    - comma-separated string: "retest_confirmed, hold_confirmed"
+    - semicolon-separated string: "retest_confirmed; hold_confirmed"
+    - each list item may itself be comma/semicolon-separated
+    """
+    if not raw:
+        return []
+    tokens: list[str] = []
+    items = raw if isinstance(raw, list) else [raw]
+    for item in items:
+        for tok in re.split(r"[,;]\s*", str(item).strip()):
+            tok = tok.strip()
+            if tok:
+                tokens.append(tok)
+    return tokens
+
+
+def _format_missing_conditions(items: list[str]) -> str:
+    """Format humanized missing-condition items as a single readable string.
+
+    Sentence case (first item kept as-is, subsequent items lower-cased),
+    semicolon-separated, trailing period.  Returns "—" for an empty list.
+    """
+    if not items:
+        return "—"
+    parts = [items[0]]
+    parts += [
+        (item[0].lower() + item[1:]) if len(item) > 1 else item.lower()
+        for item in items[1:]
+    ]
+    result = "; ".join(parts)
+    if result and not result.endswith("."):
+        result += "."
+    return result
+
+
+# Matches NEAR_ENTRY-inappropriate tier-mechanics classification phrases.
+# "preventing X classification" → "preventing capital authorization"
+# "X classification" / "tier upgrade" / "classification upgrade" → "capital authorization"
+_NE_CLASSIFICATION_RE = re.compile(
+    r"\b(?:"
+    r"preventing\s+(?:STARTER|SNIPE_IT)(?:\s+or\s+(?:STARTER|SNIPE_IT))?\s+classification"
+    r"|(?:STARTER|SNIPE_IT)(?:\s+or\s+(?:STARTER|SNIPE_IT))?\s+classification"
+    r"|(?:tier|classification)\s+upgrade"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _ne_classify_replace(m: re.Match) -> str:
+    if "preventing" in m.group(0).lower():
+        return "preventing capital authorization"
+    return "capital authorization"
+
+
+def _seal_near_entry_classification_language(text: str) -> str:
+    """Neutralize tier-mechanics classification language in NEAR_ENTRY prose.
+
+    Replaces 'preventing X classification', 'X classification', 'tier upgrade',
+    and 'classification upgrade' with trading-desk equivalents.
+    Applied to NEAR_ENTRY fields only — STARTER/SNIPE_IT tier identities preserved.
+    """
+    if not text:
+        return text
+    return _NE_CLASSIFICATION_RE.sub(_ne_classify_replace, text)
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.7B: Context-aware overhead label
 # ---------------------------------------------------------------------------
 
@@ -764,13 +898,21 @@ def format_alert(
     missing_conditions = signal.get("missing_conditions") or []
     # Phase 13.7D: humanize upgrade trigger before sanitization
     _upgrade_trigger_raw = str(signal.get("upgrade_trigger", "—"))
-    upgrade_trigger    = _sanitize(_humanize_upgrade_trigger(_upgrade_trigger_raw, final_tier))
+    _upgrade_trigger_hum = _humanize_upgrade_trigger(_upgrade_trigger_raw, final_tier)
+    _upgrade_trigger_hum = _humanize_bare_gate_keys(_upgrade_trigger_hum)
+    if final_tier == "NEAR_ENTRY":
+        _upgrade_trigger_hum = _seal_near_entry_classification_language(_upgrade_trigger_hum)
+    upgrade_trigger    = _sanitize(_upgrade_trigger_hum)
 
     # Phase 13.7F: strip residual internal diagnostic labels from prose fields
-    # (all tiers).  Runs before the 13.7E NEAR_ENTRY pass so both operate on
+    # (all tiers).  Runs before the 13.7E/13.7G passes so all operate on
     # already-cleaned inputs.
     reason      = _sanitize_diagnostic_labels(reason)
     next_action = _sanitize_diagnostic_labels(next_action)
+
+    # Phase 13.7G: humanize bare gate keys in prose fields (all tiers).
+    reason      = _humanize_bare_gate_keys(reason)
+    next_action = _humanize_bare_gate_keys(next_action)
 
     # Phase 13.7E: field-level upgrade-language neutralization for NEAR_ENTRY.
     # Applied before rendering so structural label prefixes are not consumed by
@@ -778,6 +920,9 @@ def format_alert(
     if final_tier == "NEAR_ENTRY":
         reason      = _neutralize_near_entry_upgrade_language(reason)
         next_action = _neutralize_near_entry_upgrade_language(next_action)
+        # Phase 13.7G: seal tier-mechanics classification language (NEAR_ENTRY only).
+        reason      = _seal_near_entry_classification_language(reason)
+        next_action = _seal_near_entry_classification_language(next_action)
     targets            = signal.get("targets", [])
 
     # Phase 11: freshness fields (snapshot_only in current architecture)
@@ -871,15 +1016,22 @@ def format_alert(
         lines += ["──────────────────────────────", f"FORCED PARTICIPATION: {forced_part}"]
 
     if final_tier == "NEAR_ENTRY":
-        # Phase 13.7D: humanize missing-condition labels before rendering.
-        missing_str = ", ".join(
-            _sanitize(_humanize_missing_condition(str(c))) for c in missing_conditions
-        ) if missing_conditions else "—"
+        # Phase 13.7G: parse, humanize (gate keys + condition map), format.
+        _mc_tokens = _parse_missing_conditions(missing_conditions)
+        _mc_human = [
+            _humanize_bare_gate_keys(_sanitize(_humanize_missing_condition(tok)))
+            for tok in _mc_tokens
+        ]
+        missing_str = _format_missing_conditions(_mc_human) if _mc_human else "—"
         # Phase 12.3: render blocker note above missing conditions.
         # Phase 12.3A: strip leading "Blocker:" prefix before adding our label
         # so _build_near_entry_blocker_note's prefix does not double up.
-        # Phase 13.7D: also strip raw field-label prefixes from the blocker note.
-        blocker_note = _sanitize(_humanize_blocker_note(_clean_blocker_label(raw_blocker_str)))
+        # Phase 13.7D/13.7G: strip raw field-label prefixes; humanize gate keys;
+        # seal tier-mechanics classification language.
+        _blocker_cleaned = _humanize_blocker_note(_clean_blocker_label(raw_blocker_str))
+        _blocker_cleaned = _humanize_bare_gate_keys(_blocker_cleaned)
+        _blocker_cleaned = _seal_near_entry_classification_language(_blocker_cleaned)
+        blocker_note = _sanitize(_blocker_cleaned)
         lines += [
             "──────────────────────────────",
             "⚠️  NO CAPITAL YET",
