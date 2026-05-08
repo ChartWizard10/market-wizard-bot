@@ -653,9 +653,20 @@ def _sanitize_diagnostic_labels(text: str) -> str:
     if not text:
         return text
 
+    # 0. Engine/validator summary phrases — replaced before field-label pass.
+    # "All conditions satisfied / met" is Claude's validator shorthand; it leaks
+    # into reason/next_action when the model summarises its internal gate check.
+    # Replace with neutral language that doesn't claim trade-readiness.
+    result = re.sub(
+        r"\ball conditions (?:satisfied|met)\b",
+        "setup conditions developing",
+        text,
+        flags=re.IGNORECASE,
+    )
+
     # 1. Two-word forms handled first (before single-word pass captures partial match).
     result = _INVAL_NOT_APPLICABLE_RE.sub(
-        "executable invalidation pending live zone confirmation", text
+        "executable invalidation pending live zone confirmation", result
     )
     result = _INVAL_IS_NOT_APPLICABLE_RE.sub(
         "executable invalidation pending live zone confirmation", result
@@ -1265,14 +1276,53 @@ def _evaluate_quality_dimensions(signal: dict) -> tuple[int, int]:
     return n_premium, n_discount
 
 
-def _build_quality_phrase(label: str, signal: dict) -> str:
+def _build_quality_phrase(label: str, signal: dict, final_tier: str = "") -> str:
     """Build the human-readable quality phrase for the ACTION section.
 
     Top three labels get dynamic phrases that name dimension counts.
     Lower three labels return their full static phrases (unchanged from 13.8A).
+
+    Phase 13.8C: When final_tier == NEAR_ENTRY and both retest+hold are confirmed,
+    the phrase names the remaining blocker from missing_conditions so the quality
+    read does not contradict the "NO CAPITAL" directive without explanation.
+
     Informational only — no side effects on tier, capital, or routing.
     """
     n_premium, _n_discount = _evaluate_quality_dimensions(signal)
+
+    # Phase 13.8C Fix 3: NEAR_ENTRY + both_confirmed — quality phrase must name the
+    # remaining blocker, not claim the setup is fully ready (which contradicts NE tier).
+    if final_tier == "NEAR_ENTRY" and label in ("A_PLUS_ELITE", "A_PLUS_CANDIDATE", "CLEAN_STARTER"):
+        missing = signal.get("missing_conditions") or []
+        if missing:
+            blocker = "; ".join(_humanize_missing_condition(str(m)) for m in missing[:2])
+            if label == "A_PLUS_ELITE":
+                return f"Elite setup — confirmed sequence and hold; pending: {blocker}."
+            if label == "A_PLUS_CANDIDATE":
+                return (
+                    f"A+ setup — {n_premium} of 5 dimensions premium, "
+                    f"confirmed sequence and hold; pending: {blocker}."
+                )
+            # CLEAN_STARTER
+            premium_note = (
+                "quality factors mixed" if n_premium == 0
+                else f"{n_premium} of 5 quality factors premium"
+            )
+            return f"Near-ready — confirmed sequence and hold, {premium_note}; pending: {blocker}."
+        else:
+            # No missing_conditions listed — generic near-ready phrasing
+            if label == "A_PLUS_ELITE":
+                return "Elite setup — confirmed sequence and hold; near-ready pending blocker resolution."
+            if label == "A_PLUS_CANDIDATE":
+                return (
+                    f"A+ setup — {n_premium} of 5 dimensions premium, "
+                    "confirmed sequence and hold; near-ready pending blocker resolution."
+                )
+            premium_note = (
+                "quality factors mixed" if n_premium == 0
+                else f"{n_premium} of 5 quality factors premium"
+            )
+            return f"Near-ready — confirmed sequence and hold, {premium_note}; pending blocker resolution."
 
     if label == "A_PLUS_ELITE":
         return "Elite candidate — all five quality dimensions institutional-grade."
@@ -1282,6 +1332,10 @@ def _build_quality_phrase(label: str, signal: dict) -> str:
             "confirmed sequence and hold."
         )
     if label == "CLEAN_STARTER":
+        # Phase 13.8C Fix 2: "0 of 5 quality factors premium" reads poorly —
+        # replace with "quality factors mixed" when no dimensions are premium.
+        if n_premium == 0:
+            return "Clean starter — retest and hold confirmed; quality factors mixed."
         return (
             f"Clean starter — retest and hold confirmed, "
             f"{n_premium} of 5 quality factors premium."
@@ -1461,6 +1515,32 @@ def format_alert(
         # Phase 13.7G: seal tier-mechanics classification language (NEAR_ENTRY only).
         reason      = _seal_near_entry_classification_language(reason)
         next_action = _seal_near_entry_classification_language(next_action)
+        # Phase 13.8C Fix 4: when retest AND hold are both already confirmed, entry-intent
+        # language in next_action ("enter on retest", "enter on confirmation") is
+        # factually wrong and the sovereignty guard would corrupt it into
+        # "wait for confirmation retest" — a visible contradiction.
+        # Pre-substitute to watch language before the body-level guard fires.
+        _retest_s   = str(signal.get("retest_status", "")).lower().strip()
+        _hold_s     = str(signal.get("hold_status",   "")).lower().strip()
+        if _retest_s == "confirmed" and _hold_s == "confirmed":
+            next_action = re.sub(
+                r"\benter\s+on\s+retest\b",
+                "monitor for blocker resolution",
+                next_action,
+                flags=re.IGNORECASE,
+            )
+            next_action = re.sub(
+                r"\benter\s+on\s+confirmation\b",
+                "monitor for blocker resolution",
+                next_action,
+                flags=re.IGNORECASE,
+            )
+            next_action = re.sub(
+                r"\benter\s+on\b",
+                "monitor for blocker resolution",
+                next_action,
+                flags=re.IGNORECASE,
+            )
     targets            = signal.get("targets", [])
 
     # Phase 11: freshness fields (snapshot_only in current architecture)
@@ -1581,9 +1661,9 @@ def format_alert(
             f"Upgrade trigger:    {upgrade_trigger}",
         ]
 
-    # Phase 13.8B: setup quality diagnostic (informational; no tier/capital effect)
+    # Phase 13.8B/13.8C: setup quality diagnostic (informational; no tier/capital effect)
     quality_label  = _evaluate_setup_quality(signal, final_tier)
-    quality_phrase = _build_quality_phrase(quality_label, signal)
+    quality_phrase = _build_quality_phrase(quality_label, signal, final_tier)
 
     lines += [
         "──────────────────────────────",
