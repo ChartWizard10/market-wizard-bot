@@ -323,12 +323,22 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
     Normalization runs after to clean those artifacts.
     Phase 13.7E: NEAR_ENTRY adds a final hardening pass to catch any upgrade-
     language that slipped through field-level neutralization.
+    Phase 13.7F: diagnostic label sanitizer runs last for all tiers, catching
+    any field-label phrase that slipped through the field-level pre-pass.
+    Phase 13.7H: NEAR_ENTRY capital-language firewall neutralizes capital/
+    action phrases and residual diagnostics.
+    Phase 13.7I: narrative sovereignty guard runs after this function, as
+    a separate signal-aware final pass in format_alert().
     """
     result = _apply_contract_guard(body, final_tier)
     result = _normalize_repeated_capital_language(result)
     result = _normalize_duplicate_punctuation(result)
     if final_tier == "NEAR_ENTRY":
         result = _finalize_near_entry_body_text(result)
+    result = _sanitize_diagnostic_labels(result)
+    result = _humanize_bare_gate_keys(result)
+    if final_tier == "NEAR_ENTRY":
+        result = _apply_near_entry_capital_firewall(result)
     return result
 
 
@@ -398,10 +408,12 @@ def _finalize_near_entry_body_text(text: str) -> str:
 
     Catches any upgrade-language that slipped through field-level neutralization
     (e.g. in blocker notes or missing-condition strings), then cleans dangling
-    tails.  Called inside _apply_final_body_contract_guard for NEAR_ENTRY only.
+    tails, then seals any tier-mechanics classification language.
+    Called inside _apply_final_body_contract_guard for NEAR_ENTRY only.
     """
     result = _NE_UPGRADE_SENTENCE_RE.sub(_NE_UPGRADE_REPLACEMENT, text)
     result = _clean_near_entry_dangling_tails(result)
+    result = _seal_near_entry_classification_language(result)
     return result
 
 
@@ -527,6 +539,805 @@ def _humanize_blocker_note(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 13.7F: Residual diagnostic label sanitizer — all tiers.
+#
+# Converts raw internal field-label phrases leaking into Claude prose fields
+# into human-readable equivalents.  Two connector forms are handled:
+#   "field_name is value"  (the AMKR live defect — "retest_status is partial")
+#   "field_name: value"    (colon form, now with full translation)
+# Applied field-level (reason, next_action, all tiers) and as a final-body
+# safety-net inside _apply_final_body_contract_guard().
+# ---------------------------------------------------------------------------
+
+# (field_lower, value_lower) → human-readable phrase.
+_DIAG_IS_MAP: dict[tuple[str, str], str] = {
+    # retest_status
+    ("retest_status",    "partial"):          "retest is only partially confirmed",
+    ("retest_status",    "confirmed"):        "retest is confirmed",
+    ("retest_status",    "missing"):          "retest has not yet been confirmed",
+    ("retest_status",    "failed"):           "retest failed",
+    # hold_status
+    ("hold_status",      "partial"):          "hold is only partially confirmed",
+    ("hold_status",      "confirmed"):        "hold is confirmed",
+    ("hold_status",      "missing"):          "hold has not yet been confirmed",
+    ("hold_status",      "failed"):           "hold failed",
+    # price_in_zone
+    ("price_in_zone",    "true"):             "price is inside the zone",
+    ("price_in_zone",    "false"):            "price is not yet inside the zone",
+    # trigger_status
+    ("trigger_status",   "below_trigger"):    "price remains below trigger",
+    ("trigger_status",   "above_trigger"):    "price is above trigger",
+    ("trigger_status",   "at_trigger"):       "price is at trigger",
+    # overhead_status
+    ("overhead_status",  "moderate"):         "overhead is moderate",
+    ("overhead_status",  "blocked"):          "overhead is blocked",
+    ("overhead_status",  "clear"):            "overhead is clear",
+    # invalidation_level special values (underscore and space forms)
+    ("invalidation_level", "not_applicable"): "executable invalidation pending live zone confirmation",
+    ("invalidation_level", "not applicable"): "executable invalidation pending live zone confirmation",
+    # risk_state
+    ("risk_state",       "tight"):            "risk window is tight relative to zone",
+    ("risk_state",       "healthy"):          "risk window is healthy",
+    ("risk_state",       "wide"):             "risk window is wide",
+}
+
+# Fallback human field name for values not in the map.
+_FIELD_HUMAN_NAME: dict[str, str] = {
+    "retest_status":      "retest",
+    "hold_status":        "hold",
+    "price_in_zone":      "price-in-zone",
+    "trigger_status":     "trigger status",
+    "overhead_status":    "overhead",
+    "invalidation_level": "invalidation",
+    "risk_state":         "risk state",
+}
+
+# "field_name is value" — value is a single word (including underscore words like
+# "below_trigger").  Single-word only to prevent matching conjunctions like "and"
+# when two field phrases appear in the same sentence.
+_DIAG_LABEL_IS_RE = re.compile(
+    r"\b(retest_status|hold_status|price_in_zone|trigger_status|"
+    r"overhead_status|invalidation_level|risk_state)"
+    r"\s+is\s+([\w]+)\b",
+    re.IGNORECASE,
+)
+
+# "field_name: value" — colon form; single-word value capture.
+_DIAG_LABEL_COLON_RE = re.compile(
+    r"\b(retest_status|hold_status|price_in_zone|trigger_status|"
+    r"overhead_status|invalidation_level|risk_state)"
+    r"\s*:\s*([\w]+)\b",
+    re.IGNORECASE,
+)
+
+# "invalidation_level: not applicable" — colon + two-word value; handled before
+# the general colon pass to guarantee the two-word key is matched intact.
+_INVAL_NOT_APPLICABLE_RE = re.compile(
+    r"\binvalidation_level\s*:\s*not\s+applicable\b",
+    re.IGNORECASE,
+)
+
+# "invalidation_level is not applicable" — "is" connector + two-word value;
+# handled before the general "is" pass for the same reason.
+_INVAL_IS_NOT_APPLICABLE_RE = re.compile(
+    r"\binvalidation_level\s+is\s+not\s+applicable\b",
+    re.IGNORECASE,
+)
+
+
+def _replace_diag_phrase(field_raw: str, value_raw: str) -> str:
+    """Translate a (field, value) pair to human-readable text."""
+    field_lower = field_raw.lower()
+    value_lower = value_raw.lower().strip()
+    key = (field_lower, value_lower)
+    if key in _DIAG_IS_MAP:
+        return _DIAG_IS_MAP[key]
+    # Fallback: use human field name with value (underscores stripped).
+    human_field = _FIELD_HUMAN_NAME.get(field_lower, field_lower.replace("_", " "))
+    human_value = value_lower.replace("_", " ")
+    return f"{human_field} is {human_value}"
+
+
+def _sanitize_diagnostic_labels(text: str) -> str:
+    """Replace raw internal field-label phrases with human-readable equivalents.
+
+    Handles three forms in order:
+    1. "invalidation_level: not applicable" — two-word colon value (special-cased
+       to guarantee the lookup key is matched before the general colon pass).
+    2. "field_name is value"  — e.g. "retest_status is partial" (AMKR live defect).
+    3. "field_name: value"    — colon form with full translation.
+
+    Applied field-level to reason/next_action for all tiers, and as a final-body
+    safety-net inside _apply_final_body_contract_guard().
+    """
+    if not text:
+        return text
+
+    # 1. Two-word forms handled first (before single-word pass captures partial match).
+    result = _INVAL_NOT_APPLICABLE_RE.sub(
+        "executable invalidation pending live zone confirmation", text
+    )
+    result = _INVAL_IS_NOT_APPLICABLE_RE.sub(
+        "executable invalidation pending live zone confirmation", result
+    )
+
+    # 2. "field_name is value" (single word)
+    result = _DIAG_LABEL_IS_RE.sub(
+        lambda m: _replace_diag_phrase(m.group(1), m.group(2)), result
+    )
+
+    # 3. "field_name: value"
+    result = _DIAG_LABEL_COLON_RE.sub(
+        lambda m: _replace_diag_phrase(m.group(1), m.group(2)), result
+    )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.7G: Bare gate-key humanizer + NEAR_ENTRY classification-language seal.
+#
+# Converts bare snake_case gate keys (e.g. "retest_confirmed", "hold_confirmed")
+# that appear in missing_conditions lists, blocker notes, or prose fields into
+# human-readable text.  Also neutralizes tier-mechanics classification language
+# in NEAR_ENTRY narrative fields.
+# ---------------------------------------------------------------------------
+
+# Maps bare snake_case gate keys → human text (missing/not-met context).
+# Used by _humanize_bare_gate_keys(); entries matched as whole words.
+_GATE_KEY_MAP: dict[str, str] = {
+    "retest_confirmed":          "Retest not confirmed",
+    "hold_confirmed":            "Hold not confirmed",
+    "price_in_zone":             "Price has not returned to the zone",
+    "trigger_confirmed":         "Trigger acceptance not confirmed",
+    "overhead_clear":            "Overhead path not clean",
+    "risk_realism_valid":        "Risk window not valid",
+    "asymmetry_valid":           "R:R / asymmetry not valid",
+    "invalidation_clarity":      "Invalidation not clear",
+    "volume_confirmed":          "Volume confirmation missing",
+    "sma_alignment_supportive":  "SMA alignment not supportive",
+    "acceptance_confirmed":      "Acceptance not confirmed",
+    "break_confirmed":           "Break confirmation missing",
+    # missing_ prefix variants
+    "missing_retest":            "Retest not confirmed",
+    "missing_hold":              "Hold not confirmed",
+    "missing_price_in_zone":     "Price has not returned to the zone",
+    "missing_trigger":           "Trigger acceptance not confirmed",
+    "missing_overhead_clear":    "Overhead path not clean",
+    "missing_risk_realism":      "Risk window not valid",
+}
+
+# Build whole-word regex from the map — longest keys first to prevent partial
+# shadowing (e.g. "missing_retest" before bare "retest_confirmed").
+_GATE_KEYS_PATTERN = "|".join(
+    re.escape(k) for k in sorted(_GATE_KEY_MAP.keys(), key=len, reverse=True)
+)
+_GATE_KEY_WORD_RE = re.compile(
+    rf"\b({_GATE_KEYS_PATTERN})\b",
+    re.IGNORECASE,
+)
+
+
+def _humanize_bare_gate_keys(text: str) -> str:
+    """Replace bare snake_case gate keys with human-readable equivalents.
+
+    Handles comma/semicolon-separated lists as well as inline sentence use.
+    Applied field-level to reason, next_action, upgrade_trigger, and blocker_note,
+    and as a final-body safety-net inside _apply_final_body_contract_guard().
+    """
+    if not text:
+        return text
+
+    def _replace(m: re.Match) -> str:
+        return _GATE_KEY_MAP.get(m.group(1).lower(), m.group(1))
+
+    return _GATE_KEY_WORD_RE.sub(_replace, text)
+
+
+def _parse_missing_conditions(raw) -> list[str]:
+    """Normalize missing_conditions from a string or list to individual tokens.
+
+    Handles:
+    - list of strings: ["retest_confirmed", "hold_confirmed"]
+    - comma-separated string: "retest_confirmed, hold_confirmed"
+    - semicolon-separated string: "retest_confirmed; hold_confirmed"
+    - each list item may itself be comma/semicolon-separated
+    """
+    if not raw:
+        return []
+    tokens: list[str] = []
+    items = raw if isinstance(raw, list) else [raw]
+    for item in items:
+        for tok in re.split(r"[,;]\s*", str(item).strip()):
+            tok = tok.strip()
+            if tok:
+                tokens.append(tok)
+    return tokens
+
+
+def _format_missing_conditions(items: list[str]) -> str:
+    """Format humanized missing-condition items as a single readable string.
+
+    Sentence case (first item kept as-is, subsequent items lower-cased),
+    semicolon-separated, trailing period.  Returns "—" for an empty list.
+    """
+    if not items:
+        return "—"
+    parts = [items[0]]
+    parts += [
+        (item[0].lower() + item[1:]) if len(item) > 1 else item.lower()
+        for item in items[1:]
+    ]
+    result = "; ".join(parts)
+    if result and not result.endswith("."):
+        result += "."
+    return result
+
+
+# Matches NEAR_ENTRY-inappropriate tier-mechanics classification phrases.
+# "preventing X classification" → "preventing capital authorization"
+# "X classification" / "tier upgrade" / "classification upgrade" → "capital authorization"
+_NE_CLASSIFICATION_RE = re.compile(
+    r"\b(?:"
+    r"preventing\s+(?:STARTER|SNIPE_IT)(?:\s+or\s+(?:STARTER|SNIPE_IT))?\s+classification"
+    r"|(?:STARTER|SNIPE_IT)(?:\s+or\s+(?:STARTER|SNIPE_IT))?\s+classification"
+    r"|(?:tier|classification)\s+upgrade"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _ne_classify_replace(m: re.Match) -> str:
+    if "preventing" in m.group(0).lower():
+        return "preventing capital authorization"
+    return "capital authorization"
+
+
+def _seal_near_entry_classification_language(text: str) -> str:
+    """Neutralize tier-mechanics classification language in NEAR_ENTRY prose.
+
+    Replaces 'preventing X classification', 'X classification', 'tier upgrade',
+    and 'classification upgrade' with trading-desk equivalents.
+    Applied to NEAR_ENTRY fields only — STARTER/SNIPE_IT tier identities preserved.
+    """
+    if not text:
+        return text
+    return _NE_CLASSIFICATION_RE.sub(_ne_classify_replace, text)
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.7H: NEAR_ENTRY capital-language final firewall + residual diagnostic
+# safety net.
+#
+# Neutralizes capital/action phrases that survived all prior passes (CAPITAL_CONTRACT
+# forbidden list, 13.7E upgrade seal, 13.7F diagnostic sanitizer, 13.7G gate-key
+# humanizer).  Also provides a last-resort catch for raw diagnostic field phrases.
+# Applied as a NEAR_ENTRY-only final pass at the end of _apply_final_body_contract_guard().
+# ---------------------------------------------------------------------------
+
+# (pattern, replacement) — longest / most-specific phrases first within each group
+# to prevent partial-match shadowing.
+_NE_CAPITAL_ACTION_FIREWALL: list[tuple[str, str]] = [
+    # Sizing language
+    (r"\bbefore\s+adding\s+size\b",
+     "before the next alert review"),
+    (r"\bsize\s+can\s+be\s+reviewed\b",
+     "setup can be reconsidered on the next alert review"),
+    (r"\badding\s+size\b",
+     "reconsidering on the next alert review"),
+    (r"\badd\s+size\b",
+     "reconsider on the next alert review"),
+    # Entry language
+    (r"\benter\s+on\s+confirmation\b",
+     "wait for confirmation; no capital until blocker resolves"),
+    (r"\benter\s+on\b",
+     "wait for confirmation"),
+    (r"\bentry\s+valid\b",
+     "setup remains on watch"),
+    # Capital / position management
+    (r"\bcapital\s+commitment\b",
+     "watch commitment"),
+    (r"\btrail\s+stop\b",
+     "use invalidation reference only"),
+    # Residual diagnostic field-label phrases — safety net for 13.7F body-pass misses.
+    # Single-word "is" form only (two-word "not applicable" is handled by 13.7F).
+    (r"\bretest_status\s+is\s+partial\b",   "retest is only partial"),
+    (r"\bretest_status\s+is\s+missing\b",   "retest is missing"),
+    (r"\bhold_status\s+is\s+partial\b",     "hold is not fully confirmed"),
+    (r"\bhold_status\s+is\s+missing\b",     "hold is missing"),
+    (r"\bprice_in_zone\s+is\s+true\b",      "price is inside the zone"),
+    (r"\bprice_in_zone\s+is\s+false\b",     "price is not inside the zone"),
+]
+
+# Pre-compiled patterns for runtime efficiency.
+_NE_CAPITAL_ACTION_FIREWALL_COMPILED: list[tuple[re.Pattern, str]] = [
+    (re.compile(pattern, re.IGNORECASE), replacement)
+    for pattern, replacement in _NE_CAPITAL_ACTION_FIREWALL
+]
+
+
+def _apply_near_entry_capital_firewall(text: str) -> str:
+    """Final NEAR_ENTRY-only pass: neutralize capital/action language and
+    catch residual diagnostic field phrases that survived all prior passes.
+
+    Must run after _sanitize_diagnostic_labels() and _humanize_bare_gate_keys()
+    so it operates on already-cleaned text.  NEAR_ENTRY only.
+    """
+    if not text:
+        return text
+    result = text
+    for pattern_re, replacement in _NE_CAPITAL_ACTION_FIREWALL_COMPILED:
+        result = pattern_re.sub(replacement, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.7I: Narrative sovereignty layer.
+#
+# Structured state is sovereign.  Narrative is downstream.
+# The rendered alert must never overrule, soften, or contradict final_tier,
+# retest_status, hold_status, overhead_status, risk_realism_state, or capital
+# authorization.  This pass runs after all prior body sanitizers so it can
+# inspect final_signal fields and eliminate any surviving contradiction.
+#
+# Rule groups:
+#   1. Tier sovereignty  — NEAR_ENTRY / STARTER / SNIPE_IT forbidden phrases
+#   2. Retest sovereignty — forbidden when retest_status != "confirmed"
+#   3. Hold sovereignty   — forbidden when hold_status != "confirmed"
+#   4. Overhead sovereignty — blocker active or status == "blocked"
+#   5. Risk sovereignty   — fragile risk must be acknowledged, not masked
+#   6. Final contradiction cleanup — normalization run after all replacements
+# ---------------------------------------------------------------------------
+
+
+def _compile_sovereignty_rules(
+    rules: list[tuple[str, str]],
+) -> list[tuple[re.Pattern, str]]:
+    return [(re.compile(pattern, re.IGNORECASE), replacement) for pattern, replacement in rules]
+
+
+def _apply_sovereignty_rules(
+    text: str,
+    compiled: list[tuple[re.Pattern, str]],
+) -> str:
+    result = text
+    for pat, repl in compiled:
+        result = pat.sub(repl, result)
+    return result
+
+
+# Rule Group 1a — NEAR_ENTRY: no capital / watch-only sovereignty.
+# Defense-in-depth over CAPITAL_CONTRACT + 13.7H; adds phrases not yet covered.
+# NOTE: use [ \t]+ (not \s+) throughout to prevent cross-line matching when
+# these patterns are applied to the fully-rendered multiline alert body.
+_SOVEREIGN_NE_RULES: list[tuple[str, str]] = [
+    # Entry / action verbs (longest / most-specific first)
+    (r"\bdeploy[ \t]+capital\b",                 "Watch-only; no capital."),
+    (r"\bactionable[ \t]+now\b",                 "Watch-only; no capital."),
+    (r"\bsequence[ \t]+complete\b",
+     "If confirmed, conviction improves for the next alert cycle."),
+    (r"\bdefended[ \t]+structure[ \t]+confirmed\b", "Structure repair in progress."),
+    (r"\benter[ \t]+long\b",                     "Watch-only; wait for blocker resolution."),
+    (r"\benter[ \t]+on[ \t]+confirmation\b",
+     "wait for confirmation; no capital until blocker resolves"),
+    (r"\benter[ \t]+on\b",                       "wait for confirmation"),
+    (r"\bentry[ \t]+valid\b",                    "setup remains on watch"),
+    # Sizing language
+    (r"\bstarter[ \t]+sizing\b",                 "Watch-only; no capital."),
+    (r"\bstarter[ \t]+size\b",                   "Watch-only; no capital."),
+    (r"\badd[ \t]+to[ \t]+position\b",           "Watch-only; wait for blocker resolution."),
+    (r"\bsize[ \t]+can[ \t]+be[ \t]+reviewed\b",
+     "setup can be reconsidered on the next alert review"),
+    (r"\badding[ \t]+size\b",                    "reconsidering on the next alert review"),
+    (r"\badd[ \t]+size\b",                       "reconsider on the next alert review"),
+    (r"\bscale\b",                               "Watch-only; wait for blocker resolution."),
+    # Trade management
+    (r"\btrail[ \t]+stop\b",                     "use invalidation reference only"),
+    (r"\bposition[ \t]+management\b",            "Watch-only; wait for blocker resolution."),
+    (r"\bno[ \t]+trade[ \t]+management\b",
+     "No trade management needed until entry is authorized."),
+    # Capital language
+    (r"\bcapital[ \t]+authorized\b",             "no capital"),
+    (r"\bfull[ \t]+quality\b",                   "no capital"),
+    (r"\ball[ \t]+snipe_it[ \t]+conditions\b",   "Watch-only; no capital."),
+    (r"\ball[ \t]+starter[ \t]+conditions\b",    "Watch-only; no capital."),
+    (r"\bcapital[ \t]+commitment\b",             "watch commitment"),
+]
+
+# Rule Group 1b — STARTER: reduced-size sovereignty.
+# NOTE: "full-size confirmation not granted" is valid STARTER denial language
+# (see CAPITAL_CONTRACT comment) — the bare "full[\s-]size" is intentionally
+# excluded to prevent false positives.  Only "full quality" and explicit
+# SNIPE_IT-conditions phrases are forbidden.
+_SOVEREIGN_STARTER_RULES: list[tuple[str, str]] = [
+    (r"\bmaximum[ \t]+conviction\b",
+     "STARTER SIZE ONLY — reduced-size capital only."),
+    (r"\bpristine[ \t]+setup\b",
+     "STARTER conditions met; full-size authorization not granted."),
+    (r"\ball[ \t]+snipe_it[ \t]+conditions[ \t]+(?:met|satisfied|are[ \t]+(?:met|satisfied)|cleared|passed)\b",
+     "STARTER conditions met; full-size authorization not granted."),
+    (r"\bfull[ \t]+quality\b",
+     "STARTER SIZE ONLY — reduced-size capital only."),
+]
+
+# Rule Group 1c — SNIPE_IT: no contradiction with capital authorization.
+# Defense-in-depth over CAPITAL_CONTRACT["SNIPE_IT"].
+_SOVEREIGN_SNIPE_RULES: list[tuple[str, str]] = [
+    (r"\bno[ \t]+capital[ \t]*[—\-–][ \t]*watch[ \t]+only\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bno[ \t]+capital\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bwatch[\t\-]only\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bblocker[ \t]+active\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bmissing[ \t]+confirmation\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bpartial[ \t]+retest\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bpartial[ \t]+hold\b",
+     "Continue monitoring live hold and expansion."),
+]
+
+# Rule Group 2 — Retest sovereignty (applied when retest_status != "confirmed").
+# Uses [ \t]+ to prevent matching across alert section newlines.
+_SOVEREIGN_RETEST_RULES: list[tuple[str, str]] = [
+    (r"\bsuccessful[ \t]+retest\b",          "Retest not confirmed."),
+    (r"\bretest[ \t]+defended\b",            "Retest not confirmed."),
+    (r"\bdefended[ \t]+zone\b",              "Zone defense not confirmed."),
+    (r"\bdemand[ \t]+defended\b",            "Zone defense not confirmed."),
+    (r"\bfull[ \t]+zone[ \t]+confirmation\b", "Retest remains incomplete."),
+    (r"\bconfirmed[ \t]+defense\b",          "Retest not confirmed."),
+    (r"\bacceptance[ \t]+confirmed\b",       "Retest remains incomplete."),
+    (r"\bstructure[ \t]+fully[ \t]+confirmed\b", "Retest remains incomplete."),
+]
+
+# Rule Group 3 — Hold sovereignty (applied when hold_status != "confirmed").
+# Uses [ \t]+ to prevent matching across alert section newlines.
+_SOVEREIGN_HOLD_RULES: list[tuple[str, str]] = [
+    (r"\bhold[ \t]+confirmed\b",             "Hold not confirmed."),
+    (r"\bconfirmed[ \t]+hold\b",             "Hold not confirmed."),
+    (r"\bdefended[ \t]+hold\b",              "Hold not confirmed."),
+    (r"\bcontinuation[ \t]+confirmed\b",     "Hold remains incomplete."),
+    (r"\bacceptance[ \t]+confirmed\b",       "Hold remains incomplete."),
+    (r"\bbuyers[ \t]+confirmed[ \t]+defense\b", "Hold not confirmed."),
+]
+
+# Rule Group 4a — Overhead blocker active (moderate + blocker note references overhead).
+_SOVEREIGN_OH_BLOCKER_RULES: list[tuple[str, str]] = [
+    (r"\boverhead[ \t]+(?:is[ \t]+)?(?:moderate[ \t]*[—\-–][ \t]*)?not[ \t]+block(?:ing|ed)\b",
+     "Overhead remains a blocker."),
+    (r"\bnot[ \t]+block(?:ing|ed)\b",        "Overhead remains a blocker."),
+    (r"\bclear[ \t]+path\b",                 "Path requires reclaim through nearby resistance."),
+    (r"\bclean[ \t]+path\b",                 "Path requires reclaim through nearby resistance."),
+    (r"\bpath[ \t]+clear\b",                 "Path requires reclaim through nearby resistance."),
+    (r"\boverhead[ \t]+clear\b",             "Overhead remains a blocker."),
+]
+
+# Rule Group 4b — Overhead blocked.
+_SOVEREIGN_OH_BLOCKED_RULES: list[tuple[str, str]] = [
+    (r"\bclear[ \t]+path\b",                 "Path is blocked by overhead resistance."),
+    (r"\bclean[ \t]+path\b",                 "Path is blocked by overhead resistance."),
+    (r"\bpath[ \t]+clear\b",                 "Path is blocked by overhead resistance."),
+    (r"\boverhead[ \t]+clear\b",             "Overhead is blocked."),
+    (r"\bnot[ \t]+block(?:ing|ed)\b",        "Overhead is blocked."),
+]
+
+# Rule Group 5 — Fragile risk: prohibited high-confidence language.
+_SOVEREIGN_FRAGILE_RULES: list[tuple[str, str]] = [
+    (r"\bclean[ \t]+asymmetry\b",            "compressed-invalidation asymmetry"),
+    (r"\bpristine[ \t]+[Rr]:?[Rr]\b",        "tight R:R (compressed invalidation)"),
+    (r"\bstrong[ \t]+asymmetry\b",           "R:R asymmetry (compressed invalidation)"),
+    (r"\bfull[\t\-]quality[ \t]+risk\b",     "execution-sensitive risk"),
+]
+
+# Fragile caution note injected into RISK REALISM block when state == "fragile".
+_FRAGILE_RISK_CAUTION = (
+    "Risk is fragile; invalidation is compressed and execution is sensitive."
+)
+
+# Pre-compile all rule groups at import time.
+_SOVEREIGN_NE_COMPILED      = _compile_sovereignty_rules(_SOVEREIGN_NE_RULES)
+_SOVEREIGN_STARTER_COMPILED = _compile_sovereignty_rules(_SOVEREIGN_STARTER_RULES)
+_SOVEREIGN_SNIPE_COMPILED   = _compile_sovereignty_rules(_SOVEREIGN_SNIPE_RULES)
+_SOVEREIGN_RETEST_COMPILED  = _compile_sovereignty_rules(_SOVEREIGN_RETEST_RULES)
+_SOVEREIGN_HOLD_COMPILED    = _compile_sovereignty_rules(_SOVEREIGN_HOLD_RULES)
+_SOVEREIGN_OH_BLOCKER_COMPILED = _compile_sovereignty_rules(_SOVEREIGN_OH_BLOCKER_RULES)
+_SOVEREIGN_OH_BLOCKED_COMPILED = _compile_sovereignty_rules(_SOVEREIGN_OH_BLOCKED_RULES)
+_SOVEREIGN_FRAGILE_COMPILED = _compile_sovereignty_rules(_SOVEREIGN_FRAGILE_RULES)
+
+_OVERHEAD_BLOCK_KEYWORDS = ("overhead", "path", "resist", "supply", "ceiling")
+
+
+def _overhead_blocker_active(overhead_status: str, near_entry_blocker_note: str) -> bool:
+    """True when overhead_status is moderate and the blocker note references overhead."""
+    if overhead_status.lower().strip() != "moderate":
+        return False
+    note_lower = (near_entry_blocker_note or "").lower()
+    return any(kw in note_lower for kw in _OVERHEAD_BLOCK_KEYWORDS)
+
+
+def _apply_narrative_sovereignty_guard(
+    final_tier: str,
+    signal: dict,
+    body: str,
+) -> str:
+    """Deterministic narrative governance — structured state is sovereign.
+
+    Runs as the absolute final pass in format_alert() after all sanitization
+    and hardening passes.  Inspects structured signal fields and removes any
+    narrative contradiction with the validated state.
+
+    Rule groups:
+      1. Tier sovereignty  — NEAR_ENTRY / STARTER / SNIPE_IT
+      2. Retest sovereignty — when retest_status != confirmed
+      3. Hold sovereignty   — when hold_status != confirmed
+      4. Overhead sovereignty — when overhead blocker active or blocked
+      5. Risk sovereignty   — when risk_realism_state == fragile
+      6. Final cleanup       — normalization after all replacements
+    """
+    if not body:
+        return body
+
+    result = body
+
+    retest_status      = str(signal.get("retest_status", "")).lower().strip()
+    hold_status        = str(signal.get("hold_status", "")).lower().strip()
+    overhead_status    = str(signal.get("overhead_status", "")).lower().strip()
+    risk_realism_state = str(signal.get("risk_realism_state") or "").lower().strip()
+    near_entry_blocker = str(signal.get("near_entry_blocker_note") or "")
+
+    # ---- Rule Group 1: Tier sovereignty ----
+    if final_tier == "NEAR_ENTRY":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_NE_COMPILED)
+    elif final_tier == "STARTER":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_STARTER_COMPILED)
+    elif final_tier == "SNIPE_IT":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_SNIPE_COMPILED)
+
+    # ---- Rule Group 2: Retest sovereignty ----
+    if retest_status != "confirmed":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_RETEST_COMPILED)
+
+    # ---- Rule Group 3: Hold sovereignty ----
+    if hold_status != "confirmed":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_HOLD_COMPILED)
+
+    # ---- Rule Group 4: Overhead sovereignty ----
+    if _overhead_blocker_active(overhead_status, near_entry_blocker):
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_OH_BLOCKER_COMPILED)
+    elif overhead_status == "blocked":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_OH_BLOCKED_COMPILED)
+
+    # ---- Rule Group 5: Risk sovereignty ----
+    if risk_realism_state == "fragile":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_FRAGILE_COMPILED)
+        # Inject caution note into RISK REALISM section if not already present.
+        caution_markers = ("compressed", "execution sensitiv", "risk is fragile")
+        if not any(m in result.lower() for m in caution_markers):
+            fragile_line = "  Risk state:     fragile"
+            if fragile_line in result:
+                result = result.replace(
+                    fragile_line,
+                    fragile_line + f"\n  Risk note:      {_FRAGILE_RISK_CAUTION}",
+                    1,
+                )
+
+    # ---- Rule Group 6: Final contradiction cleanup ----
+    result = _normalize_repeated_capital_language(result)
+    result = _normalize_duplicate_punctuation(result)
+    result = _sanitize_diagnostic_labels(result)
+    result = _humanize_bare_gate_keys(result)
+    if final_tier == "NEAR_ENTRY":
+        result = _clean_near_entry_dangling_tails(result)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.8B: Structural Quality Hierarchy — five-dimension quality layer.
+#
+# Replaces the Phase 13.8A binary-gate model with five three-state dimensions
+# drawn exclusively from existing signal fields.  Each dimension grades as
+# premium / standard / discount.  Dimension counts drive label assignment.
+#
+# Adds A_PLUS_ELITE (all five dimensions institutional-grade) to discriminate
+# genuine elite setups from technically-valid-but-marginal A+ passes.
+#
+# Labels are purely presentational.  They do NOT affect tier, capital_action,
+# discord_channel, suppression logic, or any hard-veto gate.  Display only.
+# ---------------------------------------------------------------------------
+
+# Short canonical prefixes for the top three labels — used as the dict values
+# so existing `_QUALITY_LABEL_PHRASES["X"] in result` assertions remain valid
+# while _build_quality_phrase() generates fuller dynamic text.
+# Lower three labels keep their full static phrases (unchanged from 13.8A).
+_QUALITY_LABEL_PHRASES: dict[str, str] = {
+    "A_PLUS_ELITE":   "Elite candidate",
+    "A_PLUS_CANDIDATE": "A+ candidate",
+    "CLEAN_STARTER":  "Clean starter",
+    "WATCH_ONLY_VALID": (
+        "Watch-only valid — structure exists, but retest and hold are incomplete."
+    ),
+    "STRUCTURALLY_VALID_BUT_IMPERFECT": (
+        "Structurally valid — conditions incomplete; wait for further development."
+    ),
+    "LOW_PRIORITY_VALID": (
+        "Low-priority valid — setup exists but lacks multiple confirmation layers."
+    ),
+}
+
+
+def _evaluate_quality_dimensions(signal: dict) -> tuple[int, int]:
+    """Score the five structural quality dimensions.  Returns (n_premium, n_discount).
+
+    Dimensions:
+      1. Structural freshness  — trend_state
+      2. Sequence quality      — structure_event + setup_family pair
+      3. Zone precision        — zone_type
+      4. Path openness         — overhead_status (+ active blocker check)
+      5. Risk profile          — risk_realism_state + risk_reward
+
+    SMA hostility is applied as a supplemental discount point after dimension
+    scoring, preserving Phase 13.8A's A+/hostile-SMA boundary.
+
+    Informational only — never touches tier, capital_action, or routing.
+    """
+    trend_state        = str(signal.get("trend_state", "") or "").lower().strip()
+    structure_event    = str(signal.get("structure_event", "none") or "none").lower().strip()
+    setup_family       = str(signal.get("setup_family", "none") or "none").lower().strip()
+    zone_type          = str(signal.get("zone_type", "none") or "none").lower().strip()
+    overhead_status    = str(signal.get("overhead_status", "unknown") or "unknown").lower().strip()
+    near_entry_blocker = str(signal.get("near_entry_blocker_note") or "")
+    risk_realism_state = str(signal.get("risk_realism_state") or "unknown").lower().strip()
+    sma_alignment      = str(signal.get("sma_value_alignment", "unavailable") or "unavailable").lower().strip()
+
+    rr: float | None = None
+    try:
+        raw_rr = signal.get("risk_reward")
+        if raw_rr is not None:
+            rr = float(raw_rr)
+    except (TypeError, ValueError):
+        pass
+
+    grades: list[str] = []
+
+    # ---- Dimension 1: Structural freshness ----
+    if trend_state in ("fresh_expansion", "basing"):
+        grades.append("premium")
+    elif trend_state in ("mature_continuation", "transition"):
+        grades.append("standard")
+    else:                                               # repair, failure, unknown, empty
+        grades.append("discount")
+
+    # ---- Dimension 2: Sequence quality ----
+    _premium_seq_families = ("continuation", "accepted_break", "compression_to_expansion")
+    _discount_seq_families = ("reversal", "exhaustion_trap")
+    if structure_event == "bos" and setup_family in _premium_seq_families:
+        grades.append("premium")
+    elif structure_event == "bos":
+        grades.append("standard")
+    elif structure_event == "choch" or setup_family in _discount_seq_families:
+        grades.append("discount")
+    elif structure_event == "none" or setup_family == "none":
+        grades.append("discount")
+    elif structure_event in ("mss", "reclaim", "accepted_break", "failed_breakdown_reclaim"):
+        grades.append("standard")
+    elif setup_family in ("reclaim", "failed_breakdown_reclaim"):
+        grades.append("standard")
+    else:
+        grades.append("standard")
+
+    # ---- Dimension 3: Zone precision ----
+    if zone_type in ("ob", "fvg"):
+        grades.append("premium")
+    elif zone_type in ("demand", "flip_zone"):
+        grades.append("standard")
+    else:                                               # support_cluster, none, unknown
+        grades.append("discount")
+
+    # ---- Dimension 4: Path openness ----
+    overhead_blocker_active = _overhead_blocker_active(overhead_status, near_entry_blocker)
+    if overhead_status == "clear" and not overhead_blocker_active:
+        grades.append("premium")
+    elif overhead_status == "moderate" and not overhead_blocker_active:
+        grades.append("standard")
+    else:                                               # blocked, unknown, or blocker active
+        grades.append("discount")
+
+    # ---- Dimension 5: Risk profile ----
+    if risk_realism_state == "healthy" and rr is not None and rr >= 4.0:
+        grades.append("premium")
+    elif risk_realism_state == "healthy" or (
+        risk_realism_state == "tight" and rr is not None and rr >= 3.5
+    ):
+        grades.append("standard")
+    else:                                               # fragile, invalid, unknown, tight<3.5
+        grades.append("discount")
+
+    n_premium  = grades.count("premium")
+    n_discount = grades.count("discount")
+
+    # SMA hostility: applied as a supplemental discount (not a dimension slot).
+    if sma_alignment == "hostile":
+        n_discount += 1
+
+    return n_premium, n_discount
+
+
+def _build_quality_phrase(label: str, signal: dict) -> str:
+    """Build the human-readable quality phrase for the ACTION section.
+
+    Top three labels get dynamic phrases that name dimension counts.
+    Lower three labels return their full static phrases (unchanged from 13.8A).
+    Informational only — no side effects on tier, capital, or routing.
+    """
+    n_premium, _n_discount = _evaluate_quality_dimensions(signal)
+
+    if label == "A_PLUS_ELITE":
+        return "Elite candidate — all five quality dimensions institutional-grade."
+    if label == "A_PLUS_CANDIDATE":
+        return (
+            f"A+ candidate — {n_premium} of 5 dimensions premium, "
+            "confirmed sequence and hold."
+        )
+    if label == "CLEAN_STARTER":
+        return (
+            f"Clean starter — retest and hold confirmed, "
+            f"{n_premium} of 5 quality factors premium."
+        )
+    return _QUALITY_LABEL_PHRASES.get(label, label)
+
+
+def _evaluate_setup_quality(signal: dict, final_tier: str) -> str:
+    """Evaluate setup quality and return a compact internal quality label.
+
+    Phase 13.8B — five-dimension structural hierarchy:
+
+      A_PLUS_ELITE                 — both confirmed; all 5 dimensions premium, 0 discounts
+      A_PLUS_CANDIDATE             — both confirmed; ≥ 3 premium dimensions, 0 discounts
+      CLEAN_STARTER                — both confirmed; any dimension profile
+      WATCH_ONLY_VALID             — structure present, at least partial retest/hold progress
+      STRUCTURALLY_VALID_BUT_IMPERFECT — structure present, no partial progress
+      LOW_PRIORITY_VALID           — catch-all (no structure or no alertable progress)
+
+    Informational only.  Never changes tier, capital_action, discord_channel,
+    suppression logic, or any hard-veto gate.
+    """
+    retest_status  = str(signal.get("retest_status", "missing")).lower().strip()
+    hold_status    = str(signal.get("hold_status",   "missing")).lower().strip()
+    structure_event = str(signal.get("structure_event", "none")).lower().strip()
+
+    both_confirmed    = retest_status == "confirmed" and hold_status == "confirmed"
+    structure_present = structure_event != "none"
+    has_partial_progress = (
+        retest_status in ("partial", "confirmed")
+        or hold_status in ("partial", "confirmed")
+    )
+
+    if both_confirmed:
+        n_premium, n_discount = _evaluate_quality_dimensions(signal)
+        # A_PLUS_ELITE: all five dimensions premium, zero discounts (including SMA)
+        if n_premium == 5 and n_discount == 0:
+            return "A_PLUS_ELITE"
+        # A_PLUS_CANDIDATE: at least three premium, strictly zero discounts
+        if n_premium >= 3 and n_discount == 0:
+            return "A_PLUS_CANDIDATE"
+        # CLEAN_STARTER: both gates confirmed; one or more dimension imperfections
+        return "CLEAN_STARTER"
+
+    # ---- Below here: at least one of retest/hold is NOT confirmed ----
+
+    if structure_present and has_partial_progress:
+        return "WATCH_ONLY_VALID"
+
+    if structure_present:
+        return "STRUCTURALLY_VALID_BUT_IMPERFECT"
+
+    return "LOW_PRIORITY_VALID"
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.7B: Context-aware overhead label
 # ---------------------------------------------------------------------------
 
@@ -625,7 +1436,21 @@ def format_alert(
     missing_conditions = signal.get("missing_conditions") or []
     # Phase 13.7D: humanize upgrade trigger before sanitization
     _upgrade_trigger_raw = str(signal.get("upgrade_trigger", "—"))
-    upgrade_trigger    = _sanitize(_humanize_upgrade_trigger(_upgrade_trigger_raw, final_tier))
+    _upgrade_trigger_hum = _humanize_upgrade_trigger(_upgrade_trigger_raw, final_tier)
+    _upgrade_trigger_hum = _humanize_bare_gate_keys(_upgrade_trigger_hum)
+    if final_tier == "NEAR_ENTRY":
+        _upgrade_trigger_hum = _seal_near_entry_classification_language(_upgrade_trigger_hum)
+    upgrade_trigger    = _sanitize(_upgrade_trigger_hum)
+
+    # Phase 13.7F: strip residual internal diagnostic labels from prose fields
+    # (all tiers).  Runs before the 13.7E/13.7G passes so all operate on
+    # already-cleaned inputs.
+    reason      = _sanitize_diagnostic_labels(reason)
+    next_action = _sanitize_diagnostic_labels(next_action)
+
+    # Phase 13.7G: humanize bare gate keys in prose fields (all tiers).
+    reason      = _humanize_bare_gate_keys(reason)
+    next_action = _humanize_bare_gate_keys(next_action)
 
     # Phase 13.7E: field-level upgrade-language neutralization for NEAR_ENTRY.
     # Applied before rendering so structural label prefixes are not consumed by
@@ -633,6 +1458,9 @@ def format_alert(
     if final_tier == "NEAR_ENTRY":
         reason      = _neutralize_near_entry_upgrade_language(reason)
         next_action = _neutralize_near_entry_upgrade_language(next_action)
+        # Phase 13.7G: seal tier-mechanics classification language (NEAR_ENTRY only).
+        reason      = _seal_near_entry_classification_language(reason)
+        next_action = _seal_near_entry_classification_language(next_action)
     targets            = signal.get("targets", [])
 
     # Phase 11: freshness fields (snapshot_only in current architecture)
@@ -726,15 +1554,22 @@ def format_alert(
         lines += ["──────────────────────────────", f"FORCED PARTICIPATION: {forced_part}"]
 
     if final_tier == "NEAR_ENTRY":
-        # Phase 13.7D: humanize missing-condition labels before rendering.
-        missing_str = ", ".join(
-            _sanitize(_humanize_missing_condition(str(c))) for c in missing_conditions
-        ) if missing_conditions else "—"
+        # Phase 13.7G: parse, humanize (gate keys + condition map), format.
+        _mc_tokens = _parse_missing_conditions(missing_conditions)
+        _mc_human = [
+            _humanize_bare_gate_keys(_sanitize(_humanize_missing_condition(tok)))
+            for tok in _mc_tokens
+        ]
+        missing_str = _format_missing_conditions(_mc_human) if _mc_human else "—"
         # Phase 12.3: render blocker note above missing conditions.
         # Phase 12.3A: strip leading "Blocker:" prefix before adding our label
         # so _build_near_entry_blocker_note's prefix does not double up.
-        # Phase 13.7D: also strip raw field-label prefixes from the blocker note.
-        blocker_note = _sanitize(_humanize_blocker_note(_clean_blocker_label(raw_blocker_str)))
+        # Phase 13.7D/13.7G: strip raw field-label prefixes; humanize gate keys;
+        # seal tier-mechanics classification language.
+        _blocker_cleaned = _humanize_blocker_note(_clean_blocker_label(raw_blocker_str))
+        _blocker_cleaned = _humanize_bare_gate_keys(_blocker_cleaned)
+        _blocker_cleaned = _seal_near_entry_classification_language(_blocker_cleaned)
+        blocker_note = _sanitize(_blocker_cleaned)
         lines += [
             "──────────────────────────────",
             "⚠️  NO CAPITAL YET",
@@ -746,11 +1581,16 @@ def format_alert(
             f"Upgrade trigger:    {upgrade_trigger}",
         ]
 
+    # Phase 13.8B: setup quality diagnostic (informational; no tier/capital effect)
+    quality_label  = _evaluate_setup_quality(signal, final_tier)
+    quality_phrase = _build_quality_phrase(quality_label, signal)
+
     lines += [
         "──────────────────────────────",
         "ACTION",
         f"  {action_headline}",
         f"  {sizing_line}",
+        f"  Quality read: {quality_phrase}",
         f"  Next: {next_action}",
         f"  Why:  {reason}",
     ]
@@ -789,8 +1629,11 @@ def format_alert(
 
     # Phase 13.7C: final body contract guard — contract guard then normalization.
     # Removes tier-contradicting phrases and cleans up any replacement artifacts.
+    # Phase 13.7I: narrative sovereignty guard — structured state is sovereign;
+    # runs after all prior passes with access to the full validated signal dict.
     rendered = "\n".join(lines)
-    return _apply_final_body_contract_guard(final_tier, rendered)
+    rendered = _apply_final_body_contract_guard(final_tier, rendered)
+    return _apply_narrative_sovereignty_guard(final_tier, signal, rendered)
 
 
 # ---------------------------------------------------------------------------
