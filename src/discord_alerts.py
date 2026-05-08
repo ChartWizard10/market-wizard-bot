@@ -325,8 +325,10 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
     language that slipped through field-level neutralization.
     Phase 13.7F: diagnostic label sanitizer runs last for all tiers, catching
     any field-label phrase that slipped through the field-level pre-pass.
-    Phase 13.7H: NEAR_ENTRY capital-language firewall runs as the absolute
-    final pass, neutralizing capital/action phrases and residual diagnostics.
+    Phase 13.7H: NEAR_ENTRY capital-language firewall neutralizes capital/
+    action phrases and residual diagnostics.
+    Phase 13.7I: narrative sovereignty guard runs after this function, as
+    a separate signal-aware final pass in format_alert().
     """
     result = _apply_contract_guard(body, final_tier)
     result = _normalize_repeated_capital_language(result)
@@ -870,6 +872,269 @@ def _apply_near_entry_capital_firewall(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 13.7I: Narrative sovereignty layer.
+#
+# Structured state is sovereign.  Narrative is downstream.
+# The rendered alert must never overrule, soften, or contradict final_tier,
+# retest_status, hold_status, overhead_status, risk_realism_state, or capital
+# authorization.  This pass runs after all prior body sanitizers so it can
+# inspect final_signal fields and eliminate any surviving contradiction.
+#
+# Rule groups:
+#   1. Tier sovereignty  — NEAR_ENTRY / STARTER / SNIPE_IT forbidden phrases
+#   2. Retest sovereignty — forbidden when retest_status != "confirmed"
+#   3. Hold sovereignty   — forbidden when hold_status != "confirmed"
+#   4. Overhead sovereignty — blocker active or status == "blocked"
+#   5. Risk sovereignty   — fragile risk must be acknowledged, not masked
+#   6. Final contradiction cleanup — normalization run after all replacements
+# ---------------------------------------------------------------------------
+
+
+def _compile_sovereignty_rules(
+    rules: list[tuple[str, str]],
+) -> list[tuple[re.Pattern, str]]:
+    return [(re.compile(pattern, re.IGNORECASE), replacement) for pattern, replacement in rules]
+
+
+def _apply_sovereignty_rules(
+    text: str,
+    compiled: list[tuple[re.Pattern, str]],
+) -> str:
+    result = text
+    for pat, repl in compiled:
+        result = pat.sub(repl, result)
+    return result
+
+
+# Rule Group 1a — NEAR_ENTRY: no capital / watch-only sovereignty.
+# Defense-in-depth over CAPITAL_CONTRACT + 13.7H; adds phrases not yet covered.
+# NOTE: use [ \t]+ (not \s+) throughout to prevent cross-line matching when
+# these patterns are applied to the fully-rendered multiline alert body.
+_SOVEREIGN_NE_RULES: list[tuple[str, str]] = [
+    # Entry / action verbs (longest / most-specific first)
+    (r"\bdeploy[ \t]+capital\b",                 "Watch-only; no capital."),
+    (r"\bactionable[ \t]+now\b",                 "Watch-only; no capital."),
+    (r"\bsequence[ \t]+complete\b",
+     "If confirmed, conviction improves for the next alert cycle."),
+    (r"\bdefended[ \t]+structure[ \t]+confirmed\b", "Structure repair in progress."),
+    (r"\benter[ \t]+long\b",                     "Watch-only; wait for blocker resolution."),
+    (r"\benter[ \t]+on[ \t]+confirmation\b",
+     "wait for confirmation; no capital until blocker resolves"),
+    (r"\benter[ \t]+on\b",                       "wait for confirmation"),
+    (r"\bentry[ \t]+valid\b",                    "setup remains on watch"),
+    # Sizing language
+    (r"\bstarter[ \t]+sizing\b",                 "Watch-only; no capital."),
+    (r"\bstarter[ \t]+size\b",                   "Watch-only; no capital."),
+    (r"\badd[ \t]+to[ \t]+position\b",           "Watch-only; wait for blocker resolution."),
+    (r"\bsize[ \t]+can[ \t]+be[ \t]+reviewed\b",
+     "setup can be reconsidered on the next alert review"),
+    (r"\badding[ \t]+size\b",                    "reconsidering on the next alert review"),
+    (r"\badd[ \t]+size\b",                       "reconsider on the next alert review"),
+    (r"\bscale\b",                               "Watch-only; wait for blocker resolution."),
+    # Trade management
+    (r"\btrail[ \t]+stop\b",                     "use invalidation reference only"),
+    (r"\bposition[ \t]+management\b",            "Watch-only; wait for blocker resolution."),
+    (r"\bno[ \t]+trade[ \t]+management\b",
+     "No trade management needed until entry is authorized."),
+    # Capital language
+    (r"\bcapital[ \t]+authorized\b",             "no capital"),
+    (r"\bfull[ \t]+quality\b",                   "no capital"),
+    (r"\ball[ \t]+snipe_it[ \t]+conditions\b",   "Watch-only; no capital."),
+    (r"\ball[ \t]+starter[ \t]+conditions\b",    "Watch-only; no capital."),
+    (r"\bcapital[ \t]+commitment\b",             "watch commitment"),
+]
+
+# Rule Group 1b — STARTER: reduced-size sovereignty.
+# NOTE: "full-size confirmation not granted" is valid STARTER denial language
+# (see CAPITAL_CONTRACT comment) — the bare "full[\s-]size" is intentionally
+# excluded to prevent false positives.  Only "full quality" and explicit
+# SNIPE_IT-conditions phrases are forbidden.
+_SOVEREIGN_STARTER_RULES: list[tuple[str, str]] = [
+    (r"\bmaximum[ \t]+conviction\b",
+     "STARTER SIZE ONLY — reduced-size capital only."),
+    (r"\bpristine[ \t]+setup\b",
+     "STARTER conditions met; full-size authorization not granted."),
+    (r"\ball[ \t]+snipe_it[ \t]+conditions[ \t]+(?:met|satisfied|are[ \t]+(?:met|satisfied)|cleared|passed)\b",
+     "STARTER conditions met; full-size authorization not granted."),
+    (r"\bfull[ \t]+quality\b",
+     "STARTER SIZE ONLY — reduced-size capital only."),
+]
+
+# Rule Group 1c — SNIPE_IT: no contradiction with capital authorization.
+# Defense-in-depth over CAPITAL_CONTRACT["SNIPE_IT"].
+_SOVEREIGN_SNIPE_RULES: list[tuple[str, str]] = [
+    (r"\bno[ \t]+capital[ \t]*[—\-–][ \t]*watch[ \t]+only\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bno[ \t]+capital\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bwatch[\t\-]only\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bblocker[ \t]+active\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bmissing[ \t]+confirmation\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bpartial[ \t]+retest\b",
+     "Continue monitoring live hold and expansion."),
+    (r"\bpartial[ \t]+hold\b",
+     "Continue monitoring live hold and expansion."),
+]
+
+# Rule Group 2 — Retest sovereignty (applied when retest_status != "confirmed").
+# Uses [ \t]+ to prevent matching across alert section newlines.
+_SOVEREIGN_RETEST_RULES: list[tuple[str, str]] = [
+    (r"\bsuccessful[ \t]+retest\b",          "Retest not confirmed."),
+    (r"\bretest[ \t]+defended\b",            "Retest not confirmed."),
+    (r"\bdefended[ \t]+zone\b",              "Zone defense not confirmed."),
+    (r"\bdemand[ \t]+defended\b",            "Zone defense not confirmed."),
+    (r"\bfull[ \t]+zone[ \t]+confirmation\b", "Retest remains incomplete."),
+    (r"\bconfirmed[ \t]+defense\b",          "Retest not confirmed."),
+    (r"\bacceptance[ \t]+confirmed\b",       "Retest remains incomplete."),
+    (r"\bstructure[ \t]+fully[ \t]+confirmed\b", "Retest remains incomplete."),
+]
+
+# Rule Group 3 — Hold sovereignty (applied when hold_status != "confirmed").
+# Uses [ \t]+ to prevent matching across alert section newlines.
+_SOVEREIGN_HOLD_RULES: list[tuple[str, str]] = [
+    (r"\bhold[ \t]+confirmed\b",             "Hold not confirmed."),
+    (r"\bconfirmed[ \t]+hold\b",             "Hold not confirmed."),
+    (r"\bdefended[ \t]+hold\b",              "Hold not confirmed."),
+    (r"\bcontinuation[ \t]+confirmed\b",     "Hold remains incomplete."),
+    (r"\bacceptance[ \t]+confirmed\b",       "Hold remains incomplete."),
+    (r"\bbuyers[ \t]+confirmed[ \t]+defense\b", "Hold not confirmed."),
+]
+
+# Rule Group 4a — Overhead blocker active (moderate + blocker note references overhead).
+_SOVEREIGN_OH_BLOCKER_RULES: list[tuple[str, str]] = [
+    (r"\boverhead[ \t]+(?:is[ \t]+)?(?:moderate[ \t]*[—\-–][ \t]*)?not[ \t]+block(?:ing|ed)\b",
+     "Overhead remains a blocker."),
+    (r"\bnot[ \t]+block(?:ing|ed)\b",        "Overhead remains a blocker."),
+    (r"\bclear[ \t]+path\b",                 "Path requires reclaim through nearby resistance."),
+    (r"\bclean[ \t]+path\b",                 "Path requires reclaim through nearby resistance."),
+    (r"\bpath[ \t]+clear\b",                 "Path requires reclaim through nearby resistance."),
+    (r"\boverhead[ \t]+clear\b",             "Overhead remains a blocker."),
+]
+
+# Rule Group 4b — Overhead blocked.
+_SOVEREIGN_OH_BLOCKED_RULES: list[tuple[str, str]] = [
+    (r"\bclear[ \t]+path\b",                 "Path is blocked by overhead resistance."),
+    (r"\bclean[ \t]+path\b",                 "Path is blocked by overhead resistance."),
+    (r"\bpath[ \t]+clear\b",                 "Path is blocked by overhead resistance."),
+    (r"\boverhead[ \t]+clear\b",             "Overhead is blocked."),
+    (r"\bnot[ \t]+block(?:ing|ed)\b",        "Overhead is blocked."),
+]
+
+# Rule Group 5 — Fragile risk: prohibited high-confidence language.
+_SOVEREIGN_FRAGILE_RULES: list[tuple[str, str]] = [
+    (r"\bclean[ \t]+asymmetry\b",            "compressed-invalidation asymmetry"),
+    (r"\bpristine[ \t]+[Rr]:?[Rr]\b",        "tight R:R (compressed invalidation)"),
+    (r"\bstrong[ \t]+asymmetry\b",           "R:R asymmetry (compressed invalidation)"),
+    (r"\bfull[\t\-]quality[ \t]+risk\b",     "execution-sensitive risk"),
+]
+
+# Fragile caution note injected into RISK REALISM block when state == "fragile".
+_FRAGILE_RISK_CAUTION = (
+    "Risk is fragile; invalidation is compressed and execution is sensitive."
+)
+
+# Pre-compile all rule groups at import time.
+_SOVEREIGN_NE_COMPILED      = _compile_sovereignty_rules(_SOVEREIGN_NE_RULES)
+_SOVEREIGN_STARTER_COMPILED = _compile_sovereignty_rules(_SOVEREIGN_STARTER_RULES)
+_SOVEREIGN_SNIPE_COMPILED   = _compile_sovereignty_rules(_SOVEREIGN_SNIPE_RULES)
+_SOVEREIGN_RETEST_COMPILED  = _compile_sovereignty_rules(_SOVEREIGN_RETEST_RULES)
+_SOVEREIGN_HOLD_COMPILED    = _compile_sovereignty_rules(_SOVEREIGN_HOLD_RULES)
+_SOVEREIGN_OH_BLOCKER_COMPILED = _compile_sovereignty_rules(_SOVEREIGN_OH_BLOCKER_RULES)
+_SOVEREIGN_OH_BLOCKED_COMPILED = _compile_sovereignty_rules(_SOVEREIGN_OH_BLOCKED_RULES)
+_SOVEREIGN_FRAGILE_COMPILED = _compile_sovereignty_rules(_SOVEREIGN_FRAGILE_RULES)
+
+_OVERHEAD_BLOCK_KEYWORDS = ("overhead", "path", "resist", "supply", "ceiling")
+
+
+def _overhead_blocker_active(overhead_status: str, near_entry_blocker_note: str) -> bool:
+    """True when overhead_status is moderate and the blocker note references overhead."""
+    if overhead_status.lower().strip() != "moderate":
+        return False
+    note_lower = (near_entry_blocker_note or "").lower()
+    return any(kw in note_lower for kw in _OVERHEAD_BLOCK_KEYWORDS)
+
+
+def _apply_narrative_sovereignty_guard(
+    final_tier: str,
+    signal: dict,
+    body: str,
+) -> str:
+    """Deterministic narrative governance — structured state is sovereign.
+
+    Runs as the absolute final pass in format_alert() after all sanitization
+    and hardening passes.  Inspects structured signal fields and removes any
+    narrative contradiction with the validated state.
+
+    Rule groups:
+      1. Tier sovereignty  — NEAR_ENTRY / STARTER / SNIPE_IT
+      2. Retest sovereignty — when retest_status != confirmed
+      3. Hold sovereignty   — when hold_status != confirmed
+      4. Overhead sovereignty — when overhead blocker active or blocked
+      5. Risk sovereignty   — when risk_realism_state == fragile
+      6. Final cleanup       — normalization after all replacements
+    """
+    if not body:
+        return body
+
+    result = body
+
+    retest_status      = str(signal.get("retest_status", "")).lower().strip()
+    hold_status        = str(signal.get("hold_status", "")).lower().strip()
+    overhead_status    = str(signal.get("overhead_status", "")).lower().strip()
+    risk_realism_state = str(signal.get("risk_realism_state") or "").lower().strip()
+    near_entry_blocker = str(signal.get("near_entry_blocker_note") or "")
+
+    # ---- Rule Group 1: Tier sovereignty ----
+    if final_tier == "NEAR_ENTRY":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_NE_COMPILED)
+    elif final_tier == "STARTER":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_STARTER_COMPILED)
+    elif final_tier == "SNIPE_IT":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_SNIPE_COMPILED)
+
+    # ---- Rule Group 2: Retest sovereignty ----
+    if retest_status != "confirmed":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_RETEST_COMPILED)
+
+    # ---- Rule Group 3: Hold sovereignty ----
+    if hold_status != "confirmed":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_HOLD_COMPILED)
+
+    # ---- Rule Group 4: Overhead sovereignty ----
+    if _overhead_blocker_active(overhead_status, near_entry_blocker):
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_OH_BLOCKER_COMPILED)
+    elif overhead_status == "blocked":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_OH_BLOCKED_COMPILED)
+
+    # ---- Rule Group 5: Risk sovereignty ----
+    if risk_realism_state == "fragile":
+        result = _apply_sovereignty_rules(result, _SOVEREIGN_FRAGILE_COMPILED)
+        # Inject caution note into RISK REALISM section if not already present.
+        caution_markers = ("compressed", "execution sensitiv", "risk is fragile")
+        if not any(m in result.lower() for m in caution_markers):
+            fragile_line = "  Risk state:     fragile"
+            if fragile_line in result:
+                result = result.replace(
+                    fragile_line,
+                    fragile_line + f"\n  Risk note:      {_FRAGILE_RISK_CAUTION}",
+                    1,
+                )
+
+    # ---- Rule Group 6: Final contradiction cleanup ----
+    result = _normalize_repeated_capital_language(result)
+    result = _normalize_duplicate_punctuation(result)
+    result = _sanitize_diagnostic_labels(result)
+    result = _humanize_bare_gate_keys(result)
+    if final_tier == "NEAR_ENTRY":
+        result = _clean_near_entry_dangling_tails(result)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.7B: Context-aware overhead label
 # ---------------------------------------------------------------------------
 
@@ -1156,8 +1421,11 @@ def format_alert(
 
     # Phase 13.7C: final body contract guard — contract guard then normalization.
     # Removes tier-contradicting phrases and cleans up any replacement artifacts.
+    # Phase 13.7I: narrative sovereignty guard — structured state is sovereign;
+    # runs after all prior passes with access to the full validated signal dict.
     rendered = "\n".join(lines)
-    return _apply_final_body_contract_guard(final_tier, rendered)
+    rendered = _apply_final_body_contract_guard(final_tier, rendered)
+    return _apply_narrative_sovereignty_guard(final_tier, signal, rendered)
 
 
 # ---------------------------------------------------------------------------
