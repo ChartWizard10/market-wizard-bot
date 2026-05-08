@@ -1135,6 +1135,100 @@ def _apply_narrative_sovereignty_guard(
 
 
 # ---------------------------------------------------------------------------
+# Phase 13.8A: Setup quality intelligence — informational diagnostic layer.
+#
+# Evaluates eight signal dimensions (retest quality, hold quality, risk realism,
+# overhead state, SMA support, structure quality, target quality, sequence
+# quality) and returns a compact quality label.
+#
+# Labels are purely presentational.  They do NOT affect tier, capital_action,
+# discord_channel, suppression logic, or any hard-veto gate.  Display only.
+# ---------------------------------------------------------------------------
+
+_QUALITY_LABEL_PHRASES: dict[str, str] = {
+    "A_PLUS_CANDIDATE": (
+        "A+ candidate — clean sequence, healthy risk, clear path, and confirmed hold."
+    ),
+    "CLEAN_STARTER": (
+        "Clean starter — retest and hold confirmed, risk window tight but acceptable."
+    ),
+    "WATCH_ONLY_VALID": (
+        "Watch-only valid — structure exists, but retest and hold are incomplete."
+    ),
+    "STRUCTURALLY_VALID_BUT_IMPERFECT": (
+        "Structurally valid — conditions incomplete; wait for further development."
+    ),
+    "LOW_PRIORITY_VALID": (
+        "Low-priority valid — setup exists but lacks multiple confirmation layers."
+    ),
+}
+
+
+def _evaluate_setup_quality(signal: dict, final_tier: str) -> str:
+    """Evaluate setup quality and return a compact internal quality label.
+
+    Priority (most favourable wins):
+      A_PLUS_CANDIDATE             — retest + hold confirmed, risk ok, overhead ok, sma ok
+      CLEAN_STARTER                — retest + hold confirmed with at least one imperfection
+      WATCH_ONLY_VALID             — structure present, at least partial retest/hold progress
+      STRUCTURALLY_VALID_BUT_IMPERFECT — structure present, no partial progress
+      LOW_PRIORITY_VALID           — catch-all (no structure or no alertable progress)
+
+    Phase 13.8A: informational only.  Never changes tier, capital_action, or routing.
+    """
+    retest_status        = str(signal.get("retest_status", "missing")).lower().strip()
+    hold_status          = str(signal.get("hold_status", "missing")).lower().strip()
+    risk_realism_state   = str(signal.get("risk_realism_state") or "unknown").lower().strip()
+    overhead_status      = str(signal.get("overhead_status", "unknown")).lower().strip()
+    sma_value_alignment  = str(signal.get("sma_value_alignment", "unavailable")).lower().strip()
+    near_entry_blocker   = str(signal.get("near_entry_blocker_note") or "")
+    structure_event      = str(signal.get("structure_event", "none")).lower().strip()
+
+    retest_confirmed = retest_status == "confirmed"
+    hold_confirmed   = hold_status == "confirmed"
+    both_confirmed   = retest_confirmed and hold_confirmed
+
+    # Risk: only "healthy" and "tight" are non-penalising; fragile/invalid/unknown are not.
+    risk_ok = risk_realism_state in ("healthy", "tight")
+
+    # Overhead: blocked overhead or an active moderate blocker prevents A+.
+    overhead_blocker_active = _overhead_blocker_active(overhead_status, near_entry_blocker)
+    overhead_ok = (
+        overhead_status in ("clear", "moderate") and not overhead_blocker_active
+    )
+
+    sma_hostile      = sma_value_alignment == "hostile"
+    structure_present = structure_event != "none"
+
+    # At least one of retest/hold has made partial or full progress.
+    has_partial_progress = (
+        retest_status in ("partial", "confirmed")
+        or hold_status in ("partial", "confirmed")
+    )
+
+    # ---- A+ CANDIDATE: all key quality gates clean ----
+    if both_confirmed and risk_ok and overhead_ok and not sma_hostile:
+        return "A_PLUS_CANDIDATE"
+
+    # ---- CLEAN_STARTER: retest + hold confirmed, secondary imperfection present ----
+    if both_confirmed:
+        return "CLEAN_STARTER"
+
+    # ---- Below here: at least one of retest/hold is NOT confirmed ----
+
+    # WATCH_ONLY_VALID: structure present with at least partial progress
+    if structure_present and has_partial_progress:
+        return "WATCH_ONLY_VALID"
+
+    # STRUCTURALLY_VALID_BUT_IMPERFECT: structure present but no partial progress
+    if structure_present:
+        return "STRUCTURALLY_VALID_BUT_IMPERFECT"
+
+    # LOW_PRIORITY_VALID: catch-all for alertable signals without structure
+    return "LOW_PRIORITY_VALID"
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.7B: Context-aware overhead label
 # ---------------------------------------------------------------------------
 
@@ -1378,11 +1472,16 @@ def format_alert(
             f"Upgrade trigger:    {upgrade_trigger}",
         ]
 
+    # Phase 13.8A: setup quality diagnostic (informational; no tier/capital effect)
+    quality_label  = _evaluate_setup_quality(signal, final_tier)
+    quality_phrase = _QUALITY_LABEL_PHRASES.get(quality_label, quality_label)
+
     lines += [
         "──────────────────────────────",
         "ACTION",
         f"  {action_headline}",
         f"  {sizing_line}",
+        f"  Quality read: {quality_phrase}",
         f"  Next: {next_action}",
         f"  Why:  {reason}",
     ]
