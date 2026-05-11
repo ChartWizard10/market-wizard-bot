@@ -1124,7 +1124,7 @@ def _apply_narrative_sovereignty_guard(
     if risk_realism_state == "fragile":
         result = _apply_sovereignty_rules(result, _SOVEREIGN_FRAGILE_COMPILED)
         # Inject caution note into RISK REALISM section if not already present.
-        caution_markers = ("compressed", "execution sensitiv", "risk is fragile")
+        caution_markers = ("compressed", "execution sensitiv", "is fragile")
         if not any(m in result.lower() for m in caution_markers):
             fragile_line = "  Risk state:     fragile"
             if fragile_line in result:
@@ -1524,7 +1524,7 @@ def format_alert(
         _hold_s     = str(signal.get("hold_status",   "")).lower().strip()
         if _retest_s == "confirmed" and _hold_s == "confirmed":
             next_action = re.sub(
-                r"\benter\s+on\s+retest\b",
+                r"\benter\s+on\s+retest(?:\s+of\s+(?:the\s+)?zone)?\b",
                 "monitor for blocker resolution",
                 next_action,
                 flags=re.IGNORECASE,

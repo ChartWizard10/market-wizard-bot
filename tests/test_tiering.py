@@ -1393,9 +1393,11 @@ def test_12b_snipe_and_starter_gates_unchanged():
 from src.tiering import _classify_risk_realism
 
 
-# 12C-1 / 13.7A: Tiny risk distance → fragile state. Phase 13.7A blocks SNIPE_IT.
+# 12C-1 / 13.7A / 13.9A: Tiny risk distance → fragile state.
+# Phase 13.7A blocks SNIPE_IT; Phase 13.9A extends the fragile gate to STARTER.
 # trigger=100.00, invalidation=99.70 → risk_distance_pct=0.30% < 0.35% floor.
-# All other SNIPE_IT gates pass, so cascade stops at STARTER.
+# _snipe_signal has missing_conditions=[] and upgrade_trigger="none", so NEAR_ENTRY
+# gate also fails → final cascade is WAIT.
 def test_12c_valid_geometry_tiny_stop_gets_fragile_risk_state():
     signal = _snipe_signal(
         trigger_level=100.00,
@@ -1409,8 +1411,10 @@ def test_12c_valid_geometry_tiny_stop_gets_fragile_risk_state():
     # Risk realism field still reports fragile (informational layer unchanged)
     assert fs["risk_realism_state"] == "fragile"
     assert "fragile" in fs["risk_realism_note"].lower()
-    # Phase 13.7A: fragile stop now blocks SNIPE_IT → cascade to STARTER
-    assert result["final_tier"] == "STARTER"
+    # Phase 13.9A: fragile gate now also blocks STARTER. Signal has no valid
+    # NEAR_ENTRY conditions (missing_conditions=[], upgrade_trigger="none"),
+    # so cascade exhausts all tiers → WAIT.
+    assert result["final_tier"] == "WAIT"
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "fragile" in downgrade_text.lower()
     assert "snipe_it" in downgrade_text.lower()
@@ -2128,7 +2132,9 @@ def test_12_3a_starter_and_snipe_unchanged():
 # risk_reward=73.80 — all other SNIPE_IT gates passed; bot classified SNIPE_IT.
 
 
-# 13.7A-1: CSX-style fixture — microscopic stop → SNIPE_IT blocked → STARTER
+# 13.7A-1 / 13.9A: CSX-style fixture — microscopic stop → SNIPE_IT and STARTER blocked.
+# Phase 13.9A extended fragile gate to STARTER. _snipe_signal has missing_conditions=[]
+# and upgrade_trigger="none" → NEAR_ENTRY also fails → WAIT.
 def test_13_7a_csx_style_fragile_stop_blocks_snipe_it():
     # risk_distance = 44.70 - 44.68 = 0.02, pct ≈ 0.045% → far below 0.35% floor
     signal = _snipe_signal(
@@ -2140,8 +2146,8 @@ def test_13_7a_csx_style_fragile_stop_blocks_snipe_it():
         reason="Clean MSS with confirmed FVG retest and hold.",
     )
     result = validate(signal, _pf(), _BASE_CONFIG)
-    # SNIPE_IT must be blocked; STARTER cascade should succeed (score=90 > 75)
-    assert result["final_tier"] == "STARTER"
+    # Both SNIPE_IT and STARTER blocked by fragile gate; WAIT is the final tier.
+    assert result["final_tier"] == "WAIT"
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "fragile" in downgrade_text.lower()
     assert "snipe_it" in downgrade_text.lower()
@@ -2181,7 +2187,8 @@ def test_13_7a_stop_above_threshold_is_not_blocked():
     assert "fragile" not in downgrade_text.lower()
 
 
-# 13.7A-4: Just below threshold (0.34%) → blocked
+# 13.7A-4 / 13.9A: Just below threshold (0.34%) → SNIPE_IT and STARTER blocked.
+# Phase 13.9A: fragile gate blocks STARTER too. No valid NE conditions → WAIT.
 def test_13_7a_stop_just_below_threshold_is_blocked():
     # trigger=100.00, invalidation=99.66 → risk_distance=0.34, pct=0.34% < 0.35%
     signal = _snipe_signal(
@@ -2191,18 +2198,18 @@ def test_13_7a_stop_just_below_threshold_is_blocked():
         risk_reward=4.0,
     )
     result = validate(signal, _pf(), _BASE_CONFIG)
-    # SNIPE_IT blocked; STARTER passes (score=90 > 75, no fragile check in starter gate)
-    assert result["final_tier"] == "STARTER"
+    # SNIPE_IT blocked; STARTER blocked (fragile); NEAR_ENTRY blocked (no conditions) → WAIT
+    assert result["final_tier"] == "WAIT"
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "fragile" in downgrade_text.lower()
 
 
-# 13.7A-5: Fragile stop + other SNIPE_IT failures → cascade to NEAR_ENTRY or WAIT
-# If all SNIPE_IT conditions pass except fragile, starter can still accept the trade.
-# But if STARTER also fails (e.g. score too low), it cascades further.
-def test_13_7a_fragile_stop_plus_low_score_cascades_to_near_entry():
-    # score=77 passes STARTER (>75) but not SNIPE_IT (>85)
-    # risk_distance_pct=0.30% < 0.35% adds the fragile failure to snipe gate
+# 13.7A-5 / 13.9A: Fragile stop + low score → both SNIPE_IT and STARTER blocked.
+# Phase 13.9A: fragile gate applies to STARTER regardless of score. No valid NE
+# conditions in _snipe_signal → WAIT.
+def test_13_7a_fragile_stop_plus_low_score_cascades_to_wait():
+    # score=77 is above STARTER floor (75) but fragile gate blocks STARTER too.
+    # risk_distance_pct=0.30% < 0.35% triggers fragile gate for both tiers.
     signal = _snipe_signal(
         trigger_level=100.00,
         invalidation_level=99.70,
@@ -2211,11 +2218,13 @@ def test_13_7a_fragile_stop_plus_low_score_cascades_to_near_entry():
         risk_reward=4.0,
     )
     result = validate(signal, _pf(), _BASE_CONFIG)
-    # SNIPE_IT: fails (score < 85 AND fragile risk)
-    # STARTER: passes (score=77 > 75, no fragile check in starter gate)
-    assert result["final_tier"] == "STARTER"
+    # SNIPE_IT: blocked (score < 85 AND fragile)
+    # STARTER:  blocked (fragile gate fires regardless of score)
+    # NEAR_ENTRY: blocked (missing_conditions=[], upgrade_trigger="none")
+    assert result["final_tier"] == "WAIT"
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "snipe_it" in downgrade_text.lower()
+    assert "fragile" in downgrade_text.lower()
 
 
 # 13.7A-6: NEAR_ENTRY signal with fragile geometry — fragile gate never fires
