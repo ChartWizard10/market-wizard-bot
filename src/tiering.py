@@ -372,6 +372,28 @@ def _starter_gate_failures(
     if score < min_score:
         failures.append(f"score={score} < starter_min_score={min_score}")
 
+    # Phase 13.9A: Fragile risk window blocks STARTER / reduced-size capital.
+    # A microscopic stop inflates R:R arithmetically without real risk absorption
+    # capacity — the same fake-asymmetry that blocks SNIPE_IT applies equally
+    # to reduced-size entries. Mirrors _snipe_gate_failures fragile check.
+    _trig = signal.get("trigger_level")
+    _inval = signal.get("invalidation_level")
+    if _trig is not None and _inval is not None:
+        try:
+            _t = float(_trig)
+            _i = float(_inval)
+            _risk_dist = _t - _i
+            if _t != 0 and _risk_dist > 0:
+                _risk_dist_pct = _risk_dist / abs(_t) * 100
+                _min_risk_pct = tier_cfg.get("min_risk_distance_pct", 0.35)
+                if _risk_dist_pct < _min_risk_pct:
+                    failures.append(
+                        f"risk_window=fragile (risk_distance_pct={_risk_dist_pct:.3f}%"
+                        f" < min={_min_risk_pct}%); fake-asymmetry risk blocks STARTER"
+                    )
+        except (TypeError, ValueError):
+            pass
+
     return failures
 
 

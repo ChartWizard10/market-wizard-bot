@@ -578,7 +578,12 @@ def test_existing_phase136_language_tests_still_pass():
 
 
 def test_existing_phase137a_fragile_rr_tests_still_pass():
-    """Phase 13.7A fragile risk governor still operates correctly."""
+    """Phase 13.7A / 13.9A fragile risk governor operates correctly on SNIPE_IT and STARTER.
+
+    Phase 13.9A extended the fragile gate to STARTER. CSX-style signal has
+    missing_conditions=[] and upgrade_trigger='none', so NEAR_ENTRY also fails.
+    Full cascade: SNIPE_IT → STARTER (fragile) → NEAR_ENTRY (no conditions) → WAIT.
+    """
     from src.tiering import validate
 
     _BASE_CONFIG = {
@@ -589,7 +594,7 @@ def test_existing_phase137a_fragile_rr_tests_still_pass():
         }
     }
 
-    # CSX-style: fragile stop must block SNIPE_IT → cascade to STARTER
+    # CSX-style: fragile stop blocks SNIPE_IT and STARTER → no valid NE conditions → WAIT
     signal = {
         "ticker": "CSX",
         "timestamp_et": "2025-01-15T10:30:00-05:00",
@@ -617,6 +622,6 @@ def test_existing_phase137a_fragile_rr_tests_still_pass():
         "reason": "Clean MSS with FVG retest and hold.",
     }
     result = validate(signal, {"veto_flags": []}, _BASE_CONFIG)
-    assert result["final_tier"] == "STARTER"
+    assert result["final_tier"] == "WAIT"
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "fragile" in downgrade_text.lower()
