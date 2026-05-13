@@ -1665,6 +1665,10 @@ def format_alert(
     quality_label  = _evaluate_setup_quality(signal, final_tier)
     quality_phrase = _build_quality_phrase(quality_label, signal, final_tier)
 
+    # Phase 14A: trajectory line (informational — never affects tier/capital/routing)
+    _trajectory      = tiering_result.get("trajectory") or {}
+    _trajectory_text = str(_trajectory.get("text", "")).strip()
+
     lines += [
         "──────────────────────────────",
         "ACTION",
@@ -1674,6 +1678,8 @@ def format_alert(
         f"  Next: {next_action}",
         f"  Why:  {reason}",
     ]
+    if _trajectory_text:
+        lines.append(f"  Trajectory:   {_trajectory_text}")
 
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
