@@ -24,6 +24,7 @@ from src import discord_alerts
 from src import indicators
 from src import market_data as market_data_mod
 from src import prefilter as prefilter_mod
+from src import score_calibration
 from src import state_store
 from src import tiering
 from src import trajectory as trajectory_mod
@@ -330,6 +331,16 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
             tiering_result["trajectory"] = {"label": "UNKNOWN", "text": ""}
+
+        # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
+        # capital_action, discord_channel, safe_for_alert, suppression, or dedup)
+        try:
+            tiering_result["calibration"] = score_calibration.calibrate_score(
+                tiering_result, config
+            )
+        except Exception as exc:
+            log.warning("CALIBRATION_ERROR: %s: %s", ticker, exc)
+            tiering_result["calibration"] = None
 
         # Step 7: Discord alert
         try:

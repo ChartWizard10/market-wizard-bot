@@ -1669,6 +1669,10 @@ def format_alert(
     _trajectory      = tiering_result.get("trajectory") or {}
     _trajectory_text = str(_trajectory.get("text", "")).strip()
 
+    # Phase 14B: score calibration line (audit-only — never mutates main Score field)
+    _calibration         = tiering_result.get("calibration") or {}
+    _calibration_display = str(_calibration.get("display_text", "")).strip()
+
     lines += [
         "──────────────────────────────",
         "ACTION",
@@ -1680,6 +1684,8 @@ def format_alert(
     ]
     if _trajectory_text:
         lines.append(f"  Trajectory:   {_trajectory_text}")
+    if _calibration_display:
+        lines.append(f"  Score realism: {_calibration_display}")
 
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
