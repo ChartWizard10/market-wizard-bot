@@ -26,6 +26,7 @@ from src import market_data as market_data_mod
 from src import prefilter as prefilter_mod
 from src import state_store
 from src import tiering
+from src import trajectory as trajectory_mod
 from src.claude_client import async_claude_scan, claude_call
 
 log = logging.getLogger(__name__)
@@ -320,6 +321,15 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("DEDUP_ERROR: %s: %s", ticker, exc)
             dedup_decision = {"should_alert": False, "reason": "dedup_error"}
+
+        # Step 6.5: Trajectory (informational — never affects tier, capital, or routing)
+        try:
+            tiering_result["trajectory"] = trajectory_mod.compute(
+                tiering_result, dedup_decision.get("previous_state")
+            )
+        except Exception as exc:
+            log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
+            tiering_result["trajectory"] = {"label": "UNKNOWN", "text": ""}
 
         # Step 7: Discord alert
         try:
