@@ -562,6 +562,135 @@ class TestDiscordIntegration:
 
 
 # ---------------------------------------------------------------------------
+# 13. Phase 14C patch regressions — P1 (tight → -1) and P3 (UPGRADING +2→+1)
+# ---------------------------------------------------------------------------
+
+class TestPhase14CPatch:
+    # ---- P1: "tight" risk state now penalized ---------------------------------
+
+    def test_tight_in_risk_adj_dict(self):
+        from src.score_calibration import _RISK_ADJ
+        assert "tight" in _RISK_ADJ
+        assert _RISK_ADJ["tight"] == -1
+
+    def test_tight_risk_penalized_vs_healthy(self):
+        healthy = sc.calibrate_score(_make_tr(final_tier="SNIPE_IT", score=88,
+                                               risk_realism_state="healthy",
+                                               overhead_status="clear"))
+        tight   = sc.calibrate_score(_make_tr(final_tier="SNIPE_IT", score=88,
+                                               risk_realism_state="tight",
+                                               overhead_status="clear"))
+        assert tight["calibrated_score"] < healthy["calibrated_score"]
+        # Exactly 1 point difference (the tight penalty)
+        assert healthy["calibrated_score"] - tight["calibrated_score"] == 1
+
+    def test_tight_risk_penalty_matches_elevated(self):
+        tight    = sc.calibrate_score(_make_tr(final_tier="SNIPE_IT", score=87,
+                                                risk_realism_state="tight",
+                                                overhead_status="clear"))
+        elevated = sc.calibrate_score(_make_tr(final_tier="SNIPE_IT", score=87,
+                                                risk_realism_state="elevated",
+                                                overhead_status="clear"))
+        assert tight["calibrated_score"] == elevated["calibrated_score"]
+
+    def test_tight_risk_near_entry_penalized(self):
+        healthy = sc.calibrate_score(_make_tr(final_tier="NEAR_ENTRY", score=72,
+                                               risk_realism_state="healthy",
+                                               overhead_status="clear",
+                                               missing_conditions=["x"]))
+        tight   = sc.calibrate_score(_make_tr(final_tier="NEAR_ENTRY", score=72,
+                                               risk_realism_state="tight",
+                                               overhead_status="clear",
+                                               missing_conditions=["x"]))
+        assert tight["calibrated_score"] < healthy["calibrated_score"]
+
+    def test_tight_risk_does_not_block_alert_or_tier(self):
+        # P1 is calibration only — must not touch tier, capital, or safe_for_alert
+        tr = _make_tr(final_tier="SNIPE_IT", score=88, risk_realism_state="tight")
+        sc.calibrate_score(tr)
+        assert tr["final_tier"] == "SNIPE_IT"
+        assert tr["capital_action"] == "full_quality_allowed"
+        assert tr["safe_for_alert"] is True
+
+    # ---- P3: UPGRADING trajectory bonus reduced from +2 to +1 ---------------
+
+    def test_upgrading_in_trajectory_adj_is_one(self):
+        from src.score_calibration import _TRAJECTORY_ADJ
+        assert _TRAJECTORY_ADJ["UPGRADING"] == 1
+
+    def test_upgrading_bonus_is_plus_one_vs_repeated(self):
+        # Isolate trajectory effect: use structure=none (-1) to avoid elite-cap
+        # interference; compare UPGRADING vs REPEATED_NO_CHANGE on identical setup.
+        repeated  = sc.calibrate_score(_make_tr(score=84, trajectory_label="REPEATED_NO_CHANGE",
+                                                  overhead_status="clear", structure_event="none"))
+        upgrading = sc.calibrate_score(_make_tr(score=84, trajectory_label="UPGRADING",
+                                                  overhead_status="clear", structure_event="none"))
+        # After P3: UPGRADING gives exactly 1 more than REPEATED (reduced from 2)
+        assert upgrading["calibrated_score"] - repeated["calibrated_score"] == 1
+
+    def test_upgrading_and_improving_give_equal_bonus(self):
+        # After P3: UPGRADING = +1, IMPROVING = +1 — same trajectory bonus
+        improving = sc.calibrate_score(_make_tr(score=84, trajectory_label="IMPROVING",
+                                                  overhead_status="clear", structure_event="none"))
+        upgrading = sc.calibrate_score(_make_tr(score=84, trajectory_label="UPGRADING",
+                                                  overhead_status="clear", structure_event="none"))
+        assert upgrading["calibrated_score"] == improving["calibrated_score"]
+
+    def test_upgrading_elite_setup_still_reaches_90(self):
+        # Promotion should still reach elite when all preconditions are met.
+        # +1 clear +1 MSS +1 UPGRADING = +3 → 91 (elite-eligible)
+        cal = sc.calibrate_score(_make_tr(
+            final_tier="SNIPE_IT", score=88,
+            risk_realism_state="healthy", overhead_status="clear",
+            retest_status="confirmed", hold_status="confirmed",
+            structure_event="MSS", trajectory_label="UPGRADING",
+        ))
+        assert cal["calibrated_score"] >= 90
+
+    def test_upgrading_does_not_mutate_tier_or_capital(self):
+        tr = _make_tr(final_tier="SNIPE_IT", score=87, trajectory_label="UPGRADING")
+        sc.calibrate_score(tr)
+        assert tr["final_tier"] == "SNIPE_IT"
+        assert tr["capital_action"] == "full_quality_allowed"
+        assert tr["safe_for_alert"] is True
+
+    # ---- Combined P1 + P3 interaction ----------------------------------------
+
+    def test_mod_style_tight_overhead_no_longer_masks_risk(self):
+        # MOD pattern: SNIPE_IT, tight risk, moderate overhead, REPEATED.
+        # Before P1: risk contributed 0. After P1: risk contributes -1.
+        # Combined: -1 (tight) + -2 (moderate) + +1 (BOS) = -2 → 86 (was -1 → 87)
+        cal = sc.calibrate_score(_make_tr(
+            final_tier="SNIPE_IT", score=88,
+            risk_realism_state="tight",
+            overhead_status="moderate",
+            structure_event="BOS",
+            trajectory_label="REPEATED_NO_CHANGE",
+        ))
+        assert cal["calibrated_score"] == 86
+        assert cal["delta"] == -2
+
+    def test_mksi_style_promotion_ordering_gap_reduced(self):
+        # MKSI-like: SNIPE_IT, healthy, clear, UPGRADING, raw=88
+        # After P3: +1(clear) +1(MSS) +1(UPGRADING) = +3 → 91
+        # IREN-like: SNIPE_IT, healthy, clear, REPEATED, raw=88
+        # After P3: +1(clear) +1(MSS) +0(REPEATED) = +2 → 90
+        mksi_like = sc.calibrate_score(_make_tr(
+            final_tier="SNIPE_IT", score=88,
+            risk_realism_state="healthy", overhead_status="clear",
+            structure_event="MSS", trajectory_label="UPGRADING",
+        ))
+        iren_like = sc.calibrate_score(_make_tr(
+            final_tier="SNIPE_IT", score=88,
+            risk_realism_state="healthy", overhead_status="clear",
+            structure_event="MSS", trajectory_label="REPEATED_NO_CHANGE",
+        ))
+        # Gap reduced: was 2 points (92 vs 90), now 1 point (91 vs 90)
+        gap = mksi_like["calibrated_score"] - iren_like["calibrated_score"]
+        assert gap == 1
+
+
+# ---------------------------------------------------------------------------
 # 12. Sanity: full test suite still passes (smoke-level check on imports)
 # ---------------------------------------------------------------------------
 

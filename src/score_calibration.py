@@ -32,9 +32,13 @@ _ELITE_SCORE_FLOOR =  90
 _ELITE_CAP         =  89
 
 # Risk realism state → adjustment
+# Phase 14C P1: "tight" added at -1 (same as "elevated")
+# Previously missing from dict — tight state received zero penalty,
+# same as healthy/normal, which is incorrect.
 _RISK_ADJ = {
     "healthy":  0,
     "normal":   0,
+    "tight":   -1,
     "elevated": -1,
     "fragile":  -3,
 }
@@ -54,8 +58,11 @@ _OVERHEAD_ADJ_WATCH = {          # NEAR_ENTRY
 }
 
 # Trajectory label → adjustment
+# Phase 14C P3: UPGRADING reduced from +2 to +1.
+# +2 allowed a merely-promoted setup to outrank a structurally stronger
+# repeated setup when combined with path and structure bonuses.
 _TRAJECTORY_ADJ = {
-    "UPGRADING":          +2,
+    "UPGRADING":          +1,
     "IMPROVING":          +1,
     "NEW_SIGNAL":          0,
     "REPEATED_NO_CHANGE":  0,
