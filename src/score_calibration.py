@@ -296,6 +296,8 @@ def _humanize_reason(name: str, delta: int, band: str) -> str:
             return "risk window is fragile"
         if state == "elevated":
             return "risk window is tight"
+        if state == "tight":
+            return "risk window is tight"
         return f"risk={state}"
     if name.startswith("overhead="):
         state = name.split("=", 1)[1]
