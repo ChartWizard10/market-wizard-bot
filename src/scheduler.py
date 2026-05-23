@@ -24,6 +24,7 @@ from src import discord_alerts
 from src import indicators
 from src import market_data as market_data_mod
 from src import prefilter as prefilter_mod
+from src import campaign_store
 from src import score_calibration
 from src import state_store
 from src import tiering
@@ -128,6 +129,7 @@ async def run_scan_pipeline(
     client,
     scan_id: str = "",
     is_manual: bool = False,
+    campaign_state: dict | None = None,
 ) -> dict:
     """Execute the full scan pipeline for the given ticker list.
 
@@ -138,6 +140,9 @@ async def run_scan_pipeline(
     """
     if not scan_id:
         scan_id = _make_scan_id()
+
+    if campaign_state is None:
+        campaign_state = campaign_store.load(config)
 
     started_at = datetime.utcnow().isoformat()
     start_ts   = datetime.utcnow()
@@ -314,6 +319,16 @@ async def run_scan_pipeline(
         final_tier = tiering_result.get("final_tier", "WAIT")
         final_tier_counts[final_tier] = final_tier_counts.get(final_tier, 0) + 1
 
+        # Step 5.5: Campaign identity — anchors dedup to structure, not trigger drift
+        try:
+            enriched_for_campaign = enriched_map.get(ticker, {})
+            cid = campaign_store.resolve(tiering_result, enriched_for_campaign, campaign_state)
+            campaign_store.register_seen(cid, tiering_result, enriched_for_campaign, campaign_state)
+            tiering_result["campaign_id"] = cid
+        except Exception as exc:
+            log.warning("CAMPAIGN_ID_ERROR: %s: %s", ticker, exc)
+            tiering_result["campaign_id"] = None
+
         # Step 6: Dedup check
         try:
             dedup_decision = state_store.check_alert(
@@ -370,6 +385,11 @@ async def run_scan_pipeline(
         state_store.save(state, config)
     except Exception as exc:
         log.critical("CRITICAL: state write failed: %s", exc)
+
+    try:
+        campaign_store.save(campaign_state, config)
+    except Exception as exc:
+        log.critical("CRITICAL: campaign state write failed: %s", exc)
 
     ended_at         = datetime.utcnow().isoformat()
     duration_seconds = (datetime.utcnow() - start_ts).total_seconds()
@@ -543,6 +563,17 @@ async def run_analyze(
         # Tiering (cannot be bypassed)
         tiering_result = tiering.validate(cr["signal"], pf_res, config)
         final_tier     = tiering_result.get("final_tier", "WAIT")
+
+        # Campaign identity
+        try:
+            cs = campaign_store.load(config)
+            cid = campaign_store.resolve(tiering_result, enriched, cs)
+            campaign_store.register_seen(cid, tiering_result, enriched, cs)
+            tiering_result["campaign_id"] = cid
+            campaign_store.save(cs, config)
+        except Exception as exc:
+            log.warning("CAMPAIGN_ID_ERROR in !analyze %s: %s", ticker, exc)
+            tiering_result["campaign_id"] = None
 
         # State + dedup — manual_override=True bypasses cooldown
         state = state_store.load(config)

@@ -83,3 +83,9 @@ state:
   max_memory_entries: 500
   persist_to_file: true
   state_file: ".state/alert_history.json"
+
+campaign:
+  campaign_file: "data/campaign_state.json"
+  zone_tolerance_pct: 0.5
+  invalidation_tolerance_pct: 0.5
+  max_campaign_entries: 2000

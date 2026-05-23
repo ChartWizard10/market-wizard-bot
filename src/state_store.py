@@ -53,8 +53,16 @@ def make_dedup_key(
     tier: str,
     trigger_level,
     invalidation_level,
+    campaign_id: str | None = None,
 ) -> str:
-    """Build a normalized dedup key: ticker|tier|trigger|invalidation."""
+    """Build a normalized dedup key.
+
+    When campaign_id is present: ticker|tier|campaign_id.
+    Fallback (no campaign_id): ticker|tier|trigger|invalidation (legacy behavior).
+    """
+    if campaign_id:
+        return f"{ticker}|{tier}|{campaign_id}"
+
     def _fmt(v) -> str:
         if v is None:
             return "null"
@@ -186,11 +194,12 @@ def check_alert(
     safe          = tiering_result.get("safe_for_alert", False)
     final_signal  = tiering_result.get("final_signal") or {}
 
-    ticker            = final_signal.get("ticker") or tiering_result.get("ticker", "UNKNOWN")
-    trigger_level     = final_signal.get("trigger_level")
+    ticker             = final_signal.get("ticker") or tiering_result.get("ticker", "UNKNOWN")
+    trigger_level      = final_signal.get("trigger_level")
     invalidation_level = final_signal.get("invalidation_level")
+    campaign_id        = final_signal.get("campaign_id") or tiering_result.get("campaign_id")
 
-    dedup_key    = make_dedup_key(ticker, final_tier, trigger_level, invalidation_level)
+    dedup_key    = make_dedup_key(ticker, final_tier, trigger_level, invalidation_level, campaign_id)
     ticker_state = state.get("tickers", {}).get(ticker)
 
     # ---- Hard blocks (not bypassable) ----
@@ -218,19 +227,30 @@ def check_alert(
     last_trigger      = ticker_state.get("last_trigger_level")
     last_invalidation = ticker_state.get("last_invalidation_level")
     last_alerted_at   = ticker_state.get("last_alerted_at")
+    last_campaign_id  = ticker_state.get("last_campaign_id")
     in_cooldown       = _within_cooldown(last_alerted_at, cooldown_minutes)
 
     # ---- Re-alert rules (apply before cooldown check) ----
 
-    # Tier improvement
+    # Tier improvement always re-alerts regardless of campaign state
     if _tier_rank(final_tier) > _tier_rank(last_tier):
         return _yes_alert("tier_improved", dedup_key, ticker_state)
 
-    # Material trigger change
+    # Campaign-aware path: campaign_id present on both sides
+    if campaign_id and last_campaign_id:
+        if campaign_id != last_campaign_id:
+            # Structural thesis changed — new campaign identity
+            return _yes_alert("new_campaign", dedup_key, ticker_state)
+        # Same structural campaign: trigger drift is suppressed entirely.
+        # Cooldown governs re-alert within a live campaign.
+        if in_cooldown:
+            return _no_alert("duplicate_suppressed", dedup_key, ticker_state)
+        return _yes_alert("cooldown_expired", dedup_key, ticker_state)
+
+    # Legacy fallback: campaign_id absent on either side — preserve prior behavior
     if _is_material_change(last_trigger, trigger_level, trigger_pct):
         return _yes_alert("trigger_changed", dedup_key, ticker_state)
 
-    # Material invalidation change
     if _is_material_change(last_invalidation, invalidation_level, inval_pct):
         return _yes_alert("invalidation_changed", dedup_key, ticker_state)
 
@@ -263,11 +283,14 @@ def record_alert(
     score        = tiering_result.get("score", 0)
     final_signal = tiering_result.get("final_signal") or {}
 
-    trigger_level     = final_signal.get("trigger_level")
+    trigger_level      = final_signal.get("trigger_level")
     invalidation_level = final_signal.get("invalidation_level")
-    reason            = final_signal.get("reason", "")
-    now               = datetime.utcnow().isoformat()
-    dedup_key         = make_dedup_key(ticker, final_tier, trigger_level, invalidation_level)
+    campaign_id        = final_signal.get("campaign_id") or tiering_result.get("campaign_id")
+    reason             = final_signal.get("reason", "")
+    now                = datetime.utcnow().isoformat()
+    dedup_key          = make_dedup_key(
+        ticker, final_tier, trigger_level, invalidation_level, campaign_id
+    )
 
     tickers      = state.setdefault("tickers", {})
     ticker_state = tickers.setdefault(ticker, {
@@ -333,6 +356,7 @@ def record_alert(
         "last_alerted_at":          now,
         "last_trigger_level":       trigger_level,
         "last_invalidation_level":  invalidation_level,
+        "last_campaign_id":         campaign_id,
         "last_score":               score,
         "last_reason":              reason,
         "last_discord_channel":     final_channel,

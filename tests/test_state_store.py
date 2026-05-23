@@ -879,3 +879,81 @@ def test_record_alert_no_live_behavior_keywords():
         assert keyword not in joined, (
             f"Forbidden live-behavior keyword {keyword!r} found in state_store.py"
         )
+
+
+# ---------------------------------------------------------------------------
+# Campaign identity integration — C1
+# ---------------------------------------------------------------------------
+
+class TestCampaignIdentityDedup:
+    """State store correctly uses campaign_id when present."""
+
+    def _state_with_campaign(self, ticker="STRL", campaign_id="STRL|continuation|ob|728.0000|728.2900"):
+        return {
+            "tickers": {
+                ticker: {
+                    "last_alerted_tier":       "SNIPE_IT",
+                    "last_alerted_at":         _recent(5),
+                    "last_trigger_level":      733.57,
+                    "last_invalidation_level": 728.29,
+                    "last_campaign_id":        campaign_id,
+                    "last_score":              88,
+                    "last_reason":             "prior alert",
+                    "last_discord_channel":    "#snipe-signals",
+                    "last_dedup_key":          f"STRL|SNIPE_IT|{campaign_id}",
+                    "scan_id":                 "s1",
+                    "alert_history":           [],
+                }
+            },
+            "meta": {"total_alerts": 1},
+        }
+
+    def _tiering_with_campaign(self, ticker="STRL", trigger=732.81, campaign_id="STRL|continuation|ob|728.0000|728.2900"):
+        return {
+            "final_tier": "SNIPE_IT",
+            "final_discord_channel": "#snipe-signals",
+            "safe_for_alert": True,
+            "score": 88,
+            "campaign_id": campaign_id,
+            "final_signal": {
+                "ticker": ticker,
+                "tier": "SNIPE_IT",
+                "trigger_level": trigger,
+                "invalidation_level": 728.29,
+                "campaign_id": campaign_id,
+                "score": 88,
+                "reason": "test",
+                "discord_channel": "#snipe-signals",
+            },
+        }
+
+    def test_dedup_key_uses_campaign_id_when_present(self):
+        from src.state_store import make_dedup_key
+        key = make_dedup_key("STRL", "SNIPE_IT", 732.81, 728.29, "STRL|continuation|ob|728.0000|728.2900")
+        assert "STRL|SNIPE_IT|STRL|continuation|ob|728.0000|728.2900" == key
+
+    def test_dedup_key_fallback_without_campaign_id(self):
+        from src.state_store import make_dedup_key
+        key = make_dedup_key("STRL", "SNIPE_IT", 732.81, 728.29, None)
+        assert key == "STRL|SNIPE_IT|732.81|728.29"
+
+    def test_trigger_drift_suppressed_same_campaign(self):
+        """Same campaign_id, trigger drifts by > threshold — must NOT re-alert."""
+        state = self._state_with_campaign()
+        # New trigger 734.81 — old was 733.57, delta = 1.24 / 733.57 = 0.169% > 0.25% would fire under legacy
+        # but with campaign_id present and same → duplicate_suppressed
+        tiering = self._tiering_with_campaign(trigger=734.81)
+        cfg = _cfg(cooldown=240, trigger_pct=0.25, inval_pct=0.25)
+        result = check_alert(tiering, state, cfg)
+        assert result["should_alert"] is False
+        assert result["reason"] == "duplicate_suppressed"
+
+    def test_new_campaign_id_re_alerts(self):
+        """Different campaign_id → new_campaign reason → should alert."""
+        state = self._state_with_campaign(campaign_id="STRL|continuation|ob|728.0000|728.2900")
+        new_cid = "STRL|continuation|ob|715.0000|714.5000"
+        tiering = self._tiering_with_campaign(campaign_id=new_cid)
+        cfg = _cfg(cooldown=240)
+        result = check_alert(tiering, state, cfg)
+        assert result["should_alert"] is True
+        assert result["reason"] == "new_campaign"
