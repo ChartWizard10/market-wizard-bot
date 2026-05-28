@@ -1512,3 +1512,95 @@ def test_12_3a_pvh_starter_language_preserved():
     # Phase 12.2 regression: NEAR_ENTRY removes SNIPE language from reason
     clean = _sanitize_reason_for_tier("All SNIPE_IT conditions satisfied.", "NEAR_ENTRY")
     assert "snipe_it" not in clean.lower()
+
+
+# ---------------------------------------------------------------------------
+# Exit strategy tests
+# ---------------------------------------------------------------------------
+
+def test_snipe_it_exit_strategy_renders_tp1_tp2_tp3():
+    """SNIPE_IT alert with T1/T2/T3 targets renders TP1, TP2, TP3 and hard stop."""
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        score=88,
+        targets=[
+            {"label": "T1", "level": 195.00, "reason": "Prior swing high"},
+            {"label": "T2", "level": 204.50, "reason": "Range extension"},
+            {"label": "T3", "level": 215.00, "reason": "HTF target"},
+        ],
+        invalidation_level=178.20,
+        invalidation_condition="Daily close below FVG base",
+    )
+    text = format_alert(tr)
+    assert "EXIT STRATEGY" in text
+    assert "TP1: 195.00" in text
+    assert "TP2: 204.50" in text
+    assert "TP3: 215.00" in text
+    assert "178.20" in text
+    assert "Hard stop:" in text
+    assert "Trail:" in text
+
+
+def test_missing_tp2_tp3_shows_dash_not_invented():
+    """When only T1 is present, TP2 and TP3 show '—' and no values are invented."""
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        score=88,
+        targets=[{"label": "T1", "level": 195.00, "reason": "Prior swing high"}],
+        invalidation_level=178.20,
+    )
+    text = format_alert(tr)
+    assert "EXIT STRATEGY" in text
+    assert "TP1: 195.00" in text
+    # TP2 and TP3 must show dash, not an invented number
+    assert "TP2: —" in text
+    assert "TP3: —" in text
+
+
+def test_starter_exit_strategy_uses_reduced_size_language():
+    """STARTER alert shows starter-appropriate exit language (no full-size references)."""
+    tr = _tiering_result(
+        tier="STARTER",
+        score=80,
+        targets=[
+            {"label": "T1", "level": 195.00, "reason": "Prior swing high"},
+            {"label": "T2", "level": 204.50, "reason": "Range extension"},
+        ],
+        invalidation_level=178.20,
+    )
+    tr["final_tier"] = "STARTER"
+    tr["final_discord_channel"] = "#starter-signals"
+    text = format_alert(tr)
+    assert "EXIT STRATEGY" in text
+    assert "TP1: 195.00" in text
+    assert "TP2: 204.50" in text
+    assert "starter size" in text.lower()
+    assert "Hard stop:" in text
+    # Must not claim full capital authorization
+    assert "capital authorized" not in text.lower()
+
+
+def test_near_entry_exit_strategy_conditional_no_capital():
+    """NEAR_ENTRY alert shows conditional exit plan with no capital language."""
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        missing_conditions=["missing_retest"],
+        upgrade_trigger="Full zone retest with hold.",
+        targets=[{"label": "T1", "level": 195.00, "reason": "Prior swing high"}],
+        invalidation_level=178.20,
+        invalidation_condition="Below zone low",
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "EXIT STRATEGY" in text
+    assert "conditional" in text.lower()
+    assert "no capital" in text.lower()
+    assert "TP1 reference" in text
+    assert "Hard stop reference" in text
+    # Must not use full-capital language
+    assert "capital authorized" not in text.lower()
+    assert "full quality" not in text.lower()

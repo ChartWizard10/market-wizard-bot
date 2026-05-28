@@ -1459,6 +1459,69 @@ def _fmt_targets(targets) -> str:
     return "\n".join(lines)
 
 
+def _build_exit_strategy_lines(
+    targets: list,
+    inval_level,
+    inval_condition: str,
+    final_tier: str,
+) -> list[str]:
+    """Build EXIT STRATEGY section lines from existing computed fields only.
+
+    Maps T1→TP1, T2→TP2, T3→TP3 from the existing targets list.
+    Never invents target levels — absent TPs show "—".
+    Language is selected to pass all contract and sovereignty guards cleanly.
+    """
+    tp: dict[int, object] = {}
+    for t in (targets or []):
+        if not isinstance(t, dict):
+            continue
+        lbl = str(t.get("label", "")).strip().upper()
+        if lbl == "T1" and 1 not in tp:
+            tp[1] = t.get("level")
+        elif lbl == "T2" and 2 not in tp:
+            tp[2] = t.get("level")
+        elif lbl == "T3" and 3 not in tp:
+            tp[3] = t.get("level")
+
+    tp1 = _fmt_level(tp.get(1))
+    tp2 = _fmt_level(tp.get(2)) if 2 in tp else "—"
+    tp3 = _fmt_level(tp.get(3)) if 3 in tp else "—"
+
+    inval_str = _fmt_level(inval_level)
+    _ic = (inval_condition or "").strip()
+    inval_desc = f" ({_ic})" if _ic and _ic not in ("—", "none", "None") else ""
+
+    lines: list[str] = [
+        "──────────────────────────────",
+        "EXIT STRATEGY",
+    ]
+
+    if final_tier == "SNIPE_IT":
+        lines += [
+            f"  TP1: {tp1}  — first trim, reduce risk.",
+            f"  TP2: {tp2}  — main profit-take / begin trail.",
+            f"  TP3: {tp3}  — runner extension only.",
+            f"  Hard stop: {inval_str}{inval_desc}",
+            "  Trail: active only after TP1 confirmed and structure holds.",
+        ]
+    elif final_tier == "STARTER":
+        lines += [
+            f"  TP1: {tp1}  — partial exit, starter size.",
+            f"  TP2: {tp2}  — exit remainder; no additions until upgrade confirmed.",
+            f"  TP3: {tp3}  — runner only if upgraded.",
+            f"  Hard stop: {inval_str}{inval_desc}",
+            "  Manage at starter size only.",
+        ]
+    elif final_tier == "NEAR_ENTRY":
+        lines += [
+            "  Exit plan: conditional — no capital until blocker resolves.",
+            f"  TP1 reference: {tp1}  (if entry triggered).",
+            f"  Hard stop reference: {inval_str}{inval_desc}",
+        ]
+
+    return lines
+
+
 def format_alert(
     tiering_result: dict,
     dedup_decision: dict | None = None,
@@ -1628,6 +1691,8 @@ def format_alert(
         "TARGETS",
         _fmt_targets(targets),
     ]
+
+    lines += _build_exit_strategy_lines(targets, inval_level, inval_condition, final_tier)
 
     # Phase 12.1: NEAR_ENTRY never displays forced participation — no capital context
     if final_tier != "NEAR_ENTRY" and forced_part and forced_part.lower() not in ("none", "—", ""):
