@@ -2257,3 +2257,52 @@ def test_13_7a_missing_invalidation_level_no_crash():
     # No crash; no "fragile" in downgrades (fragile gate skipped due to None)
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "fragile" not in downgrade_text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 14A: entry_acceptance stored in final_signal
+# ---------------------------------------------------------------------------
+
+# 14A-1: SNIPE_IT with price at trigger → acceptance "accepted" stored
+def test_entry_acceptance_stored_snipe_it_accepted():
+    signal = _snipe_signal(trigger_level=182.50, invalidation_level=178.20)
+    # current_price == trigger_level → accepted
+    result = validate(signal, _pf_with_price(182.50), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    fs = result["final_signal"]
+    assert "entry_acceptance" in fs, "entry_acceptance must be stored in final_signal"
+    assert fs["entry_acceptance"] == "accepted"
+
+
+# 14A-2: NEAR_ENTRY with price below trigger → acceptance "damaging" stored
+def test_entry_acceptance_stored_near_entry_damaging():
+    signal = _near_entry_signal(trigger_level=182.50)
+    # current_price below trigger → damaging
+    result = validate(signal, _pf_with_price(179.00), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    fs = result["final_signal"]
+    assert "entry_acceptance" in fs
+    assert fs["entry_acceptance"] == "damaging"
+
+
+# 14A-3: No current_price in key_features → acceptance "unknown" stored
+def test_entry_acceptance_unknown_when_no_price():
+    signal = _snipe_signal()
+    result = validate(signal, _pf(), _BASE_CONFIG)  # _pf() has no key_features
+    assert result["final_tier"] == "SNIPE_IT"
+    fs = result["final_signal"]
+    assert "entry_acceptance" in fs
+    assert fs["entry_acceptance"] == "unknown"
+
+
+# 14A-4: Price below invalidation_level → acceptance "invalidated" stored
+def test_entry_acceptance_invalidated_when_below_stop():
+    signal = _snipe_signal(trigger_level=182.50, invalidation_level=178.20)
+    # current_price < invalidation_level → invalidated → WAIT
+    result = validate(signal, _pf_with_price(177.00), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", (
+        "Price below stop must force WAIT"
+    )
+    fs = result["final_signal"]
+    assert "entry_acceptance" in fs
+    assert fs["entry_acceptance"] == "invalidated"

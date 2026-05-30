@@ -1392,6 +1392,100 @@ def _evaluate_setup_quality(signal: dict, final_tier: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Entry Grade Engine — display-only entry quality classifier.
+# Answers: "Is this exact location worth capital right now?"
+# ---------------------------------------------------------------------------
+
+_ENTRY_GRADE_LABELS: dict[str, str] = {
+    "A_PLUS":     "A+ — sniper-grade location; precision criteria met.",
+    "A_GRADE":    "A — executable; confirmation criteria met.",
+    "B_DEFAULT":  "B — confirmed; entry precision imperfect.",
+    "B_UNPROVEN": "B — zone defense unconfirmed.",
+    "B_FRAGILE":  "B — risk window compressed.",
+    "B_OVERHEAD": "B — overhead path not clean.",
+    "B_CHASING":  "B — price extended above trigger.",
+    "B_WATCH":    "B — watch tier; conditions require further confirmation.",
+    "C_GRADE":    "C — price location adverse.",
+    "F_GRADE":    "F — retest or hold not confirmed.",
+}
+
+
+def _classify_entry_grade(signal: dict, final_tier: str) -> str:
+    """Classify entry quality. Display-only — never affects tier, capital, or routing.
+
+    Grade law (first match wins):
+      F  — retest or hold not confirmed
+      C  — acceptance damaging or invalidated
+      B  — ceiling: unproven, fragile risk, blocked overhead, or chasing > +2.0%
+      A+ — accepted, healthy risk, rr≥4.0, clear overhead, drift ≤+0.5%
+      A  — accepted, healthy/tight risk, rr≥3.0, clear/moderate overhead
+      B  — default for confirmed but imperfect
+    """
+    if final_tier == "WAIT":
+        return ""
+
+    retest     = str(signal.get("retest_status",   "missing") or "missing").lower().strip()
+    hold       = str(signal.get("hold_status",     "missing") or "missing").lower().strip()
+    acceptance = str(signal.get("entry_acceptance","unknown") or "unknown").lower().strip()
+    risk_state = str(signal.get("risk_realism_state","unknown") or "unknown").lower().strip()
+    overhead   = str(signal.get("overhead_status", "unknown") or "unknown").lower().strip()
+
+    rr: float | None = None
+    try:
+        raw_rr = signal.get("risk_reward")
+        if raw_rr is not None:
+            rr = float(raw_rr)
+    except (TypeError, ValueError):
+        pass
+
+    drift_pct: float | None = None
+    try:
+        raw_drift = signal.get("price_distance_to_trigger_pct")
+        if raw_drift is not None:
+            drift_pct = float(raw_drift)
+    except (TypeError, ValueError):
+        pass
+
+    if retest != "confirmed" or hold != "confirmed":
+        return _ENTRY_GRADE_LABELS["F_GRADE"]
+
+    if acceptance in ("damaging", "invalidated"):
+        return _ENTRY_GRADE_LABELS["C_GRADE"]
+
+    if acceptance == "unproven":
+        return _ENTRY_GRADE_LABELS["B_UNPROVEN"]
+    if risk_state == "fragile":
+        return _ENTRY_GRADE_LABELS["B_FRAGILE"]
+    if overhead == "blocked":
+        return _ENTRY_GRADE_LABELS["B_OVERHEAD"]
+    if drift_pct is not None and drift_pct > 2.0:
+        return _ENTRY_GRADE_LABELS["B_CHASING"]
+
+    # NEAR_ENTRY tier gate is active; capital not authorized regardless of conditions.
+    if final_tier == "NEAR_ENTRY":
+        return _ENTRY_GRADE_LABELS["B_WATCH"]
+
+    if (
+        acceptance == "accepted"
+        and risk_state == "healthy"
+        and rr is not None and rr >= 4.0
+        and overhead == "clear"
+        and drift_pct is not None and drift_pct <= 0.5
+    ):
+        return _ENTRY_GRADE_LABELS["A_PLUS"]
+
+    if (
+        acceptance == "accepted"
+        and risk_state in ("healthy", "tight")
+        and overhead in ("clear", "moderate")
+        and rr is not None and rr >= 3.0
+    ):
+        return _ENTRY_GRADE_LABELS["A_GRADE"]
+
+    return _ENTRY_GRADE_LABELS["B_DEFAULT"]
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.7B: Context-aware overhead label
 # ---------------------------------------------------------------------------
 
@@ -1730,6 +1824,9 @@ def format_alert(
     quality_label  = _evaluate_setup_quality(signal, final_tier)
     quality_phrase = _build_quality_phrase(quality_label, signal, final_tier)
 
+    # Entry grade — display-only; never affects tier, capital, or routing
+    entry_grade_phrase = _classify_entry_grade(signal, final_tier)
+
     # Phase 14A: trajectory line (informational — never affects tier/capital/routing)
     _trajectory      = tiering_result.get("trajectory") or {}
     _trajectory_text = str(_trajectory.get("text", "")).strip()
@@ -1744,6 +1841,10 @@ def format_alert(
         f"  {action_headline}",
         f"  {sizing_line}",
         f"  Quality read: {quality_phrase}",
+    ]
+    if entry_grade_phrase:
+        lines.append(f"  Entry grade: {entry_grade_phrase}")
+    lines += [
         f"  Next: {next_action}",
         f"  Why:  {reason}",
     ]

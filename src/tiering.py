@@ -1163,6 +1163,8 @@ def validate(
     final_signal["tier"] = final_tier
     final_signal["discord_channel"] = CHANNEL_MAP[final_tier]
     final_signal["capital_action"] = CAPITAL_MAP[final_tier]
+    # Entry acceptance stored for entry grade display layer (informational only; no gate effects).
+    final_signal["entry_acceptance"] = _classify_current_acceptance(working_signal, key_features)
 
     # Phase 12A: sanitize Claude prose so alerts cannot display tier-contradicting language
     final_signal["sanitized_reason"] = _sanitize_reason_for_tier(

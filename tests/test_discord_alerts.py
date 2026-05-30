@@ -13,6 +13,8 @@ from src.discord_alerts import (
     send_alert,
     _sanitize,
     _clean_blocker_label,
+    _classify_entry_grade,
+    _ENTRY_GRADE_LABELS,
 )
 
 
@@ -1603,4 +1605,304 @@ def test_near_entry_exit_strategy_conditional_no_capital():
     assert "Hard stop reference" in text
     # Must not use full-capital language
     assert "capital authorized" not in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 14A: Entry Grade Engine tests
+# ---------------------------------------------------------------------------
+
+def _grade_signal(**overrides) -> dict:
+    """Minimal signal dict for _classify_entry_grade unit tests."""
+    base = {
+        "retest_status": "confirmed",
+        "hold_status": "confirmed",
+        "entry_acceptance": "accepted",
+        "risk_realism_state": "healthy",
+        "overhead_status": "clear",
+        "risk_reward": 3.5,
+        "price_distance_to_trigger_pct": 0.3,
+    }
+    base.update(overrides)
+    return base
+
+
+# ---- Grade law: F cap (non-negotiable) ----
+
+def test_entry_grade_f_no_confirmed_retest():
+    """retest_status != confirmed → F regardless of other conditions."""
+    grade = _classify_entry_grade(_grade_signal(retest_status="partial"), "SNIPE_IT")
+    assert grade == _ENTRY_GRADE_LABELS["F_GRADE"]
+    assert "F" in grade
+
+
+def test_entry_grade_f_no_confirmed_hold():
+    """hold_status != confirmed → F regardless of other conditions."""
+    grade = _classify_entry_grade(_grade_signal(hold_status="missing"), "SNIPE_IT")
+    assert grade == _ENTRY_GRADE_LABELS["F_GRADE"]
+    assert "F" in grade
+
+
+def test_entry_grade_f_both_unconfirmed():
+    """Both retest and hold missing → F."""
+    grade = _classify_entry_grade(
+        _grade_signal(retest_status="missing", hold_status="missing"), "STARTER"
+    )
+    assert "F" in grade
+
+
+# ---- Grade law: C cap ----
+
+def test_entry_grade_c_price_below_trigger():
+    """entry_acceptance=damaging (price below trigger) → C."""
+    grade = _classify_entry_grade(
+        _grade_signal(entry_acceptance="damaging"), "SNIPE_IT"
+    )
+    assert grade == _ENTRY_GRADE_LABELS["C_GRADE"]
+    assert "C" in grade
+
+
+def test_entry_grade_c_price_invalidated():
+    """entry_acceptance=invalidated (price at/below stop) → C."""
+    grade = _classify_entry_grade(
+        _grade_signal(entry_acceptance="invalidated"), "SNIPE_IT"
+    )
+    assert grade == _ENTRY_GRADE_LABELS["C_GRADE"]
+    assert "C" in grade
+
+
+def test_entry_grade_f_takes_priority_over_c():
+    """F cap fires before C — missing retest + damaging acceptance → F."""
+    grade = _classify_entry_grade(
+        _grade_signal(retest_status="failed", entry_acceptance="damaging"), "SNIPE_IT"
+    )
+    assert grade == _ENTRY_GRADE_LABELS["F_GRADE"]
+
+
+# ---- Grade law: B hard ceilings ----
+
+def test_entry_grade_b_unproven_acceptance():
+    """entry_acceptance=unproven → B_UNPROVEN ceiling."""
+    grade = _classify_entry_grade(
+        _grade_signal(entry_acceptance="unproven"), "SNIPE_IT"
+    )
+    assert grade == _ENTRY_GRADE_LABELS["B_UNPROVEN"]
+    assert "B" in grade
+
+
+def test_entry_grade_b_fragile_risk_window():
+    """risk_realism_state=fragile → B_FRAGILE ceiling even with high rr."""
+    grade = _classify_entry_grade(
+        _grade_signal(risk_realism_state="fragile", risk_reward=5.0), "SNIPE_IT"
+    )
+    assert grade == _ENTRY_GRADE_LABELS["B_FRAGILE"]
+    assert "B" in grade
+
+
+def test_entry_grade_b_overhead_blocked():
+    """overhead_status=blocked → B_OVERHEAD ceiling."""
+    grade = _classify_entry_grade(
+        _grade_signal(overhead_status="blocked"), "SNIPE_IT"
+    )
+    assert grade == _ENTRY_GRADE_LABELS["B_OVERHEAD"]
+    assert "B" in grade
+
+
+def test_entry_grade_b_chasing_extension():
+    """price_distance_to_trigger_pct > 2.0 → B_CHASING ceiling."""
+    grade = _classify_entry_grade(
+        _grade_signal(price_distance_to_trigger_pct=3.5, risk_reward=4.5), "SNIPE_IT"
+    )
+    assert grade == _ENTRY_GRADE_LABELS["B_CHASING"]
+    assert "B" in grade
+
+
+def test_entry_grade_b_chasing_boundary_exactly_2pct():
+    """price_distance_to_trigger_pct == 2.0 does NOT trigger B_CHASING (> 2.0 required)."""
+    grade = _classify_entry_grade(
+        _grade_signal(price_distance_to_trigger_pct=2.0, risk_reward=4.5), "SNIPE_IT"
+    )
+    assert grade != _ENTRY_GRADE_LABELS["B_CHASING"]
+
+
+# ---- Grade law: A and A+ ----
+
+def test_entry_grade_a_confirmed_healthy_rr3():
+    """All confirmed, healthy risk, rr=3.2, moderate overhead → A."""
+    grade = _classify_entry_grade(
+        _grade_signal(
+            risk_reward=3.2,
+            overhead_status="moderate",
+            price_distance_to_trigger_pct=1.0,
+        ),
+        "SNIPE_IT",
+    )
+    assert grade == _ENTRY_GRADE_LABELS["A_GRADE"]
+    assert "A" in grade
+    assert "A+" not in grade
+
+
+def test_entry_grade_a_plus_sniper_conditions():
+    """All A+ conditions met → A+."""
+    grade = _classify_entry_grade(
+        _grade_signal(
+            risk_reward=4.5,
+            overhead_status="clear",
+            risk_realism_state="healthy",
+            price_distance_to_trigger_pct=0.2,
+        ),
+        "SNIPE_IT",
+    )
+    assert grade == _ENTRY_GRADE_LABELS["A_PLUS"]
+    assert "A+" in grade
+
+
+def test_entry_grade_a_plus_blocked_by_rr_below_4():
+    """rr=3.9 (< 4.0) blocks A+; falls to A when other A conditions are met."""
+    grade = _classify_entry_grade(
+        _grade_signal(
+            risk_reward=3.9,
+            overhead_status="clear",
+            price_distance_to_trigger_pct=0.2,
+        ),
+        "SNIPE_IT",
+    )
+    assert grade == _ENTRY_GRADE_LABELS["A_GRADE"]
+
+
+def test_entry_grade_b_default_when_rr_below_3():
+    """rr < 3.0 → B default (no A or A+ possible)."""
+    grade = _classify_entry_grade(
+        _grade_signal(risk_reward=2.5), "SNIPE_IT"
+    )
+    assert grade == _ENTRY_GRADE_LABELS["B_DEFAULT"]
+    assert "B" in grade
+
+
+# ---- NEAR_ENTRY tier cap ----
+
+def test_entry_grade_near_entry_caps_at_b_not_a():
+    """NEAR_ENTRY tier gate caps grade at B_WATCH even when conditions are perfect."""
+    grade = _classify_entry_grade(
+        _grade_signal(risk_reward=4.5, price_distance_to_trigger_pct=0.1),
+        "NEAR_ENTRY",
+    )
+    assert grade == _ENTRY_GRADE_LABELS["B_WATCH"]
+    assert "B" in grade
+    assert "A" not in grade
+
+
+def test_entry_grade_near_entry_f_fires_before_b_watch():
+    """NEAR_ENTRY with missing retest → F fires before B_WATCH cap."""
+    grade = _classify_entry_grade(
+        _grade_signal(retest_status="missing"),
+        "NEAR_ENTRY",
+    )
+    assert grade == _ENTRY_GRADE_LABELS["F_GRADE"]
+
+
+# ---- WAIT tier ----
+
+def test_entry_grade_wait_returns_empty_string():
+    """WAIT tier → empty string (entry grade must not be rendered)."""
+    assert _classify_entry_grade(_grade_signal(), "WAIT") == ""
+
+
+# ---- Integration: format_alert renders entry grade ----
+
+def test_entry_grade_renders_in_action_section():
+    """format_alert() includes 'Entry grade:' in the ACTION section."""
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        score=90,
+        entry_acceptance="accepted",
+        risk_realism_state="healthy",
+        risk_reward=3.5,
+        overhead_status="clear",
+        price_distance_to_trigger_pct=0.3,
+    )
+    text = format_alert(tr)
+    assert "Entry grade:" in text
+    action_idx    = text.index("ACTION")
+    entry_idx     = text.index("Entry grade:")
+    freshness_idx = text.index("FRESHNESS")
+    assert entry_idx > action_idx, "Entry grade must appear after ACTION header"
+    assert entry_idx < freshness_idx, "Entry grade must appear before FRESHNESS"
+
+
+def test_entry_grade_not_rendered_for_wait():
+    """WAIT tier alerts must not contain 'Entry grade:'."""
+    tr = _tiering_result(tier="WAIT", score=0, safe=False)
+    tr["final_tier"] = "WAIT"
+    tr["safe_for_alert"] = False
+    tr["final_signal"]["tier"] = "WAIT"
+    tr["final_signal"]["capital_action"] = "no_trade"
+    text = format_alert(tr)
+    assert "Entry grade:" not in text
+
+
+# ---- Guard pass tests ----
+
+def test_entry_grade_phrase_passes_contract_guard_snipe_it():
+    """A+ entry grade phrase survives SNIPE_IT contract and sovereignty guards."""
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        score=92,
+        entry_acceptance="accepted",
+        risk_realism_state="healthy",
+        risk_reward=4.5,
+        overhead_status="clear",
+        price_distance_to_trigger_pct=0.2,
+    )
+    text = format_alert(tr)
+    assert "Entry grade:" in text
+    entry_line = next(l for l in text.split("\n") if "Entry grade:" in l)
+    assert "A+" in entry_line, f"A+ grade corrupted by guard: {entry_line!r}"
+
+
+def test_entry_grade_phrase_passes_contract_guard_starter():
+    """A entry grade phrase survives STARTER contract and sovereignty guards."""
+    tr = _tiering_result(
+        tier="STARTER",
+        score=80,
+        entry_acceptance="accepted",
+        risk_realism_state="healthy",
+        risk_reward=3.2,
+        overhead_status="moderate",
+        price_distance_to_trigger_pct=0.8,
+    )
+    tr["final_tier"] = "STARTER"
+    tr["final_discord_channel"] = "#starter-signals"
+    tr["final_signal"]["tier"] = "STARTER"
+    tr["final_signal"]["capital_action"] = "starter_only"
+    text = format_alert(tr)
+    assert "Entry grade:" in text
+    entry_line = next(l for l in text.split("\n") if "Entry grade:" in l)
+    assert "A" in entry_line, f"A grade corrupted by guard: {entry_line!r}"
+    assert "A+" not in entry_line
+
+
+def test_entry_grade_phrase_passes_contract_guard_near_entry():
+    """F entry grade phrase survives NEAR_ENTRY contract and sovereignty guards."""
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        score=65,
+        safe=True,
+        capital_action="wait_no_capital",
+        retest_status="missing",
+        hold_status="missing",
+        missing_conditions=["missing_retest", "missing_hold"],
+        upgrade_trigger="Full zone retest with hold.",
+        near_entry_blocker_note=(
+            "Blocker: retest is not fully confirmed; "
+            "wait for full zone interaction and hold."
+        ),
+    )
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    tr["final_signal"]["tier"] = "NEAR_ENTRY"
+    tr["final_signal"]["capital_action"] = "wait_no_capital"
+    text = format_alert(tr)
+    assert "Entry grade:" in text
+    entry_line = next(l for l in text.split("\n") if "Entry grade:" in l)
+    assert "F" in entry_line, f"F grade corrupted by guard: {entry_line!r}"
     assert "full quality" not in text.lower()
