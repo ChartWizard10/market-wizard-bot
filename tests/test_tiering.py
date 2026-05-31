@@ -2306,3 +2306,164 @@ def test_entry_acceptance_invalidated_when_below_stop():
     fs = result["final_signal"]
     assert "entry_acceptance" in fs
     assert fs["entry_acceptance"] == "invalidated"
+
+
+# ===========================================================================
+# Phase 0A — Objective Feature Sovereignty
+# ===========================================================================
+# Verifies that scanner-computed fields from indicators.py are sovereign over
+# Claude-echoed values for the four hard structural fields:
+#   retest_status, overhead_status, sma_value_alignment, structure_event
+#
+# In each test: Claude's signal would pass gates on its own values,
+# but key_features carries the scanner-computed truth that overrides it.
+# ===========================================================================
+
+
+def _pf_sovereign(kf: dict, vetoes: list | None = None) -> dict:
+    """Prefilter result carrying sovereign key_features for Phase 0A tests."""
+    return {
+        "veto_flags": vetoes or [],
+        "key_features": kf,
+    }
+
+
+# 0A-1: retest_status override — Claude "confirmed" overridden to scanner "partial"
+def test_sovereign_retest_status_blocks_snipe_it():
+    # Claude signal passes all SNIPE_IT gates including retest_status="confirmed".
+    signal = _snipe_signal()
+    assert signal["retest_status"] == "confirmed"
+    # Scanner computed "partial" — override must prevent SNIPE_IT.
+    kf = {"retest_status": "partial"}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["original_claude_tier"] == "SNIPE_IT"
+    assert result["final_tier"] != "SNIPE_IT", (
+        "retest_status='partial' from scanner must block SNIPE_IT even if Claude said 'confirmed'"
+    )
+    # Override must be visible in final_signal
+    assert result["final_signal"]["retest_status"] == "partial"
+
+
+# 0A-2: overhead_status override — Claude "clear" overridden to scanner "blocked"
+def test_sovereign_overhead_status_blocks_snipe_it_and_starter():
+    signal = _snipe_signal()
+    assert signal["overhead_status"] == "clear"
+    kf = {"overhead_status": "blocked"}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["original_claude_tier"] == "SNIPE_IT"
+    assert result["final_tier"] not in ("SNIPE_IT", "STARTER"), (
+        "overhead_status='blocked' from scanner must block SNIPE_IT and STARTER"
+    )
+    assert result["final_signal"]["overhead_status"] == "blocked"
+
+
+# 0A-3: sma_value_alignment override — Claude "supportive" overridden to scanner "hostile"
+def test_sovereign_sma_value_alignment_blocks_snipe_it_and_starter():
+    signal = _snipe_signal()
+    assert signal["sma_value_alignment"] == "supportive"
+    kf = {"sma_value_alignment": "hostile"}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["original_claude_tier"] == "SNIPE_IT"
+    assert result["final_tier"] not in ("SNIPE_IT", "STARTER"), (
+        "sma_value_alignment='hostile' from scanner must block SNIPE_IT and STARTER"
+    )
+    assert result["final_signal"]["sma_value_alignment"] == "hostile"
+
+
+# 0A-4: structure_event override — Claude "BOS" overridden to scanner "none" → WAIT
+def test_sovereign_structure_event_none_forces_wait():
+    signal = _snipe_signal()
+    assert signal["structure_event"] == "MSS"
+    kf = {"structure_event": "none"}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["original_claude_tier"] == "SNIPE_IT"
+    assert result["final_tier"] == "WAIT", (
+        "structure_event='none' from scanner must force WAIT regardless of Claude tier"
+    )
+    assert result["safe_for_alert"] is False
+    assert result["final_signal"]["structure_event"] == "none"
+    assert any("structure_event=none" in d for d in result["downgrades"])
+
+
+# 0A-5: Missing key_features field → Claude value preserved (legacy behavior unchanged)
+def test_sovereign_no_override_when_key_features_field_absent():
+    # key_features has no retest_status → Claude's "confirmed" must be preserved
+    signal = _snipe_signal()
+    kf = {"current_price": 182.50}  # only price, no retest_status
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT", (
+        "Absent key_features field must not override Claude value — legacy behavior unchanged"
+    )
+    assert result["final_signal"]["retest_status"] == "confirmed"
+
+
+# 0A-6: None key_features value → Claude value preserved (null is not sovereign)
+def test_sovereign_no_override_when_key_features_value_is_none():
+    signal = _snipe_signal()
+    kf = {"retest_status": None, "overhead_status": None}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT", (
+        "None key_features value must not override Claude value"
+    )
+    assert result["final_signal"]["retest_status"] == "confirmed"
+
+
+# 0A-7: capital_action mapping unchanged — override never alters capital authorization
+def test_sovereign_override_does_not_change_capital_action_mapping():
+    # Even when scanner overrides retest_status to "partial" (causing WAIT),
+    # capital_action must still be computed from final_tier, not from any override.
+    signal = _snipe_signal()
+    kf = {"structure_event": "none"}  # forces WAIT
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["capital_action"] == "no_trade"
+    assert result["final_signal"]["capital_action"] == "no_trade"
+
+
+# 0A-8: discord_channel routing unchanged — override never affects routing
+def test_sovereign_override_does_not_change_discord_channel_routing():
+    # Scanner says overhead="blocked" → SNIPE_IT and STARTER fail → should route to WAIT
+    # (or NEAR_ENTRY if that gate passes) — but NOT to #snipe-signals
+    signal = _snipe_signal()
+    kf = {"structure_event": "none"}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["final_discord_channel"] == "none"
+    assert result["final_signal"]["discord_channel"] == "none"
+
+
+# 0A-9: STARTER signal — all four sovereign overrides work for STARTER too
+def test_sovereign_override_applies_to_starter_signal():
+    signal = _starter_signal()
+    assert signal["sma_value_alignment"] == "supportive"
+    kf = {"sma_value_alignment": "hostile"}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["original_claude_tier"] == "STARTER"
+    assert result["final_tier"] not in ("SNIPE_IT", "STARTER"), (
+        "sma_value_alignment='hostile' from scanner must block STARTER"
+    )
+    assert result["final_signal"]["sma_value_alignment"] == "hostile"
+
+
+# 0A-10: Narrative fields are never overridden — reason, setup_family, trend_state preserved
+def test_sovereign_override_preserves_narrative_fields():
+    signal = _snipe_signal(
+        reason="Clean MSS with confirmed FVG retest and hold.",
+        setup_family="continuation",
+        trend_state="fresh_expansion",
+        zone_type="FVG",
+    )
+    # Override structural fields
+    kf = {
+        "retest_status": "partial",   # changes gate result
+        "sma_value_alignment": "supportive",  # no change (same as signal)
+    }
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    # Narrative fields must be untouched
+    assert fs["setup_family"] == "continuation"
+    assert fs["trend_state"] == "fresh_expansion"
+    assert fs["zone_type"] == "FVG"
+    assert "Clean MSS" in (fs.get("reason") or "")
+    # Structural field was overridden
+    assert fs["retest_status"] == "partial"

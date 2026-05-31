@@ -1067,6 +1067,53 @@ def _signal_derived_vetoes(signal: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 0A: Objective Feature Sovereignty
+# ---------------------------------------------------------------------------
+
+# Fields where indicators.py computation is deterministic and sovereign over
+# Claude-echoed values. Claude receives these as prompt context and is expected
+# to echo them faithfully, but may diverge (hallucinate "confirmed" when
+# indicators computed "partial"). The override closes that trust gap.
+#
+# Candidates audited but NOT overridden (field not present in key_features):
+#   invalidation_level — not in key_features; would require enriched pass-through
+#   targets            — not in key_features
+#   risk_reward        — key_features has "estimated_rr" but field names differ;
+#                        Claude's trigger may legitimately differ from indicators'
+#                        estimated entry point; deferred to a future phase.
+_SOVEREIGN_FIELDS: tuple[str, ...] = (
+    "retest_status",
+    "overhead_status",
+    "sma_value_alignment",
+    "structure_event",
+)
+
+
+def _apply_objective_feature_overrides(signal: dict, key_features: dict) -> dict:
+    """Enforce scanner-computed objective fields over Claude-echoed values.
+
+    Only overrides when key_features contains a non-null, non-empty value.
+    When key_features lacks a field (e.g. !analyze without full prefilter context),
+    Claude's value is preserved unchanged (legacy behavior).
+
+    Never touches narrative fields: reason, next_action, setup_family, trend_state,
+    zone_type, tier, score, missing_conditions, upgrade_trigger, forced_participation.
+    """
+    result = dict(signal)
+    for field in _SOVEREIGN_FIELDS:
+        scanner_val = key_features.get(field)
+        if scanner_val is not None and scanner_val != "":
+            claude_val = result.get(field)
+            if claude_val != scanner_val:
+                log.info(
+                    "objective_override: field=%s claude=%r → scanner=%r",
+                    field, claude_val, scanner_val,
+                )
+            result[field] = scanner_val
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1133,6 +1180,11 @@ def validate(
     # at least one sign of partial progress exists. Does not run for SNIPE_IT
     # or STARTER. Hard vetoes downstream still fire — backfill never grants entry.
     working_signal = dict(raw_signal)
+
+    # Phase 0A: Enforce scanner-computed objective fields before any gate runs.
+    # Backfills below run after this so they use the corrected scanner values.
+    working_signal = _apply_objective_feature_overrides(working_signal, key_features)
+
     if claude_tier == "NEAR_ENTRY":
         existing_mc = working_signal.get("missing_conditions")
         if not isinstance(existing_mc, list) or not existing_mc:
