@@ -2467,3 +2467,86 @@ def test_sovereign_override_preserves_narrative_fields():
     assert "Clean MSS" in (fs.get("reason") or "")
     # Structural field was overridden
     assert fs["retest_status"] == "partial"
+
+
+# ===========================================================================
+# Phase 0C-P1 — volume_behavior Sovereignty
+# ===========================================================================
+# volume_behavior is scanner-computed by indicators.assess_volume() and present
+# in key_features from prefilter._build_key_features(). It is NOT a required
+# Claude JSON field. These tests verify that:
+#   (a) if Claude volunteers a differing value, the scanner's value wins
+#   (b) if key_features lacks the field, Claude's value is preserved (legacy)
+#   (c) None in key_features does not override (null is not sovereign)
+#   (d) the override has no effect on tier, capital_action, or routing
+
+
+# 0C-P1-1: Claude volunteers volume_behavior="expansion"; scanner says "dryup"
+#            → final_signal must use scanner's "dryup"
+def test_volume_behavior_override_claude_expansion_to_scanner_dryup():
+    signal = _snipe_signal(volume_behavior="expansion")
+    kf = {
+        "retest_status": "confirmed",
+        "overhead_status": "clear",
+        "sma_value_alignment": "supportive",
+        "structure_event": "MSS",
+        "volume_behavior": "dryup",
+    }
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_signal"]["volume_behavior"] == "dryup", (
+        "Scanner's volume_behavior='dryup' must override Claude's volunteered 'expansion'"
+    )
+    # Gate and routing must not be affected by volume_behavior override
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["capital_action"] == "full_quality_allowed"
+    assert result["safe_for_alert"] is True
+
+
+# 0C-P1-2: Claude volunteers volume_behavior="neutral"; scanner says "expansion"
+#            → final_signal must use scanner's "expansion"
+def test_volume_behavior_override_claude_neutral_to_scanner_expansion():
+    signal = _snipe_signal(volume_behavior="neutral")
+    kf = {
+        "retest_status": "confirmed",
+        "overhead_status": "clear",
+        "sma_value_alignment": "supportive",
+        "structure_event": "MSS",
+        "volume_behavior": "expansion",
+    }
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_signal"]["volume_behavior"] == "expansion", (
+        "Scanner's volume_behavior='expansion' must override Claude's volunteered 'neutral'"
+    )
+    assert result["final_tier"] == "SNIPE_IT"
+
+
+# 0C-P1-3: key_features lacks volume_behavior → Claude's value is preserved (legacy behavior)
+def test_volume_behavior_no_override_when_key_features_field_absent():
+    signal = _snipe_signal(volume_behavior="expansion")
+    kf = {
+        "retest_status": "confirmed",
+        "overhead_status": "clear",
+        "sma_value_alignment": "supportive",
+        "structure_event": "MSS",
+        # volume_behavior intentionally absent
+    }
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_signal"].get("volume_behavior") == "expansion", (
+        "Absent key_features volume_behavior must not override Claude's value — legacy behavior"
+    )
+
+
+# 0C-P1-4: key_features has volume_behavior=None → Claude's value is preserved (null is not sovereign)
+def test_volume_behavior_no_override_when_key_features_value_is_none():
+    signal = _snipe_signal(volume_behavior="expansion")
+    kf = {
+        "retest_status": "confirmed",
+        "overhead_status": "clear",
+        "sma_value_alignment": "supportive",
+        "structure_event": "MSS",
+        "volume_behavior": None,
+    }
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_signal"].get("volume_behavior") == "expansion", (
+        "None key_features volume_behavior must not override Claude's value"
+    )

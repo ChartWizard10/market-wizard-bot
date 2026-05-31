@@ -1067,7 +1067,7 @@ def _signal_derived_vetoes(signal: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 0A: Objective Feature Sovereignty
+# Phase 0A / 0C-P1: Objective Feature Sovereignty
 # ---------------------------------------------------------------------------
 
 # Fields where indicators.py computation is deterministic and sovereign over
@@ -1075,17 +1075,27 @@ def _signal_derived_vetoes(signal: dict) -> list[str]:
 # to echo them faithfully, but may diverge (hallucinate "confirmed" when
 # indicators computed "partial"). The override closes that trust gap.
 #
-# Candidates audited but NOT overridden (field not present in key_features):
+# Phase 0A fields (retest_status, overhead_status, sma_value_alignment,
+#   structure_event): gate-critical; Claude required to return them.
+#
+# Phase 0C-P1 field (volume_behavior): not required in Claude JSON; override
+#   is a safety net in case Claude volunteers the field with a differing value.
+#   volume_behavior is already in key_features from prefilter._build_key_features().
+#
+# Candidates audited but NOT overridden (field not in key_features or basis mismatch):
 #   invalidation_level — not in key_features; would require enriched pass-through
 #   targets            — not in key_features
 #   risk_reward        — key_features has "estimated_rr" but field names differ;
 #                        Claude's trigger may legitimately differ from indicators'
 #                        estimated entry point; deferred to a future phase.
+#   hold_status        — no scanner computation exists; deferred until assess_hold()
+#                        is added to indicators.py.
 _SOVEREIGN_FIELDS: tuple[str, ...] = (
     "retest_status",
     "overhead_status",
     "sma_value_alignment",
     "structure_event",
+    "volume_behavior",
 )
 
 
