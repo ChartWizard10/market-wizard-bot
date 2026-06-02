@@ -334,6 +334,8 @@ def record_alert(
         "hold_status":                       final_signal.get("hold_status"),
         "current_acceptance":                final_signal.get("current_acceptance"),
         "overhead_status":                   final_signal.get("overhead_status"),
+        "volume_behavior":                   final_signal.get("volume_behavior"),
+        "volume_ratio":                      final_signal.get("volume_ratio"),
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),
         "trend_state":                       final_signal.get("trend_state"),

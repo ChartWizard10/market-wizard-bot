@@ -709,6 +709,24 @@ def test_record_alert_stores_overhead_status():
     assert rec["overhead_status"] == "clear"
 
 
+def test_record_alert_stores_volume_behavior_and_ratio():
+    # Phase 1A — evidence capture: alert_history persists volume fields so future
+    # sponsorship-quality backtesting can tag records without re-deriving them.
+    tr = _tiering(volume_behavior="expansion", volume_ratio=1.45)
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["volume_behavior"] == "expansion"
+    assert rec["volume_ratio"] == 1.45
+
+
+def test_record_alert_volume_fields_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["volume_behavior"] is None
+    assert rec["volume_ratio"] is None
+
+
 def test_record_alert_stores_setup_context_fields():
     tr = _tiering(
         setup_family="continuation",
