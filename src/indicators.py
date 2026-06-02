@@ -643,12 +643,19 @@ def _detect_vcp_impl(df: pd.DataFrame, swings: dict, smas: dict, _config: dict) 
     pivot_idx, pivot_level = max(swing_highs, key=lambda p: p[1])
 
     # Prior advance: lowest swing low within the lookback window BEFORE the pivot.
+    # Fallback to close minimum when no swing lows exist in the advance window
+    # (e.g. clean monotonic uptrend produces no swing lows during the advance phase).
     advance_window_start = max(0, pivot_idx - _VCP_ADVANCE_LOOKBACK_BARS)
     pre_pivot_lows = [(i, p) for i, p in swing_lows if advance_window_start <= i < pivot_idx]
     if not pre_pivot_lows:
-        return dict(_EMPTY_VCP)
-
-    advance_low_idx, advance_low = min(pre_pivot_lows, key=lambda p: p[1])
+        window_closes = c.iloc[advance_window_start:pivot_idx]
+        if len(window_closes) == 0:
+            return dict(_EMPTY_VCP)
+        rel_idx = int(np.argmin(window_closes.values))
+        advance_low_idx = advance_window_start + rel_idx
+        advance_low = float(window_closes.iloc[rel_idx])
+    else:
+        advance_low_idx, advance_low = min(pre_pivot_lows, key=lambda p: p[1])
     if advance_low <= 0:
         return dict(_EMPTY_VCP)
 
