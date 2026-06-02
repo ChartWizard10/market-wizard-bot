@@ -727,6 +727,80 @@ def test_record_alert_volume_fields_none_when_absent():
     assert rec["volume_ratio"] is None
 
 
+# ---------------------------------------------------------------------------
+# Phase 1B — VCP evidence persistence (observational only)
+# ---------------------------------------------------------------------------
+# These tests verify the alert_history record stores all ten vcp_* fields so
+# future sponsorship/VCP backtesting can tag historical alerts. The fields
+# are read-only metadata — recording them does not affect dedup, cooldown,
+# tier, scoring, routing, or capital.
+
+
+def test_record_alert_stores_vcp_fields():
+    tr = _tiering(
+        vcp_status="CONFIRMED",
+        vcp_prior_advance_pct=78.5,
+        vcp_contractions_count=3,
+        vcp_range_contraction=True,
+        vcp_contraction_sequence=[12.0, 7.5, 4.2],
+        vcp_volume_dryup=True,
+        vcp_volume_ratio=0.72,
+        vcp_ma_alignment="SUPPORTIVE",
+        vcp_pivot_level=182.50,
+        vcp_failure_flag=False,
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+
+    assert rec["vcp_status"] == "CONFIRMED"
+    assert rec["vcp_prior_advance_pct"] == 78.5
+    assert rec["vcp_contractions_count"] == 3
+    assert rec["vcp_range_contraction"] is True
+    assert rec["vcp_contraction_sequence"] == [12.0, 7.5, 4.2]
+    assert rec["vcp_volume_dryup"] is True
+    assert rec["vcp_volume_ratio"] == 0.72
+    assert rec["vcp_ma_alignment"] == "SUPPORTIVE"
+    assert rec["vcp_pivot_level"] == 182.50
+    assert rec["vcp_failure_flag"] is False
+
+
+def test_record_alert_vcp_fields_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+
+    for field in (
+        "vcp_status",
+        "vcp_prior_advance_pct",
+        "vcp_contractions_count",
+        "vcp_range_contraction",
+        "vcp_contraction_sequence",
+        "vcp_volume_dryup",
+        "vcp_volume_ratio",
+        "vcp_ma_alignment",
+        "vcp_pivot_level",
+        "vcp_failure_flag",
+    ):
+        assert field in rec, f"VCP field missing from history record: {field!r}"
+        assert rec[field] is None
+
+
+def test_record_alert_vcp_failure_flag_does_not_affect_dedup_key():
+    # Recording an alert with vcp_failure_flag=True must produce the same
+    # dedup_key as one without it. dedup is structural; VCP is evidence.
+    tr_no_vcp = _tiering(trigger=182.50, invalidation=178.20)
+    tr_with_vcp = _tiering(
+        trigger=182.50, invalidation=178.20,
+        vcp_status="INVALID", vcp_failure_flag=True,
+    )
+    s1 = record_alert("AAPL", tr_no_vcp,   _empty(), _cfg())
+    s2 = record_alert("AAPL", tr_with_vcp, _empty(), _cfg())
+
+    rec1 = s1["tickers"]["AAPL"]["alert_history"][0]
+    rec2 = s2["tickers"]["AAPL"]["alert_history"][0]
+    assert rec1["dedup_key"] == rec2["dedup_key"]
+
+
 def test_record_alert_stores_setup_context_fields():
     tr = _tiering(
         setup_family="continuation",

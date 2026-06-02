@@ -1124,6 +1124,48 @@ def _apply_objective_feature_overrides(signal: dict, key_features: dict) -> dict
 
 
 # ---------------------------------------------------------------------------
+# Phase 1B: VCP evidence passthrough
+# ---------------------------------------------------------------------------
+# Scanner-computed VCP characteristics flow from indicators.detect_vcp() through
+# prefilter._build_key_features() into the signal so they are carried into
+# final_signal and ultimately into state_store alert_history for future
+# backtesting.
+#
+# OBSERVATIONAL ONLY. None of these fields are read by any tier gate, scoring
+# function, calibration step, routing decision, capital authorization, dedup
+# logic, campaign identity, or alert formatter. The passthrough is additive
+# metadata; it cannot change any decision the scanner makes.
+#
+# Unlike _SOVEREIGN_FIELDS, this is not an override — Claude does not produce
+# VCP fields. The passthrough simply mirrors scanner values into the signal.
+_VCP_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "vcp_status",
+    "vcp_prior_advance_pct",
+    "vcp_contractions_count",
+    "vcp_range_contraction",
+    "vcp_contraction_sequence",
+    "vcp_volume_dryup",
+    "vcp_volume_ratio",
+    "vcp_ma_alignment",
+    "vcp_pivot_level",
+    "vcp_failure_flag",
+)
+
+
+def _apply_vcp_evidence_passthrough(signal: dict, key_features: dict) -> dict:
+    """Mirror scanner-computed VCP evidence fields from key_features into signal.
+
+    Only copies fields that exist in key_features (None values are preserved).
+    Never replaces the signal dict's existing non-VCP fields. Evidence-capture only.
+    """
+    result = dict(signal)
+    for field in _VCP_EVIDENCE_FIELDS:
+        if field in key_features:
+            result[field] = key_features[field]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1194,6 +1236,11 @@ def validate(
     # Phase 0A: Enforce scanner-computed objective fields before any gate runs.
     # Backfills below run after this so they use the corrected scanner values.
     working_signal = _apply_objective_feature_overrides(working_signal, key_features)
+
+    # Phase 1B: Pass VCP evidence fields through from scanner key_features.
+    # Observational only — never read by any gate, scoring, calibration, routing,
+    # capital, dedup, campaign, or alert formatting decision.
+    working_signal = _apply_vcp_evidence_passthrough(working_signal, key_features)
 
     if claude_tier == "NEAR_ENTRY":
         existing_mc = working_signal.get("missing_conditions")

@@ -2550,3 +2550,193 @@ def test_volume_behavior_no_override_when_key_features_value_is_none():
     assert result["final_signal"].get("volume_behavior") == "expansion", (
         "None key_features volume_behavior must not override Claude's value"
     )
+
+
+# ===========================================================================
+# Phase 1B — VCP Evidence Passthrough (observational only)
+# ===========================================================================
+# Scanner-computed VCP characteristics flow through key_features into the
+# signal so they persist into final_signal and state_store alert_history.
+# These tests verify:
+#   (a) the passthrough writes vcp_* fields into final_signal
+#   (b) the passthrough touches NOTHING that the tier gate, scoring,
+#       calibration, routing, capital, or alert decisions depend on
+#   (c) hostile VCP states (INVALID, failure_flag=True) do NOT downgrade,
+#       reroute, or block any tier — VCP is evidence-only in Phase 1B
+
+
+_VCP_KF_FIELDS = {
+    "vcp_status":               "CONFIRMED",
+    "vcp_prior_advance_pct":    78.5,
+    "vcp_contractions_count":   3,
+    "vcp_range_contraction":    True,
+    "vcp_contraction_sequence": [12.0, 7.5, 4.2],
+    "vcp_volume_dryup":         True,
+    "vcp_volume_ratio":         0.72,
+    "vcp_ma_alignment":         "SUPPORTIVE",
+    "vcp_pivot_level":          182.50,
+    "vcp_failure_flag":         False,
+}
+
+
+def _kf_with_vcp(extra: dict | None = None, **vcp_overrides) -> dict:
+    """Build key_features carrying a full VCP evidence payload."""
+    kf = dict(_VCP_KF_FIELDS)
+    kf.update(vcp_overrides)
+    if extra:
+        kf.update(extra)
+    return kf
+
+
+# 1B-1: vcp_* fields land in final_signal
+def test_vcp_evidence_passthrough_lands_in_final_signal():
+    signal = _snipe_signal()
+    result = validate(signal, _pf_sovereign(_kf_with_vcp()), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field, expected in _VCP_KF_FIELDS.items():
+        assert fs.get(field) == expected, (
+            f"VCP field {field!r} not propagated: expected {expected!r}, got {fs.get(field)!r}"
+        )
+
+
+# 1B-2: VCP fields absent from key_features → final_signal does not synthesize them
+def test_vcp_evidence_absent_when_key_features_lacks_vcp_fields():
+    signal = _snipe_signal()
+    kf = {"current_price": 182.50}   # no vcp_* fields
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    # None of the vcp_* fields should be added by tiering if absent from key_features
+    for field in _VCP_KF_FIELDS:
+        assert field not in fs, (
+            f"VCP field {field!r} appeared in final_signal even though "
+            f"key_features did not carry it"
+        )
+
+
+# 1B-3: VCP None values flow through verbatim
+def test_vcp_evidence_none_values_preserved():
+    signal = _snipe_signal()
+    kf = _kf_with_vcp(
+        vcp_status=None,
+        vcp_prior_advance_pct=None,
+        vcp_pivot_level=None,
+    )
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["vcp_status"] is None
+    assert fs["vcp_prior_advance_pct"] is None
+    assert fs["vcp_pivot_level"] is None
+
+
+# 1B-4: A perfect SNIPE_IT signal stays SNIPE_IT with or without VCP fields
+def test_no_tiering_change_from_vcp_present_vs_absent():
+    signal = _snipe_signal()
+    pf_with    = _pf_sovereign(_kf_with_vcp())
+    pf_without = _pf_sovereign({})
+
+    res_with    = validate(signal, pf_with,    _BASE_CONFIG)
+    res_without = validate(signal, pf_without, _BASE_CONFIG)
+
+    for key in ("final_tier", "score", "capital_action",
+                "final_discord_channel", "safe_for_alert"):
+        assert res_with[key] == res_without[key], (
+            f"VCP presence changed {key!r}: with={res_with[key]!r} "
+            f"vs without={res_without[key]!r}"
+        )
+
+
+# 1B-5: vcp_status=INVALID does NOT downgrade a valid SNIPE_IT
+def test_no_tiering_change_from_vcp_status_invalid():
+    signal = _snipe_signal()
+    kf = _kf_with_vcp(vcp_status="INVALID", vcp_failure_flag=True)
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT", (
+        "VCP INVALID must NOT downgrade a valid SNIPE_IT in Phase 1B "
+        "(evidence-only, no gate impact)"
+    )
+    assert result["safe_for_alert"] is True
+    # Evidence still preserved in final_signal for backtesting
+    assert result["final_signal"]["vcp_status"] == "INVALID"
+    assert result["final_signal"]["vcp_failure_flag"] is True
+
+
+# 1B-6: vcp_failure_flag=True does NOT block any alert
+def test_no_tiering_change_from_vcp_failure_flag():
+    signal = _snipe_signal()
+    kf = _kf_with_vcp(vcp_failure_flag=True)
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["safe_for_alert"] is True
+    assert result["final_signal"]["vcp_failure_flag"] is True
+
+
+# 1B-7: VCP fields do not appear in applied_vetoes
+def test_no_vcp_label_in_applied_vetoes():
+    signal = _snipe_signal()
+    kf = _kf_with_vcp(vcp_status="INVALID", vcp_failure_flag=True)
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    for veto in result["applied_vetoes"]:
+        assert "vcp" not in veto.lower(), (
+            f"Veto label leaked VCP reference: {veto!r}"
+        )
+
+
+# 1B-8: routing unchanged — final_discord_channel comes from CHANNEL_MAP only
+def test_no_routing_change_from_vcp():
+    signal = _snipe_signal()
+    for vcp_st in ("CONFIRMED", "FORMING", "ABSENT", "INVALID", "UNKNOWN", None):
+        kf = _kf_with_vcp(vcp_status=vcp_st)
+        result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+        assert result["final_discord_channel"] == CHANNEL_MAP["SNIPE_IT"], (
+            f"Routing changed for vcp_status={vcp_st!r}"
+        )
+
+
+# 1B-9: capital_action unchanged — pure tier→CAPITAL_MAP lookup
+def test_no_capital_change_from_vcp():
+    signal = _snipe_signal()
+    for vcp_st in ("CONFIRMED", "FORMING", "ABSENT", "INVALID", "UNKNOWN", None):
+        kf = _kf_with_vcp(vcp_status=vcp_st)
+        result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+        assert result["capital_action"] == CAPITAL_MAP["SNIPE_IT"], (
+            f"capital_action changed for vcp_status={vcp_st!r}"
+        )
+
+
+# 1B-10: sanitized reason text is untouched by VCP state
+def test_no_alert_format_change_from_vcp():
+    signal = _snipe_signal(reason="Clean MSS with confirmed FVG retest and hold.")
+
+    result_confirmed = validate(signal, _pf_sovereign(_kf_with_vcp()), _BASE_CONFIG)
+    result_invalid   = validate(
+        signal, _pf_sovereign(_kf_with_vcp(vcp_status="INVALID", vcp_failure_flag=True)),
+        _BASE_CONFIG,
+    )
+
+    assert (
+        result_confirmed["final_signal"]["sanitized_reason"]
+        == result_invalid["final_signal"]["sanitized_reason"]
+    ), "VCP state altered sanitized_reason output"
+    # Confirm VCP names do not appear in any rendered prose
+    for r in (result_confirmed, result_invalid):
+        for key in ("reason", "sanitized_reason", "next_action", "sanitized_next_action"):
+            text = (r["final_signal"].get(key) or "").lower()
+            assert "vcp" not in text, (
+                f"VCP reference leaked into {key!r}: {text!r}"
+            )
+
+
+# 1B-11: STARTER signal also receives VCP passthrough without tier change
+def test_vcp_passthrough_works_for_starter():
+    signal = _starter_signal()
+    result = validate(signal, _pf_sovereign(_kf_with_vcp()), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["final_signal"]["vcp_status"] == "CONFIRMED"
+
+
+# 1B-12: NEAR_ENTRY signal also receives VCP passthrough without tier change
+def test_vcp_passthrough_works_for_near_entry():
+    signal = _near_entry_signal()
+    result = validate(signal, _pf_sovereign(_kf_with_vcp()), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["final_signal"]["vcp_status"] == "CONFIRMED"

@@ -349,6 +349,18 @@ def _build_key_features(enriched: dict) -> dict:
         "current_change_pct": change_pct,
         "current_bar_direction": bar_dir,
         "current_close_location_pct": close_loc,
+        # Phase 1B — VCP evidence (observational; never read by ranking, scoring,
+        # tiering gates, calibration, routing, capital, or alert formatting).
+        "vcp_status":               enriched.get("vcp_status"),
+        "vcp_prior_advance_pct":    enriched.get("vcp_prior_advance_pct"),
+        "vcp_contractions_count":   enriched.get("vcp_contractions_count"),
+        "vcp_range_contraction":    enriched.get("vcp_range_contraction"),
+        "vcp_contraction_sequence": enriched.get("vcp_contraction_sequence"),
+        "vcp_volume_dryup":         enriched.get("vcp_volume_dryup"),
+        "vcp_volume_ratio":         enriched.get("vcp_volume_ratio"),
+        "vcp_ma_alignment":         enriched.get("vcp_ma_alignment"),
+        "vcp_pivot_level":          enriched.get("vcp_pivot_level"),
+        "vcp_failure_flag":         enriched.get("vcp_failure_flag"),
     }
 
 

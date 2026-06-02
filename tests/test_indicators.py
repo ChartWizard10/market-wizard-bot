@@ -21,6 +21,7 @@ from src.indicators import (
     estimate_invalidation,
     estimate_rr,
     assess_volume,
+    detect_vcp,
     enrich,
 )
 
@@ -539,3 +540,237 @@ def test_enrich_no_disabled_indicators():
         assert "macd" not in key.lower()
         assert "bollinger" not in key.lower()
         assert "stochastic" not in key.lower()
+
+
+# ---------------------------------------------------------------------------
+# Phase 1B — VCP (Volatility Contraction Pattern) detection
+# ---------------------------------------------------------------------------
+# Evidence-capture engine. Tests verify deterministic classification of:
+#   CONFIRMED / FORMING / ABSENT / INVALID / UNKNOWN
+# plus correct measurement of advance, contractions, volume dry-up, pivot,
+# MA alignment, and failure flag. None of these fields drive any tier gate,
+# scoring, calibration, routing, capital, or alert decision in the scanner —
+# but detection accuracy still matters because future backtesting depends
+# on these labels being trustworthy.
+
+
+_VCP_FIELDS = (
+    "vcp_status",
+    "vcp_prior_advance_pct",
+    "vcp_contractions_count",
+    "vcp_range_contraction",
+    "vcp_contraction_sequence",
+    "vcp_volume_dryup",
+    "vcp_volume_ratio",
+    "vcp_ma_alignment",
+    "vcp_pivot_level",
+    "vcp_failure_flag",
+)
+
+
+def _build_vcp_df(closes, volumes=None) -> pd.DataFrame:
+    """Build OHLCV DataFrame from a closes array. high/low offset by 0.5%."""
+    closes = np.asarray(closes, dtype=float)
+    n = len(closes)
+    idx = pd.bdate_range(end=_ANCHOR, periods=n)
+    actual = len(idx)
+    closes = closes[-actual:]
+    if volumes is None:
+        volumes = np.full(actual, 1_000_000.0)
+    else:
+        volumes = np.asarray(volumes, dtype=float)[-actual:]
+    return pd.DataFrame({
+        "open":   closes * 0.997,
+        "high":   closes * 1.005,
+        "low":    closes * 0.995,
+        "close":  closes,
+        "volume": volumes,
+    }, index=idx)
+
+
+def _construct_vcp_closes(
+    advance_low: float = 50.0,
+    pivot: float = 100.0,
+    contractions: list[float] | None = None,
+    advance_bars: int = 60,
+    consol_segment_bars: int = 8,
+    pre_advance_bars: int = 70,
+) -> np.ndarray:
+    """Construct a synthetic price path: pre-advance → advance → contractions.
+
+    contractions: list of pullback depths (%) e.g. [12, 7, 4] for tightening.
+    """
+    contractions = contractions or []
+    pre = np.full(pre_advance_bars, advance_low)
+    advance = np.linspace(advance_low, pivot, advance_bars)
+    segments = [pre, advance]
+    last_high = pivot
+    for depth_pct in contractions:
+        low = last_high * (1 - depth_pct / 100)
+        # half-segment down to low, half back up to a slightly lower high
+        down = np.linspace(last_high, low, consol_segment_bars)
+        next_high = last_high * 0.998   # marginal lower high to test tightening
+        up = np.linspace(low, next_high, consol_segment_bars)
+        segments.extend([down, up])
+        last_high = next_high
+    return np.concatenate(segments)
+
+
+def test_vcp_unknown_when_insufficient_bars():
+    # 30 bars is below _VCP_MIN_BARS (60)
+    df = _make_df(30)
+    swings = compute_swings(df, 60)
+    smas = compute_smas(df)
+    result = detect_vcp(df, swings, smas, BASE_CONFIG)
+    assert result["vcp_status"] == "UNKNOWN"
+    assert result["vcp_prior_advance_pct"] is None
+    assert result["vcp_contractions_count"] == 0
+
+
+def test_vcp_unknown_when_few_swings():
+    # Constant prices → no swing detection → UNKNOWN
+    closes = np.full(120, 50.0)
+    df = _build_vcp_df(closes)
+    swings = compute_swings(df, 60)
+    smas = compute_smas(df)
+    result = detect_vcp(df, swings, smas, BASE_CONFIG)
+    assert result["vcp_status"] in ("UNKNOWN", "ABSENT")
+
+
+def test_vcp_confirmed_three_tightening_contractions():
+    # 100% prior advance, 3 tightening pullbacks (12 → 7 → 4), volume dry-up
+    closes = _construct_vcp_closes(
+        advance_low=50.0, pivot=100.0,
+        contractions=[12.0, 7.0, 4.0],
+    )
+    n = len(closes)
+    # Advance-phase volume high, recent volume low (dry-up)
+    vols = np.full(n, 2_000_000.0)
+    vols[-10:] = 500_000.0
+    df = _build_vcp_df(closes, vols)
+    swings = compute_swings(df, 60)
+    smas = compute_smas(df)
+    result = detect_vcp(df, swings, smas, BASE_CONFIG)
+
+    assert result["vcp_status"] == "CONFIRMED", (
+        f"Expected CONFIRMED, got {result['vcp_status']}; result={result}"
+    )
+    assert result["vcp_prior_advance_pct"] is not None
+    assert result["vcp_prior_advance_pct"] >= 25.0
+    assert 2 <= result["vcp_contractions_count"] <= 4
+    assert result["vcp_range_contraction"] is True
+    assert result["vcp_volume_dryup"] is True
+    assert result["vcp_failure_flag"] is False
+    assert result["vcp_pivot_level"] is not None
+    # Contraction sequence should be tightening
+    seq = result["vcp_contraction_sequence"]
+    assert len(seq) >= 2
+    assert all(seq[i] < seq[i - 1] for i in range(1, len(seq)))
+
+
+def test_vcp_absent_when_no_prior_advance():
+    # Sideways from start — no meaningful advance
+    closes = np.full(150, 100.0)
+    # Add small noise so swings are detected
+    closes = closes + np.sin(np.linspace(0, 20, 150)) * 0.5
+    df = _build_vcp_df(closes)
+    swings = compute_swings(df, 60)
+    smas = compute_smas(df)
+    result = detect_vcp(df, swings, smas, BASE_CONFIG)
+    assert result["vcp_status"] in ("ABSENT", "UNKNOWN")
+    assert not result["vcp_range_contraction"]
+
+
+def test_vcp_invalid_when_breakdown_after_contractions():
+    # Same construction as confirmed VCP, then a hard drop at the end
+    closes = _construct_vcp_closes(
+        advance_low=50.0, pivot=100.0,
+        contractions=[12.0, 7.0, 4.0],
+    )
+    # Append a sharp breakdown — 10% drop in the last 5 bars
+    breakdown = np.linspace(closes[-1], closes[-1] * 0.85, 6)[1:]
+    closes = np.concatenate([closes, breakdown])
+    df = _build_vcp_df(closes)
+    swings = compute_swings(df, 60)
+    smas = compute_smas(df)
+    result = detect_vcp(df, swings, smas, BASE_CONFIG)
+    # If contractions are detected, breakdown must register as INVALID.
+    if result["vcp_contractions_count"] >= 1:
+        assert result["vcp_failure_flag"] is True or result["vcp_status"] == "INVALID", (
+            f"Expected failure flag or INVALID after breakdown; result={result}"
+        )
+
+
+def test_vcp_volume_dryup_detection():
+    # Same advance, with vs. without dry-up
+    closes = _construct_vcp_closes(
+        advance_low=50.0, pivot=100.0,
+        contractions=[12.0, 7.0, 4.0],
+    )
+    n = len(closes)
+    # Variant A: volume is elevated in recent window — NOT dry-up
+    vols_no_dryup = np.full(n, 1_000_000.0)
+    vols_no_dryup[-10:] = 1_200_000.0
+    df_a = _build_vcp_df(closes, vols_no_dryup)
+    smas_a = compute_smas(df_a)
+    swings_a = compute_swings(df_a, 60)
+    result_a = detect_vcp(df_a, swings_a, smas_a, BASE_CONFIG)
+    assert result_a["vcp_volume_dryup"] is False
+
+    # Variant B: volume contracts heavily in recent window — IS dry-up
+    vols_dryup = np.full(n, 2_000_000.0)
+    vols_dryup[-10:] = 400_000.0
+    df_b = _build_vcp_df(closes, vols_dryup)
+    smas_b = compute_smas(df_b)
+    swings_b = compute_swings(df_b, 60)
+    result_b = detect_vcp(df_b, swings_b, smas_b, BASE_CONFIG)
+    assert result_b["vcp_volume_dryup"] is True
+    assert result_b["vcp_volume_ratio"] is not None
+    assert result_b["vcp_volume_ratio"] < 0.85
+
+
+def test_vcp_contraction_sequence_recorded():
+    closes = _construct_vcp_closes(
+        advance_low=50.0, pivot=100.0,
+        contractions=[15.0, 9.0, 5.0],
+    )
+    df = _build_vcp_df(closes)
+    swings = compute_swings(df, 60)
+    smas = compute_smas(df)
+    result = detect_vcp(df, swings, smas, BASE_CONFIG)
+    assert isinstance(result["vcp_contraction_sequence"], list)
+    if result["vcp_contractions_count"] >= 1:
+        assert all(isinstance(x, (int, float)) for x in result["vcp_contraction_sequence"])
+
+
+def test_vcp_pivot_identification_matches_consolidation_top():
+    closes = _construct_vcp_closes(
+        advance_low=50.0, pivot=100.0,
+        contractions=[12.0, 7.0, 4.0],
+    )
+    df = _build_vcp_df(closes)
+    swings = compute_swings(df, 60)
+    smas = compute_smas(df)
+    result = detect_vcp(df, swings, smas, BASE_CONFIG)
+    if result["vcp_pivot_level"] is not None:
+        # Pivot should be near the constructed top of 100 (within consolidation noise)
+        assert 95.0 <= result["vcp_pivot_level"] <= 105.0
+
+
+def test_vcp_fields_present_in_enrich_output():
+    df = _make_trending_df(300)
+    result = enrich("TEST", df, BASE_CONFIG)
+    for key in _VCP_FIELDS:
+        assert key in result, f"VCP field missing from enrich() output: {key}"
+
+
+def test_vcp_ma_alignment_uppercase_labels():
+    closes = _construct_vcp_closes(
+        advance_low=50.0, pivot=100.0,
+        contractions=[12.0, 7.0, 4.0],
+    )
+    df = _build_vcp_df(closes)
+    swings = compute_swings(df, 60)
+    smas = compute_smas(df)
+    result = detect_vcp(df, swings, smas, BASE_CONFIG)
+    assert result["vcp_ma_alignment"] in {"SUPPORTIVE", "MIXED", "HOSTILE", "UNKNOWN"}

@@ -336,6 +336,22 @@ def record_alert(
         "overhead_status":                   final_signal.get("overhead_status"),
         "volume_behavior":                   final_signal.get("volume_behavior"),
         "volume_ratio":                      final_signal.get("volume_ratio"),
+
+        # ---- Phase 1B: VCP evidence (observational only) ----
+        # Stored to enable future backtesting of VCP outcome correlation. None
+        # of these fields are read by any gate, score, calibration, routing,
+        # capital, or alert decision in the current scanner.
+        "vcp_status":               final_signal.get("vcp_status"),
+        "vcp_prior_advance_pct":    final_signal.get("vcp_prior_advance_pct"),
+        "vcp_contractions_count":   final_signal.get("vcp_contractions_count"),
+        "vcp_range_contraction":    final_signal.get("vcp_range_contraction"),
+        "vcp_contraction_sequence": final_signal.get("vcp_contraction_sequence"),
+        "vcp_volume_dryup":         final_signal.get("vcp_volume_dryup"),
+        "vcp_volume_ratio":         final_signal.get("vcp_volume_ratio"),
+        "vcp_ma_alignment":         final_signal.get("vcp_ma_alignment"),
+        "vcp_pivot_level":          final_signal.get("vcp_pivot_level"),
+        "vcp_failure_flag":         final_signal.get("vcp_failure_flag"),
+
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),
         "trend_state":                       final_signal.get("trend_state"),

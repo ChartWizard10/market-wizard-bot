@@ -550,6 +550,207 @@ def assess_volume(df: pd.DataFrame, config: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# VCP (Volatility Contraction Pattern) — Phase 1B evidence-capture engine
+# ---------------------------------------------------------------------------
+# Detects accumulation-style VCPs by measuring four objective components:
+#   1. Prior advance (no advance → no VCP)
+#   2. Contraction count (2–4 is canonical)
+#   3. Range contraction (each pullback shallower than the prior)
+#   4. Volume dry-up (recent volume contracted vs prior expansion phase)
+# Plus MA alignment, pivot identification, and failure detection.
+#
+# OBSERVATIONAL ONLY. The returned fields are passed through enrich() → prefilter
+# key_features → tiering final_signal → state_store alert_history for future
+# backtesting. They are never read by any tier gate, scoring function, calibration
+# step, routing decision, capital authorization, or alert formatter.
+#
+# Thresholds are conservative to avoid false-positive VCP labels on random chop —
+# accuracy outweighs frequency in evidence capture.
+
+_VCP_MIN_BARS                  = 60     # need enough history to see prior advance + consolidation
+_VCP_ADVANCE_LOOKBACK_BARS     = 60     # look this far back of pivot for the advance low
+_VCP_MIN_PULLBACK_PCT          = 2.0    # filter trivial pullbacks (noise)
+_VCP_MIN_PRIOR_ADVANCE_PCT     = 25.0   # CONFIRMED requires meaningful prior run
+_VCP_MIN_PRIOR_ADVANCE_FORMING = 10.0   # below this prior advance is too thin for FORMING
+_VCP_VOLUME_DRYUP_RATIO        = 0.85   # recent vol < 85% of advance vol = dry-up
+_VCP_FAILURE_BREAK_RATIO       = 0.98   # recent low < 98% of last contraction low = failure
+_VCP_FAILURE_WINDOW_BARS       = 5      # recent low measured over this many bars
+_VCP_VOLUME_RECENT_WINDOW_BARS = 10     # volume dry-up measured over this window
+_VCP_IDEAL_CONTRACTION_MIN     = 2      # CONFIRMED requires ≥2 contractions
+_VCP_IDEAL_CONTRACTION_MAX     = 4      # CONFIRMED requires ≤4 contractions
+
+_EMPTY_VCP = {
+    "vcp_status":               "UNKNOWN",
+    "vcp_prior_advance_pct":    None,
+    "vcp_contractions_count":   0,
+    "vcp_range_contraction":    False,
+    "vcp_contraction_sequence": [],
+    "vcp_volume_dryup":         False,
+    "vcp_volume_ratio":         None,
+    "vcp_ma_alignment":         "UNKNOWN",
+    "vcp_pivot_level":          None,
+    "vcp_failure_flag":         False,
+}
+
+
+def _vcp_ma_alignment(cur_close: float, smas: dict) -> str:
+    """Uppercase MA alignment label for VCP evidence record."""
+    s20, s50, s200 = smas.get("sma20"), smas.get("sma50"), smas.get("sma200")
+    if s20 is None or s50 is None:
+        return "UNKNOWN"
+    if s200 is None:
+        if cur_close > s20 > s50:
+            return "SUPPORTIVE"
+        if cur_close < s20 and cur_close < s50:
+            return "HOSTILE"
+        return "MIXED"
+    if cur_close > s20 > s50 > s200:
+        return "SUPPORTIVE"
+    if cur_close < s20 and cur_close < s50 and cur_close < s200:
+        return "HOSTILE"
+    return "MIXED"
+
+
+def detect_vcp(df: pd.DataFrame, swings: dict, smas: dict, config: dict) -> dict:
+    """Phase 1B: detect Volatility Contraction Pattern characteristics.
+
+    Returns 10 vcp_* evidence fields. Pure observation — never read by any
+    tier gate, scoring, calibration, routing, capital, or alert decision.
+    Never raises. Returns _EMPTY_VCP on any unexpected condition.
+    """
+    try:
+        return _detect_vcp_impl(df, swings, smas, config)
+    except Exception as exc:                                # noqa: BLE001
+        log.warning("detect_vcp_error: %s", exc)
+        return dict(_EMPTY_VCP)
+
+
+def _detect_vcp_impl(df: pd.DataFrame, swings: dict, smas: dict, _config: dict) -> dict:
+    if df is None or len(df) < _VCP_MIN_BARS:
+        return dict(_EMPTY_VCP)
+
+    h, l, c, v = df["high"], df["low"], df["close"], df["volume"]
+
+    swing_highs = swings.get("swing_highs") or []
+    swing_lows  = swings.get("swing_lows")  or []
+
+    # Need at least two swing points on each side to identify a consolidation
+    if len(swing_highs) < 2 or len(swing_lows) < 2:
+        return dict(_EMPTY_VCP)
+
+    # Pivot: highest of the recent swing highs. This is the top of the consolidation
+    # — the level above which a true VCP would break out.
+    pivot_idx, pivot_level = max(swing_highs, key=lambda p: p[1])
+
+    # Prior advance: lowest swing low within the lookback window BEFORE the pivot.
+    advance_window_start = max(0, pivot_idx - _VCP_ADVANCE_LOOKBACK_BARS)
+    pre_pivot_lows = [(i, p) for i, p in swing_lows if advance_window_start <= i < pivot_idx]
+    if not pre_pivot_lows:
+        return dict(_EMPTY_VCP)
+
+    advance_low_idx, advance_low = min(pre_pivot_lows, key=lambda p: p[1])
+    if advance_low <= 0:
+        return dict(_EMPTY_VCP)
+
+    prior_advance_pct = round((pivot_level - advance_low) / advance_low * 100, 2)
+
+    # Walk the swing sequence from advance_low forward, alternating H/L. For each
+    # rally-then-pullback pair after the advance phase, compute pullback depth.
+    sequence = sorted(
+        [(i, p, "H") for i, p in swing_highs if i >= advance_low_idx]
+        + [(i, p, "L") for i, p in swing_lows if i >= advance_low_idx],
+        key=lambda x: x[0],
+    )
+    pullback_depths: list[float] = []
+    last_high: float | None = None
+    for _idx, price, kind in sequence:
+        if kind == "H":
+            last_high = price
+        elif kind == "L" and last_high is not None and last_high > price:
+            depth = round((last_high - price) / last_high * 100, 2)
+            if depth >= _VCP_MIN_PULLBACK_PCT:
+                pullback_depths.append(depth)
+            last_high = None
+
+    contractions_count = len(pullback_depths)
+    range_contraction = (
+        contractions_count >= 2
+        and all(
+            pullback_depths[i] < pullback_depths[i - 1]
+            for i in range(1, contractions_count)
+        )
+    )
+
+    # Volume dry-up: recent-window mean vs prior advance-phase mean.
+    volume_ratio: float | None = None
+    volume_dryup = False
+    if pivot_idx > advance_low_idx and len(v) >= _VCP_VOLUME_RECENT_WINDOW_BARS:
+        try:
+            advance_v = float(v.iloc[advance_low_idx:pivot_idx + 1].mean())
+            recent_v  = float(v.iloc[-_VCP_VOLUME_RECENT_WINDOW_BARS:].mean())
+            if advance_v > 0 and not np.isnan(advance_v) and not np.isnan(recent_v):
+                volume_ratio = round(recent_v / advance_v, 3)
+                volume_dryup = volume_ratio < _VCP_VOLUME_DRYUP_RATIO
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    # MA alignment from existing SMAs
+    cur_close = float(c.iloc[-1])
+    ma_alignment = _vcp_ma_alignment(cur_close, smas)
+
+    # Failure detection: recent low broke below the most-recent post-pivot swing low
+    failure_flag = False
+    post_pivot_lows = [p for i, p in swing_lows if i > pivot_idx]
+    if post_pivot_lows and len(l) >= _VCP_FAILURE_WINDOW_BARS:
+        try:
+            recent_low = float(l.iloc[-_VCP_FAILURE_WINDOW_BARS:].min())
+            last_contraction_low = min(post_pivot_lows)
+            if (
+                last_contraction_low > 0
+                and recent_low < last_contraction_low * _VCP_FAILURE_BREAK_RATIO
+            ):
+                failure_flag = True
+        except (TypeError, ValueError, IndexError):
+            pass
+
+    # Status classification — conservative; false negatives preferred over false positives.
+    has_advance        = prior_advance_pct >= _VCP_MIN_PRIOR_ADVANCE_PCT
+    has_pattern_count  = _VCP_IDEAL_CONTRACTION_MIN <= contractions_count <= _VCP_IDEAL_CONTRACTION_MAX
+    has_thin_advance   = prior_advance_pct < _VCP_MIN_PRIOR_ADVANCE_FORMING
+
+    if failure_flag and contractions_count >= 1:
+        status = "INVALID"
+    elif (
+        has_advance
+        and has_pattern_count
+        and range_contraction
+        and volume_dryup
+    ):
+        status = "CONFIRMED"
+    elif contractions_count >= 1 and not has_thin_advance and (
+        range_contraction or volume_dryup
+    ):
+        status = "FORMING"
+    elif has_thin_advance or contractions_count == 0:
+        status = "ABSENT"
+    else:
+        status = "FORMING"
+
+    return {
+        "vcp_status":               status,
+        "vcp_prior_advance_pct":    prior_advance_pct,
+        "vcp_contractions_count":   contractions_count,
+        "vcp_range_contraction":    bool(range_contraction),
+        "vcp_contraction_sequence": pullback_depths,
+        "vcp_volume_dryup":         bool(volume_dryup),
+        "vcp_volume_ratio":         volume_ratio,
+        "vcp_ma_alignment":         ma_alignment,
+        "vcp_pivot_level":          round(pivot_level, 4),
+        "vcp_failure_flag":         bool(failure_flag),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main enrichment entry point
 # ---------------------------------------------------------------------------
 
@@ -580,6 +781,7 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
     invalidation = estimate_invalidation(fvg, ob, swings)
     rr = estimate_rr(cur, targets, invalidation)
     volume = assess_volume(df, config)
+    vcp = detect_vcp(df, swings, smas, config)
 
     prev_close: float | None = None
     if len(df) >= 2:
@@ -641,4 +843,15 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
         "volume_behavior": volume["volume_behavior"],
         # ATR
         "atr": atr,
+        # Phase 1B — VCP evidence (observational; never read by gates/scoring/routing)
+        "vcp_status":               vcp["vcp_status"],
+        "vcp_prior_advance_pct":    vcp["vcp_prior_advance_pct"],
+        "vcp_contractions_count":   vcp["vcp_contractions_count"],
+        "vcp_range_contraction":    vcp["vcp_range_contraction"],
+        "vcp_contraction_sequence": vcp["vcp_contraction_sequence"],
+        "vcp_volume_dryup":         vcp["vcp_volume_dryup"],
+        "vcp_volume_ratio":         vcp["vcp_volume_ratio"],
+        "vcp_ma_alignment":         vcp["vcp_ma_alignment"],
+        "vcp_pivot_level":          vcp["vcp_pivot_level"],
+        "vcp_failure_flag":         vcp["vcp_failure_flag"],
     }
