@@ -12,6 +12,7 @@ from src.discord_alerts import (
     chunk_message,
     send_alert,
     _sanitize,
+    _sendable,
     _clean_blocker_label,
     _classify_entry_grade,
     _ENTRY_GRADE_LABELS,
@@ -1967,7 +1968,11 @@ def test_format_alert_brt_does_not_break_wait_suppression():
 
 
 # ===========================================================================
-# Phase 1D — Market Structure State must NOT change alert format
+# Phase 1D — Market Structure State storage was evidence-only.
+# Phase 1E SUPERSEDES the Phase 1D "display-neutral" contract: the scanner
+# state is now rendered in the alert body as a human-facing truth layer.
+# The raw snake_case field name must still never appear (label is "Market
+# State:"), but the state VALUE is now intentionally surfaced.
 # ===========================================================================
 
 _MKTSTATE_PAYLOAD = {
@@ -1976,26 +1981,117 @@ _MKTSTATE_PAYLOAD = {
 
 
 def test_format_alert_does_not_render_mktstate_field_name():
+    # The raw snake_case field name must never appear as a rendered label.
     tr = _tiering_result(**_MKTSTATE_PAYLOAD)
     text = format_alert(tr).lower()
     assert "market_structure_state" not in text, (
-        "market_structure_state field name leaked into rendered alert"
+        "raw market_structure_state field name leaked into rendered alert"
     )
 
 
-def test_format_alert_does_not_render_mktstate_values():
-    for state in ("EXPANSION", "ORDERLY_CONTINUATION", "COMPRESSION",
-                  "REPAIR", "TRANSITION", "FAILURE", "UNKNOWN"):
-        tr = _tiering_result(market_structure_state=state)
-        text = format_alert(tr)
-        assert state not in text, (
-            f"market_structure_state value {state!r} leaked into rendered alert"
+# ===========================================================================
+# Phase 1E — Human-facing State Truth Layer (display-only)
+# ===========================================================================
+
+def test_1e_renders_market_state_when_present():
+    # 1: Market State appears in the alert when market_structure_state is set.
+    tr = _tiering_result(market_structure_state="REPAIR")
+    text = format_alert(tr)
+    assert "Market State: REPAIR" in text, (
+        f"Market State not rendered; alert body:\n{text}"
+    )
+
+
+def test_1e_does_not_render_market_state_when_absent():
+    # 2: When the field is missing, the trend/zone line is the legacy format and
+    # no Market State label appears.
+    tr = _tiering_result()  # no market_structure_state key
+    tr["final_signal"].pop("market_structure_state", None)
+    text = format_alert(tr)
+    assert "Market State" not in text, "Market State rendered when field absent"
+    assert "Trend: fresh_expansion  |  Zone: FVG" in text, (
+        "Legacy trend/zone line changed when market_structure_state absent"
+    )
+
+
+def test_1e_does_not_render_market_state_when_none():
+    # 2b: None value is treated as absent (falsy) → legacy output.
+    tr = _tiering_result(market_structure_state=None)
+    text = format_alert(tr)
+    assert "Market State" not in text
+    assert "Trend: fresh_expansion  |  Zone: FVG" in text
+
+
+def test_1e_display_does_not_change_final_tier():
+    # 3: format_alert is display-only — it must not mutate final_tier.
+    tr = _tiering_result(tier="SNIPE_IT", market_structure_state="FAILURE")
+    before = tr["final_tier"]
+    _ = format_alert(tr)
+    assert tr["final_tier"] == before == "SNIPE_IT"
+
+
+def test_1e_display_does_not_change_capital_action():
+    # 4: format_alert must not mutate capital_action.
+    tr = _tiering_result(market_structure_state="COMPRESSION")
+    before = tr["capital_action"]
+    _ = format_alert(tr)
+    assert tr["capital_action"] == before
+
+
+def test_1e_display_does_not_change_final_discord_channel():
+    # 5: format_alert must not mutate final_discord_channel.
+    tr = _tiering_result(market_structure_state="TRANSITION")
+    before = tr["final_discord_channel"]
+    _ = format_alert(tr)
+    assert tr["final_discord_channel"] == before == "#snipe-signals"
+
+
+def test_1e_wait_still_never_posts():
+    # 6: A WAIT result carrying any market_structure_state remains unsendable.
+    # _sendable() is the gate; Market State display must not flip it.
+    for state in ("EXPANSION", "REPAIR", "FAILURE", "UNKNOWN"):
+        tr = _tiering_result(tier="WAIT", safe=False, market_structure_state=state)
+        tr["final_tier"] = "WAIT"
+        tr["final_discord_channel"] = "none"
+        sendable, reason = _sendable(tr, None)
+        assert sendable is False, (
+            f"WAIT became sendable with market_structure_state={state!r}"
         )
+        assert reason == "wait_no_alert"
 
 
-def test_format_alert_identical_with_and_without_mktstate():
-    tr_without = _tiering_result()
-    tr_with    = _tiering_result(**_MKTSTATE_PAYLOAD)
-    assert format_alert(tr_with) == format_alert(tr_without), (
-        "market_structure_state changed the rendered alert body"
+def test_1e_roku_style_fresh_expansion_corrected_by_repair():
+    # 7: ROKU-style — Claude says fresh_expansion, scanner says REPAIR.
+    # Both must render side by side; tier is unchanged (still SNIPE_IT).
+    tr = _tiering_result(
+        tier="SNIPE_IT",
+        trend_state="fresh_expansion",
+        market_structure_state="REPAIR",
     )
+    text = format_alert(tr)
+    assert "Trend: fresh_expansion" in text, "Claude trend_state must remain visible"
+    assert "Market State: REPAIR" in text, "Scanner truth layer must be visible"
+    # The corrected line shows both, in order, on the same row.
+    assert "Trend: fresh_expansion  |  Market State: REPAIR  |  Zone: FVG" in text
+    # Display did not change the decision.
+    assert tr["final_tier"] == "SNIPE_IT"
+
+
+def test_1e_no_brt_or_vcp_fields_render():
+    # 8: Promoting market_structure_state must not surface any BRT/VCP organ.
+    tr = _tiering_result(
+        market_structure_state="EXPANSION",
+        entry_family="failed_break_conversion",
+        consumption_risk="high",
+        break_retest_state="trigger_pending",
+        zone_freshness="consumed",
+        vcp_status="CONFIRMED",
+        vcp_contraction_sequence="3-2-1",
+    )
+    text = format_alert(tr).lower()
+    for leaked in ("entry_family", "consumption_risk", "break_retest_state",
+                   "zone_freshness", "failed_break_conversion", "trigger_pending",
+                   "vcp_status", "vcp_contraction_sequence", "3-2-1"):
+        assert leaked not in text, f"unapproved field {leaked!r} leaked into alert"
+    # Market State itself is the only newly-surfaced organ (text is lowercased).
+    assert "market state: expansion" in text

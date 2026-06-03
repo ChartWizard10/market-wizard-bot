@@ -1632,6 +1632,15 @@ def format_alert(
     trend_state      = _sanitize(str(signal.get("trend_state", "—")))
     zone_type        = _sanitize(str(signal.get("zone_type", "—")))
 
+    # Phase 1E — Human-facing state truth layer. Display-only: scanner-computed
+    # market_structure_state is shown beside Claude's trend_state so humans can
+    # see the evidence layer. Never read by any gate, score, routing, or capital
+    # decision; rendered only when present (absent → output unchanged).
+    _mkt_state_raw = signal.get("market_structure_state")
+    market_structure_state = (
+        _sanitize(str(_mkt_state_raw)) if _mkt_state_raw else ""
+    )
+
     trigger_level      = signal.get("trigger_level")
     retest_status      = _sanitize(str(signal.get("retest_status", "—")))
     hold_status        = _sanitize(str(signal.get("hold_status", "—")))
@@ -1732,11 +1741,20 @@ def format_alert(
     raw_blocker_str = str(signal.get("near_entry_blocker_note") or "")
     overhead_label = _render_overhead_label(overhead_status, final_tier, raw_blocker_str)
 
+    # Phase 1E: insert Market State between Trend and Zone only when present.
+    if market_structure_state:
+        trend_zone_line = (
+            f"Trend: {trend_state}  |  Market State: {market_structure_state}"
+            f"  |  Zone: {zone_type}"
+        )
+    else:
+        trend_zone_line = f"Trend: {trend_state}  |  Zone: {zone_type}"
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{badge} | {ticker} | Score: {score}",
         f"Setup: {setup_family}  |  Structure: {structure_event}",
-        f"Trend: {trend_state}  |  Zone: {zone_type}",
+        trend_zone_line,
         "──────────────────────────────",
         "EXECUTION",
         f"  Trigger:      {_fmt_level(trigger_level)}",
