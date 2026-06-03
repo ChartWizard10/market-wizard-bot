@@ -22,6 +22,12 @@ from src.indicators import (
     estimate_rr,
     assess_volume,
     detect_vcp,
+    classify_entry_family,
+    assess_retest_quality,
+    assess_consumption_risk,
+    assess_level_authority,
+    assess_zone_freshness,
+    classify_break_retest_state,
     enrich,
 )
 
@@ -774,3 +780,313 @@ def test_vcp_ma_alignment_uppercase_labels():
     smas = compute_smas(df)
     result = detect_vcp(df, swings, smas, BASE_CONFIG)
     assert result["vcp_ma_alignment"] in {"SUPPORTIVE", "MIXED", "HOSTILE", "UNKNOWN"}
+
+
+# ===========================================================================
+# Phase 1C-P1 — Break & Retest doctrine organs (evidence-only)
+# ===========================================================================
+
+_BRT_FIELDS = (
+    "entry_family",
+    "retest_quality",
+    "consumption_risk",
+    "level_authority",
+    "zone_freshness",
+    "break_retest_state",
+    "one_hour_momentum_repair",
+)
+
+
+def _zone_touch_df(n, z_lo, z_hi, touch_bars, last_close=None):
+    """Build OHLCV df where bars sit above [z_lo, z_hi] except touch_bars (indices),
+    which dip into the zone band. last_close overrides the final bar's close.
+    """
+    idx = pd.bdate_range(end=_ANCHOR, periods=n)
+    n = len(idx)
+    highs, lows, closes = [], [], []
+    for i in range(n):
+        if i in touch_bars:
+            highs.append(z_hi + 1.0)
+            lows.append(z_lo + 0.2)
+            closes.append(z_hi + 0.5)
+        else:
+            highs.append(z_hi + 6.0)
+            lows.append(z_hi + 4.0)
+            closes.append(z_hi + 5.0)
+    if last_close is not None:
+        closes[-1] = last_close
+        highs[-1] = max(highs[-1], last_close)
+        lows[-1] = min(lows[-1], last_close)
+    return pd.DataFrame(
+        {"open": closes, "high": highs, "low": lows, "close": closes,
+         "volume": [1_000_000.0] * n},
+        index=idx,
+    )
+
+
+# ---- entry_family ----
+
+def test_entry_family_mss_reclaim_when_sweep_and_mss():
+    fam = classify_entry_family("MSS", True, {"fvg_bot": 1}, {"ob_lo": 1},
+                                "UNKNOWN", "supportive", "confirmed")
+    assert fam == "mss_reclaim", "sweep + MSS must classify as mss_reclaim before zone families"
+
+
+def test_entry_family_failed_break_conversion_on_reclaim():
+    fam = classify_entry_family("reclaim", False, None, None,
+                                "UNKNOWN", "mixed", "confirmed")
+    assert fam == "failed_break_conversion"
+
+
+def test_entry_family_zone_core_when_fvg_and_ob():
+    fam = classify_entry_family("BOS", False, {"fvg_bot": 1}, {"ob_lo": 1},
+                                "UNKNOWN", "mixed", "confirmed")
+    assert fam == "zone_core"
+
+
+def test_entry_family_fvg_entry_when_only_fvg():
+    fam = classify_entry_family("BOS", False, {"fvg_bot": 1}, None,
+                                "UNKNOWN", "mixed", "confirmed")
+    assert fam == "fvg_entry"
+
+
+def test_entry_family_ob_entry_when_only_ob():
+    fam = classify_entry_family("BOS", False, None, {"ob_lo": 1},
+                                "UNKNOWN", "mixed", "confirmed")
+    assert fam == "ob_entry"
+
+
+def test_entry_family_vcp_base_when_vcp_and_no_zone():
+    # VCP is one family inside the doctrine — only used when no structural zone.
+    fam = classify_entry_family("none", False, None, None,
+                                "CONFIRMED", "mixed", "missing")
+    assert fam == "vcp_base"
+
+
+def test_entry_family_vcp_does_not_override_zone():
+    # A confirmed VCP with a present FVG zone is still a zone family, not vcp_base.
+    fam = classify_entry_family("BOS", False, {"fvg_bot": 1}, None,
+                                "CONFIRMED", "mixed", "confirmed")
+    assert fam == "fvg_entry", "VCP must never displace a structural zone family"
+
+
+def test_entry_family_dynamic_value_when_sma_retest_only():
+    fam = classify_entry_family("BOS", False, None, None,
+                                "UNKNOWN", "supportive", "partial")
+    assert fam == "dynamic_value"
+
+
+def test_entry_family_unclassified_when_no_signals():
+    fam = classify_entry_family("none", False, None, None,
+                                "UNKNOWN", "hostile", "missing")
+    assert fam == "unclassified"
+
+
+# ---- retest_quality ----
+
+def test_retest_quality_not_retesting_when_status_missing():
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars=set())
+    assert assess_retest_quality(df, "missing", "OB", None, {"ob_lo": 100.0, "ob_hi": 102.0}) == "not_retesting"
+
+
+def test_retest_quality_not_retesting_when_no_zone():
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars=set())
+    assert assess_retest_quality(df, "confirmed", None, None, None) == "not_retesting"
+
+
+def test_retest_quality_clean_bounce_when_wick_then_close_above():
+    # Final bar wicks into the zone but closes above it; little prior lingering.
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars={11}, last_close=None)
+    # Force the last bar: low dips into zone, close back above zone top.
+    df.iloc[-1, df.columns.get_loc("low")] = 101.0
+    df.iloc[-1, df.columns.get_loc("close")] = 103.0
+    df.iloc[-1, df.columns.get_loc("high")] = 103.5
+    q = assess_retest_quality(df, "confirmed", "OB", None, {"ob_lo": 100.0, "ob_hi": 102.0})
+    assert q == "clean_bounce", f"expected clean_bounce, got {q}"
+
+
+def test_retest_quality_body_in_zone_when_close_inside():
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars={11}, last_close=101.0)
+    q = assess_retest_quality(df, "confirmed", "OB", None, {"ob_lo": 100.0, "ob_hi": 102.0})
+    assert q == "body_in_zone", f"expected body_in_zone, got {q}"
+
+
+def test_retest_quality_overlap_when_many_bars_in_zone():
+    # Several recent bars overlap the zone; final close above → drift/overlap.
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars={7, 8, 9, 10}, last_close=107.0)
+    q = assess_retest_quality(df, "confirmed", "OB", None, {"ob_lo": 100.0, "ob_hi": 102.0})
+    assert q == "overlap", f"expected overlap, got {q}"
+
+
+# ---- consumption_risk ----
+
+def test_consumption_risk_unknown_when_no_zone():
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars=set())
+    assert assess_consumption_risk(df, None, None, None) == "unknown"
+
+
+def test_consumption_risk_low_when_zero_or_one_touch():
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars={9})
+    ob = {"ob_lo": 100.0, "ob_hi": 102.0, "ob_idx": 2}
+    assert assess_consumption_risk(df, None, ob, "OB") == "low"
+
+
+def test_consumption_risk_moderate_when_two_touches():
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars={8, 10})
+    ob = {"ob_lo": 100.0, "ob_hi": 102.0, "ob_idx": 2}
+    assert assess_consumption_risk(df, None, ob, "OB") == "moderate"
+
+
+def test_consumption_risk_high_when_three_touches_no_expansion():
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars={7, 9, 11}, last_close=101.0)
+    ob = {"ob_lo": 100.0, "ob_hi": 102.0, "ob_idx": 2}
+    assert assess_consumption_risk(df, None, ob, "OB") == "high"
+
+
+def test_consumption_risk_moderate_when_three_touches_but_expanded():
+    # 3+ touches but price expanded well above the zone → not high.
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars={5, 6, 7}, last_close=120.0)
+    ob = {"ob_lo": 100.0, "ob_hi": 102.0, "ob_idx": 2}
+    assert assess_consumption_risk(df, None, ob, "OB") == "moderate"
+
+
+# ---- level_authority ----
+
+def test_level_authority_strong_when_three_nearby_swings():
+    swings = {"swing_highs": [(10, 100.0), (20, 100.5), (30, 99.8)], "swing_lows": [(15, 90.0)]}
+    assert assess_level_authority(100.0, None, None, swings, None) == "strong"
+
+
+def test_level_authority_moderate_when_two_nearby_swings():
+    swings = {"swing_highs": [(10, 100.0), (20, 100.4)], "swing_lows": [(15, 80.0)]}
+    assert assess_level_authority(100.0, None, None, swings, None) == "moderate"
+
+
+def test_level_authority_weak_when_one_nearby_swing():
+    swings = {"swing_highs": [(10, 100.0)], "swing_lows": [(15, 80.0)]}
+    assert assess_level_authority(100.0, None, None, swings, None) == "weak"
+
+
+def test_level_authority_unknown_when_no_reference_level():
+    swings = {"swing_highs": [(10, 100.0)], "swing_lows": []}
+    assert assess_level_authority(None, None, None, swings, None) == "unknown"
+
+
+def test_level_authority_uses_zone_core_when_no_structure_level():
+    swings = {"swing_highs": [(10, 101.0), (20, 100.9), (30, 101.1)], "swing_lows": []}
+    ob = {"ob_lo": 100.0, "ob_hi": 102.0, "ob_idx": 2}
+    # zone core = 101.0; three swings within 1% → strong
+    assert assess_level_authority(None, None, ob, swings, "OB") == "strong"
+
+
+# ---- zone_freshness ----
+
+def test_zone_freshness_unknown_when_no_zone():
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars=set())
+    assert assess_zone_freshness(df, None, None, None) == "unknown"
+
+
+def test_zone_freshness_fresh_when_young_and_untouched():
+    # Zone formed 4 bars ago, no touches → fresh.
+    df = _zone_touch_df(12, 100.0, 102.0, touch_bars=set())
+    ob = {"ob_lo": 100.0, "ob_hi": 102.0, "ob_idx": 8}
+    assert assess_zone_freshness(df, None, ob, "OB") == "fresh"
+
+
+def test_zone_freshness_consumed_when_three_touches():
+    df = _zone_touch_df(20, 100.0, 102.0, touch_bars={10, 12, 14})
+    ob = {"ob_lo": 100.0, "ob_hi": 102.0, "ob_idx": 3}
+    assert assess_zone_freshness(df, None, ob, "OB") == "consumed"
+
+
+def test_zone_freshness_tested_when_aged_with_some_interaction():
+    # Old zone (formed at idx 2 of 30 bars), one touch → tested (not fresh, not consumed).
+    df = _zone_touch_df(30, 100.0, 102.0, touch_bars={20})
+    ob = {"ob_lo": 100.0, "ob_hi": 102.0, "ob_idx": 2}
+    assert assess_zone_freshness(df, None, ob, "OB") == "tested"
+
+
+# ---- break_retest_state ----
+
+def test_break_retest_state_awaiting_break_when_no_structure():
+    assert classify_break_retest_state("none", "missing") == "awaiting_break"
+
+
+def test_break_retest_state_break_confirmed_when_bos_no_retest():
+    assert classify_break_retest_state("BOS", "missing") == "break_confirmed"
+
+
+def test_break_retest_state_retesting_when_partial():
+    assert classify_break_retest_state("BOS", "partial") == "retesting"
+
+
+def test_break_retest_state_retesting_when_confirmed_no_hold():
+    # Scanner view (no hold_status supplied): confirmed retest = retesting.
+    assert classify_break_retest_state("BOS", "confirmed") == "retesting"
+
+
+def test_break_retest_state_failed_when_retest_failed():
+    assert classify_break_retest_state("BOS", "failed") == "failed"
+
+
+def test_break_retest_state_hold_states_future_wired():
+    # When hold + acceptance are supplied, the downstream sequence states light up.
+    assert classify_break_retest_state("BOS", "confirmed", "confirmed", "accepted") == "active_entry"
+    assert classify_break_retest_state("BOS", "confirmed", "confirmed", "damaging") == "trigger_pending"
+    assert classify_break_retest_state("BOS", "confirmed", "confirmed", None) == "hold_confirmed"
+
+
+def test_break_retest_state_unknown_on_garbage():
+    assert classify_break_retest_state("weird_state", "weird") == "unknown"
+
+
+# ---- enrich() integration ----
+
+def test_brt_fields_present_in_enrich_output():
+    df = _make_trending_df(300)
+    result = enrich("TEST", df, BASE_CONFIG)
+    for key in _BRT_FIELDS:
+        assert key in result, f"BRT field missing from enrich() output: {key}"
+
+
+def test_brt_one_hour_momentum_repair_is_deferred():
+    df = _make_trending_df(300)
+    result = enrich("TEST", df, BASE_CONFIG)
+    assert result["one_hour_momentum_repair"] == "deferred_requires_1h", (
+        "one_hour_momentum_repair must remain deferred — no daily-bar proxy allowed"
+    )
+
+
+def test_brt_enrich_labels_within_valid_domains():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG)
+    assert r["entry_family"] in {
+        "zone_core", "fvg_entry", "ob_entry", "mss_reclaim",
+        "failed_break_conversion", "vcp_base", "dynamic_value", "unclassified",
+    }
+    assert r["retest_quality"] in {"clean_bounce", "body_in_zone", "overlap", "unclear", "not_retesting"}
+    assert r["consumption_risk"] in {"low", "moderate", "high", "unknown"}
+    assert r["level_authority"] in {"strong", "moderate", "weak", "unknown"}
+    assert r["zone_freshness"] in {"fresh", "tested", "consumed", "unknown"}
+    assert r["break_retest_state"] in {
+        "awaiting_break", "break_confirmed", "retesting", "hold_confirmed",
+        "trigger_pending", "active_entry", "failed", "unknown",
+    }
+
+
+def test_no_disabled_indicators_in_brt_functions():
+    # Source-level guard: the new Phase 1C functions must not reference any
+    # forbidden retail indicator. Word-boundary match so doctrine labels that
+    # legitimately embed a substring (e.g. "failed_break_conve[rsi]on") do not
+    # trip a false positive.
+    import inspect
+    import re
+    for fn in (
+        classify_entry_family, assess_retest_quality, assess_consumption_risk,
+        assess_level_authority, assess_zone_freshness, classify_break_retest_state,
+    ):
+        src = inspect.getsource(fn).lower()
+        for bad in ("rsi", "macd", "bollinger", "stochastic"):
+            assert not re.search(rf"\b{bad}\b", src), (
+                f"forbidden indicator {bad!r} found in {fn.__name__}"
+            )

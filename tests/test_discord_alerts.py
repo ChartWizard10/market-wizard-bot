@@ -1906,3 +1906,61 @@ def test_entry_grade_phrase_passes_contract_guard_near_entry():
     entry_line = next(l for l in text.split("\n") if "Entry grade:" in l)
     assert "F" in entry_line, f"F grade corrupted by guard: {entry_line!r}"
     assert "full quality" not in text.lower()
+
+
+# ===========================================================================
+# Phase 1C-P1 — Break & Retest doctrine organs must NOT change alert format
+# ===========================================================================
+
+_BRT_PAYLOAD = {
+    "entry_family":             "failed_break_conversion",
+    "retest_quality":           "overlap",
+    "consumption_risk":         "high",
+    "level_authority":          "weak",
+    "zone_freshness":           "consumed",
+    "break_retest_state":       "trigger_pending",
+    "one_hour_momentum_repair": "deferred_requires_1h",
+}
+
+
+def test_format_alert_does_not_render_brt_field_names():
+    # The doctrine organs are evidence-only; their field names must never appear
+    # as rendered labels in the alert body.
+    tr = _tiering_result(**_BRT_PAYLOAD)
+    text = format_alert(tr).lower()
+    for field in _BRT_PAYLOAD:
+        assert field not in text, (
+            f"BRT field name {field!r} leaked into rendered alert"
+        )
+
+
+def test_format_alert_does_not_render_brt_values():
+    # Distinctive BRT label values must not appear in the rendered alert body.
+    tr = _tiering_result(**_BRT_PAYLOAD)
+    text = format_alert(tr).lower()
+    for value in ("failed_break_conversion", "consumed", "trigger_pending",
+                  "deferred_requires_1h", "zone_freshness", "consumption_risk"):
+        assert value not in text, f"BRT value {value!r} leaked into rendered alert"
+
+
+def test_format_alert_identical_with_and_without_brt_fields():
+    # Rendering must be byte-identical whether or not BRT evidence is attached.
+    tr_without = _tiering_result()
+    tr_with = _tiering_result(**_BRT_PAYLOAD)
+    assert format_alert(tr_with) == format_alert(tr_without), (
+        "BRT evidence changed the rendered alert body"
+    )
+
+
+def test_format_alert_brt_does_not_break_wait_suppression():
+    # A WAIT-equivalent unsafe result carrying BRT evidence still produces no
+    # actionable render path change (format_alert is only called for sendable
+    # tiers, but the body must not surface BRT data even if invoked).
+    tr = _tiering_result(tier="NEAR_ENTRY", **_BRT_PAYLOAD)
+    tr["final_tier"] = "NEAR_ENTRY"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    tr["final_signal"]["tier"] = "NEAR_ENTRY"
+    tr["final_signal"]["capital_action"] = "wait_no_capital"
+    text = format_alert(tr).lower()
+    assert "break_retest_state" not in text
+    assert "consumption_risk" not in text

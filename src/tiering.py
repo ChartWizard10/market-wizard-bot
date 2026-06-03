@@ -1166,6 +1166,46 @@ def _apply_vcp_evidence_passthrough(signal: dict, key_features: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Phase 1C-P1: Break & Retest doctrine evidence passthrough
+# ---------------------------------------------------------------------------
+# Scanner-computed Break & Retest doctrine organs flow from indicators.enrich()
+# through prefilter._build_key_features() into the signal so they are carried
+# into final_signal and ultimately into state_store alert_history for future
+# backtesting.
+#
+# OBSERVATIONAL ONLY. None of these fields are read by any tier gate, scoring
+# function, calibration step, routing decision, capital authorization, dedup
+# logic, campaign identity, or alert formatter. The passthrough is additive
+# metadata; it cannot change any decision the scanner makes.
+#
+# CORE LAW: Setup Quality is not Entry Quality. These fields describe entry
+# context and doctrine-sequence position; they never gate opportunity. WAIT
+# behavior is untouched. VCP remains one entry family inside the doctrine.
+_BRT_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "entry_family",
+    "retest_quality",
+    "consumption_risk",
+    "level_authority",
+    "zone_freshness",
+    "break_retest_state",
+    "one_hour_momentum_repair",
+)
+
+
+def _apply_brt_evidence_passthrough(signal: dict, key_features: dict) -> dict:
+    """Mirror scanner-computed Break & Retest evidence fields into signal.
+
+    Only copies fields that exist in key_features (None values are preserved).
+    Never replaces the signal dict's existing non-BRT fields. Evidence-capture only.
+    """
+    result = dict(signal)
+    for field in _BRT_EVIDENCE_FIELDS:
+        if field in key_features:
+            result[field] = key_features[field]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1241,6 +1281,12 @@ def validate(
     # Observational only — never read by any gate, scoring, calibration, routing,
     # capital, dedup, campaign, or alert formatting decision.
     working_signal = _apply_vcp_evidence_passthrough(working_signal, key_features)
+
+    # Phase 1C-P1: Pass Break & Retest doctrine evidence fields through from
+    # scanner key_features. Observational only — same evidence-capture contract
+    # as the VCP passthrough above; never read by any gate, scoring, calibration,
+    # routing, capital, dedup, campaign, or alert formatting decision.
+    working_signal = _apply_brt_evidence_passthrough(working_signal, key_features)
 
     if claude_tier == "NEAR_ENTRY":
         existing_mc = working_signal.get("missing_conditions")

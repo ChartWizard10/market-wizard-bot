@@ -352,6 +352,18 @@ def record_alert(
         "vcp_pivot_level":          final_signal.get("vcp_pivot_level"),
         "vcp_failure_flag":         final_signal.get("vcp_failure_flag"),
 
+        # ---- Phase 1C-P1: Break & Retest doctrine organs (observational only) ----
+        # Stored to enable future backtesting of entry-quality vs outcome. None of
+        # these fields are read by any gate, score, calibration, routing, capital,
+        # dedup, or alert decision in the current scanner.
+        "entry_family":             final_signal.get("entry_family"),
+        "retest_quality":           final_signal.get("retest_quality"),
+        "consumption_risk":         final_signal.get("consumption_risk"),
+        "level_authority":          final_signal.get("level_authority"),
+        "zone_freshness":           final_signal.get("zone_freshness"),
+        "break_retest_state":       final_signal.get("break_retest_state"),
+        "one_hour_momentum_repair": final_signal.get("one_hour_momentum_repair"),
+
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),
         "trend_state":                       final_signal.get("trend_state"),

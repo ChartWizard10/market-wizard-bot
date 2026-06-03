@@ -2740,3 +2740,170 @@ def test_vcp_passthrough_works_for_near_entry():
     result = validate(signal, _pf_sovereign(_kf_with_vcp()), _BASE_CONFIG)
     assert result["final_tier"] == "NEAR_ENTRY"
     assert result["final_signal"]["vcp_status"] == "CONFIRMED"
+
+
+# ===========================================================================
+# Phase 1C-P1 — Break & Retest doctrine evidence passthrough + regression
+# ===========================================================================
+
+_BRT_KF_FIELDS = {
+    "entry_family":             "zone_core",
+    "retest_quality":           "clean_bounce",
+    "consumption_risk":         "low",
+    "level_authority":          "strong",
+    "zone_freshness":           "fresh",
+    "break_retest_state":       "retesting",
+    "one_hour_momentum_repair": "deferred_requires_1h",
+}
+
+
+def _kf_with_brt(extra: dict | None = None, **brt_overrides) -> dict:
+    """Build key_features carrying a full Break & Retest evidence payload."""
+    kf = dict(_BRT_KF_FIELDS)
+    kf.update(brt_overrides)
+    if extra:
+        kf.update(extra)
+    return kf
+
+
+# 1C-1: BRT fields land in final_signal
+def test_brt_evidence_passthrough_lands_in_final_signal():
+    signal = _snipe_signal()
+    result = validate(signal, _pf_sovereign(_kf_with_brt()), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field, expected in _BRT_KF_FIELDS.items():
+        assert fs.get(field) == expected, (
+            f"BRT field {field!r} not propagated: expected {expected!r}, got {fs.get(field)!r}"
+        )
+
+
+# 1C-2: BRT fields absent from key_features → final_signal does not synthesize them
+def test_brt_evidence_absent_when_key_features_lacks_fields():
+    signal = _snipe_signal()
+    kf = {"current_price": 182.50}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field in _BRT_KF_FIELDS:
+        assert field not in fs, (
+            f"BRT field {field!r} appeared in final_signal even though key_features "
+            f"did not carry it"
+        )
+
+
+# 1C-3: BRT None values flow through verbatim
+def test_brt_evidence_none_values_preserved():
+    signal = _snipe_signal()
+    kf = _kf_with_brt(entry_family=None, retest_quality=None, break_retest_state=None)
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["entry_family"] is None
+    assert fs["retest_quality"] is None
+    assert fs["break_retest_state"] is None
+
+
+# 1C-4: BRT presence vs absence does not change any decision field
+def test_no_tiering_change_from_brt_present_vs_absent():
+    signal = _snipe_signal()
+    res_with    = validate(signal, _pf_sovereign(_kf_with_brt()), _BASE_CONFIG)
+    res_without = validate(signal, _pf_sovereign({}), _BASE_CONFIG)
+    for key in ("final_tier", "score", "capital_action",
+                "final_discord_channel", "safe_for_alert"):
+        assert res_with[key] == res_without[key], (
+            f"BRT presence changed {key!r}: with={res_with[key]!r} vs without={res_without[key]!r}"
+        )
+
+
+# 1C-5: weak/consumed/high evidence does NOT downgrade a valid SNIPE_IT
+def test_no_tier_change_from_adverse_brt_evidence():
+    signal = _snipe_signal()
+    kf = _kf_with_brt(
+        consumption_risk="high",
+        level_authority="weak",
+        zone_freshness="consumed",
+        retest_quality="overlap",
+        entry_family="unclassified",
+        break_retest_state="failed",
+    )
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT", (
+        "Adverse BRT evidence must NOT downgrade a valid SNIPE_IT (evidence-only)"
+    )
+    assert result["safe_for_alert"] is True
+    # Evidence still preserved for backtesting
+    assert result["final_signal"]["consumption_risk"] == "high"
+    assert result["final_signal"]["break_retest_state"] == "failed"
+
+
+# 1C-6: BRT fields never appear as veto labels
+def test_no_brt_label_in_applied_vetoes():
+    signal = _snipe_signal()
+    kf = _kf_with_brt(consumption_risk="high", break_retest_state="failed")
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    brt_tokens = (
+        "entry_family", "retest_quality", "consumption_risk", "level_authority",
+        "zone_freshness", "break_retest_state", "one_hour_momentum_repair",
+    )
+    for veto in result["applied_vetoes"]:
+        for tok in brt_tokens:
+            assert tok not in veto.lower(), f"BRT reference leaked into veto: {veto!r}"
+
+
+# 1C-7: routing unchanged across all break_retest_state values
+def test_no_routing_change_from_brt():
+    signal = _snipe_signal()
+    for st in ("awaiting_break", "break_confirmed", "retesting", "hold_confirmed",
+               "trigger_pending", "active_entry", "failed", "unknown", None):
+        kf = _kf_with_brt(break_retest_state=st)
+        result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+        assert result["final_discord_channel"] == CHANNEL_MAP["SNIPE_IT"], (
+            f"Routing changed for break_retest_state={st!r}"
+        )
+
+
+# 1C-8: capital_action unchanged across all consumption_risk values
+def test_no_capital_change_from_brt():
+    signal = _snipe_signal()
+    for cr in ("low", "moderate", "high", "unknown", None):
+        kf = _kf_with_brt(consumption_risk=cr)
+        result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+        assert result["capital_action"] == CAPITAL_MAP["SNIPE_IT"], (
+            f"capital_action changed for consumption_risk={cr!r}"
+        )
+
+
+# 1C-9: WAIT behavior unchanged by BRT evidence
+def test_wait_unchanged_by_brt_evidence():
+    signal = _wait_signal()
+    kf = _kf_with_brt(break_retest_state="active_entry", consumption_risk="low",
+                      level_authority="strong", zone_freshness="fresh")
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT", "BRT evidence must never rescue a WAIT"
+    assert result["safe_for_alert"] is False
+    assert result["final_discord_channel"] == "none"
+
+
+# 1C-10: BRT and VCP evidence coexist without interference
+def test_brt_and_vcp_coexist_in_final_signal():
+    signal = _snipe_signal()
+    kf = _kf_with_brt(_kf_with_vcp())
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["entry_family"] == "zone_core"
+    assert fs["vcp_status"] == "CONFIRMED"
+    assert result["final_tier"] == "SNIPE_IT"
+
+
+# 1C-11: STARTER signal also receives BRT passthrough without tier change
+def test_brt_passthrough_works_for_starter():
+    signal = _starter_signal()
+    result = validate(signal, _pf_sovereign(_kf_with_brt()), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["final_signal"]["entry_family"] == "zone_core"
+
+
+# 1C-12: NEAR_ENTRY signal also receives BRT passthrough without tier change
+def test_brt_passthrough_works_for_near_entry():
+    signal = _near_entry_signal()
+    result = validate(signal, _pf_sovereign(_kf_with_brt()), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["final_signal"]["entry_family"] == "zone_core"

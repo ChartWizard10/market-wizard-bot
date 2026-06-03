@@ -801,6 +801,73 @@ def test_record_alert_vcp_failure_flag_does_not_affect_dedup_key():
     assert rec1["dedup_key"] == rec2["dedup_key"]
 
 
+# ---------------------------------------------------------------------------
+# Phase 1C-P1 — Break & Retest doctrine evidence persistence (observational only)
+# ---------------------------------------------------------------------------
+# These tests verify the alert_history record stores the six doctrine organs plus
+# the deferred 1H field so future entry-quality backtesting can tag historical
+# alerts. The fields are read-only metadata — recording them does not affect
+# dedup, cooldown, tier, scoring, routing, or capital.
+
+_BRT_HISTORY_FIELDS = (
+    "entry_family",
+    "retest_quality",
+    "consumption_risk",
+    "level_authority",
+    "zone_freshness",
+    "break_retest_state",
+    "one_hour_momentum_repair",
+)
+
+
+def test_record_alert_stores_brt_fields():
+    tr = _tiering(
+        entry_family="zone_core",
+        retest_quality="clean_bounce",
+        consumption_risk="low",
+        level_authority="strong",
+        zone_freshness="fresh",
+        break_retest_state="retesting",
+        one_hour_momentum_repair="deferred_requires_1h",
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+
+    assert rec["entry_family"] == "zone_core"
+    assert rec["retest_quality"] == "clean_bounce"
+    assert rec["consumption_risk"] == "low"
+    assert rec["level_authority"] == "strong"
+    assert rec["zone_freshness"] == "fresh"
+    assert rec["break_retest_state"] == "retesting"
+    assert rec["one_hour_momentum_repair"] == "deferred_requires_1h"
+
+
+def test_record_alert_brt_fields_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    for field in _BRT_HISTORY_FIELDS:
+        assert field in rec, f"BRT field missing from history record: {field!r}"
+        assert rec[field] is None
+
+
+def test_record_alert_brt_fields_do_not_affect_dedup_key():
+    # Recording adverse BRT evidence must produce the same dedup_key as a record
+    # without it. dedup is structural; BRT organs are evidence.
+    tr_plain = _tiering(trigger=182.50, invalidation=178.20)
+    tr_brt = _tiering(
+        trigger=182.50, invalidation=178.20,
+        entry_family="failed_break_conversion",
+        consumption_risk="high",
+        break_retest_state="failed",
+    )
+    s1 = record_alert("AAPL", tr_plain, _empty(), _cfg())
+    s2 = record_alert("AAPL", tr_brt,   _empty(), _cfg())
+    rec1 = s1["tickers"]["AAPL"]["alert_history"][0]
+    rec2 = s2["tickers"]["AAPL"]["alert_history"][0]
+    assert rec1["dedup_key"] == rec2["dedup_key"]
+
+
 def test_record_alert_stores_setup_context_fields():
     tr = _tiering(
         setup_family="continuation",

@@ -758,6 +758,335 @@ def _detect_vcp_impl(df: pd.DataFrame, swings: dict, smas: dict, _config: dict) 
 
 
 # ---------------------------------------------------------------------------
+# Phase 1C-P1: Break & Retest Doctrine Organs — evidence-capture engine
+# ---------------------------------------------------------------------------
+# Six structural evidence fields plus one deferred organ. Pure observation.
+# None of these fields are read by any tier gate, scoring function, calibration
+# step, routing decision, capital authorization, dedup logic, campaign identity,
+# or alert formatter. They flow enrich() -> prefilter key_features -> tiering
+# final_signal -> state_store alert_history for future backtesting only.
+#
+# CORE LAW: Setup Quality is not Entry Quality. These fields describe the entry
+# context and the doctrine-sequence position; they never gate opportunity.
+#
+# VCP GOVERNING LAW: VCP is one entry family inside the larger Break & Retest
+# doctrine. vcp_base never overrides structure, sponsorship, or risk.
+
+_BRT_ZONE_FRESH_MAX_AGE_BARS  = 10    # zone younger than this with <=1 touch = fresh
+_BRT_OVERLAP_WINDOW_BARS      = 10    # window for counting retest overlap bars
+_BRT_OVERLAP_MIN_BARS         = 3     # >= this many overlapping bars = drift/overlap
+_BRT_CONSUMPTION_HIGH_TOUCHES = 3     # >= this many zone touches = high consumption
+_BRT_CONSUMPTION_MOD_TOUCHES  = 2     # this many touches = moderate consumption
+_BRT_EXPANSION_PCT            = 5.0   # close this far above zone top = expanded away
+_BRT_AUTHORITY_TOL_PCT        = 1.0   # swings within this % of level count toward authority
+_BRT_AUTHORITY_STRONG_SWINGS  = 3     # >= this many nearby swings = strong authority
+_BRT_DEFERRED_1H              = "deferred_requires_1h"
+
+
+def _brt_active_zone(fvg: dict | None, ob: dict | None, retest_zone):
+    """Return (zone_lo, zone_hi, formation_idx) for the controlling zone.
+
+    Prefers the zone named by retest_zone; otherwise prefers OB, then FVG.
+    Returns (None, None, None) when no zone exists.
+    """
+    if retest_zone == "FVG" and fvg:
+        return fvg.get("fvg_bot"), fvg.get("fvg_top"), fvg.get("fvg_start_idx")
+    if retest_zone == "OB" and ob:
+        return ob.get("ob_lo"), ob.get("ob_hi"), ob.get("ob_idx")
+    if ob:
+        return ob.get("ob_lo"), ob.get("ob_hi"), ob.get("ob_idx")
+    if fvg:
+        return fvg.get("fvg_bot"), fvg.get("fvg_top"), fvg.get("fvg_start_idx")
+    return None, None, None
+
+
+def classify_entry_family(
+    structure_event: str,
+    sweep_detected: bool,
+    fvg: dict | None,
+    ob: dict | None,
+    vcp_status: str,
+    sma_value_alignment: str,
+    retest_status: str,
+) -> str:
+    """Classify the Break & Retest entry family. Evidence only.
+
+    Priority (first match wins):
+      mss_reclaim             — sweep + MSS structure shift (liquidity-grab reversal)
+      failed_break_conversion — reclaim of a previously lost level
+      zone_core               — FVG and OB confluence
+      fvg_entry               — FVG zone only
+      ob_entry                — OB zone only
+      vcp_base                — VCP pattern present, no specific FVG/OB zone
+      dynamic_value           — supportive SMA value retest only (no zone)
+      unclassified            — none of the above
+
+    VCP is one family inside the doctrine; it never displaces a structural zone.
+    """
+    try:
+        se = str(structure_event or "none")
+        if bool(sweep_detected) and se.upper() == "MSS":
+            return "mss_reclaim"
+        if se.lower() == "reclaim":
+            return "failed_break_conversion"
+        has_fvg = bool(fvg)
+        has_ob = bool(ob)
+        if has_fvg and has_ob:
+            return "zone_core"
+        if has_fvg:
+            return "fvg_entry"
+        if has_ob:
+            return "ob_entry"
+        if str(vcp_status or "UNKNOWN") in ("CONFIRMED", "FORMING"):
+            return "vcp_base"
+        if (
+            str(sma_value_alignment or "unavailable") == "supportive"
+            and str(retest_status or "missing") in ("confirmed", "partial")
+        ):
+            return "dynamic_value"
+        return "unclassified"
+    except Exception as exc:                                # noqa: BLE001
+        log.warning("entry_family_error: %s", exc)
+        return "unclassified"
+
+
+def assess_retest_quality(
+    df: pd.DataFrame,
+    retest_status: str,
+    retest_zone,
+    fvg: dict | None,
+    ob: dict | None,
+) -> str:
+    """Quality of the retest interaction. Evidence only.
+
+    Labels (first match wins):
+      not_retesting — no zone, or retest_status missing/failed
+      clean_bounce  — current bar wicked into the zone and closed back above it,
+                      with little prior lingering (sharp defense)
+      body_in_zone  — current close is inside the zone band
+      overlap       — price overlapped the zone for several recent bars (drift)
+      unclear       — fallback when none of the above is determinable
+
+    DAILY-BAR LIMITATION: true intraday core-defense texture requires 1H data.
+    These labels are the conservative daily-bar approximation.
+    """
+    try:
+        if str(retest_status or "missing") in ("missing", "failed"):
+            return "not_retesting"
+        z_lo, z_hi, _idx = _brt_active_zone(fvg, ob, retest_zone)
+        if z_lo is None or z_hi is None:
+            return "not_retesting"
+        z_lo, z_hi = float(z_lo), float(z_hi)
+
+        cur_close = float(df["close"].iloc[-1])
+        cur_low = float(df["low"].iloc[-1])
+
+        window = df.iloc[-_BRT_OVERLAP_WINDOW_BARS:]
+        overlap_bars = int(
+            ((window["low"] <= z_hi) & (window["high"] >= z_lo)).sum()
+        )
+
+        if cur_low <= z_hi and cur_close > z_hi and overlap_bars <= 2:
+            return "clean_bounce"
+        if z_lo <= cur_close <= z_hi:
+            return "body_in_zone"
+        if overlap_bars >= _BRT_OVERLAP_MIN_BARS:
+            return "overlap"
+        return "unclear"
+    except Exception as exc:                                # noqa: BLE001
+        log.warning("retest_quality_error: %s", exc)
+        return "unclear"
+
+
+def _brt_zone_touches(df: pd.DataFrame, z_lo: float, z_hi: float, z_idx) -> int:
+    """Count bars after formation whose range entered the zone band."""
+    n = len(df)
+    start = min(max(int(z_idx) + 1, 0), n)
+    if start >= n:
+        return 0
+    seg = df.iloc[start:]
+    return int(((seg["low"] <= z_hi) & (seg["high"] >= z_lo)).sum())
+
+
+def assess_consumption_risk(
+    df: pd.DataFrame,
+    fvg: dict | None,
+    ob: dict | None,
+    retest_zone,
+) -> str:
+    """Measure potential zone depletion from repeated tests. Evidence only.
+
+    Labels:
+      unknown  — no zone present
+      low      — 0-1 zone touches since formation
+      moderate — 2 touches, or 3+ touches after price expanded away from the zone
+      high     — 3+ touches with no expansion (liquidity being consumed)
+
+    DAILY-BAR LIMITATION: true order-depletion analysis needs intraday volume at
+    level. This is a conservative touch-count proxy.
+    """
+    try:
+        z_lo, z_hi, z_idx = _brt_active_zone(fvg, ob, retest_zone)
+        if z_lo is None or z_hi is None or z_idx is None:
+            return "unknown"
+        z_lo, z_hi = float(z_lo), float(z_hi)
+
+        touches = _brt_zone_touches(df, z_lo, z_hi, z_idx)
+
+        cur_close = float(df["close"].iloc[-1])
+        expanded = z_hi > 0 and cur_close > z_hi * (1 + _BRT_EXPANSION_PCT / 100)
+
+        if touches >= _BRT_CONSUMPTION_HIGH_TOUCHES:
+            return "moderate" if expanded else "high"
+        if touches >= _BRT_CONSUMPTION_MOD_TOUCHES:
+            return "moderate"
+        return "low"
+    except Exception as exc:                                # noqa: BLE001
+        log.warning("consumption_risk_error: %s", exc)
+        return "unknown"
+
+
+def assess_level_authority(
+    structure_level,
+    fvg: dict | None,
+    ob: dict | None,
+    swings: dict,
+    retest_zone,
+) -> str:
+    """Measure structural importance of the level. Evidence only.
+
+    Authority reflects how many swing points cluster around the reference level
+    (the broken structural level, or the zone core when no structure level set).
+
+    Labels:
+      strong   — 3+ nearby swing points (well-established level)
+      moderate — 2 nearby swing points
+      weak     — reference level exists with <2 nearby swings
+      unknown  — no reference level at all
+
+    Authority is independent of freshness — a historically important level can
+    already be consumed.
+    """
+    try:
+        ref = None
+        if structure_level is not None:
+            ref = float(structure_level)
+        else:
+            z_lo, z_hi, _ = _brt_active_zone(fvg, ob, retest_zone)
+            if z_lo is not None and z_hi is not None:
+                ref = (float(z_lo) + float(z_hi)) / 2.0
+        if ref is None or ref <= 0:
+            return "unknown"
+
+        tol = ref * (_BRT_AUTHORITY_TOL_PCT / 100)
+        prices = [p for _, p in (swings.get("swing_highs") or [])]
+        prices += [p for _, p in (swings.get("swing_lows") or [])]
+        nearby = sum(1 for p in prices if abs(float(p) - ref) <= tol)
+
+        if nearby >= _BRT_AUTHORITY_STRONG_SWINGS:
+            return "strong"
+        if nearby == 2:
+            return "moderate"
+        return "weak"
+    except Exception as exc:                                # noqa: BLE001
+        log.warning("level_authority_error: %s", exc)
+        return "unknown"
+
+
+def assess_zone_freshness(
+    df: pd.DataFrame,
+    fvg: dict | None,
+    ob: dict | None,
+    retest_zone,
+) -> str:
+    """Measure lifecycle status of the zone. Evidence only.
+
+    Labels:
+      fresh    — young zone (<= 10 bars old) with at most one touch
+      tested   — zone has had moderate interaction but is still intact
+      consumed — zone touched 3+ times (heavily worked)
+      unknown  — no zone present
+
+    Freshness and authority are separate concepts: strong does not mean fresh.
+    """
+    try:
+        z_lo, z_hi, z_idx = _brt_active_zone(fvg, ob, retest_zone)
+        if z_lo is None or z_hi is None or z_idx is None:
+            return "unknown"
+        z_lo, z_hi = float(z_lo), float(z_hi)
+
+        age = (len(df) - 1) - int(z_idx)
+        touches = _brt_zone_touches(df, z_lo, z_hi, z_idx)
+
+        if touches >= _BRT_CONSUMPTION_HIGH_TOUCHES:
+            return "consumed"
+        if age <= _BRT_ZONE_FRESH_MAX_AGE_BARS and touches <= 1:
+            return "fresh"
+        return "tested"
+    except Exception as exc:                                # noqa: BLE001
+        log.warning("zone_freshness_error: %s", exc)
+        return "unknown"
+
+
+def classify_break_retest_state(
+    structure_event: str,
+    retest_status: str,
+    hold_status: str | None = None,
+    acceptance: str | None = None,
+) -> str:
+    """Position within the Break & Retest doctrine sequence. Evidence only.
+
+    Sequence: Context -> Level -> Break/Reclaim -> Acceptance -> Retest -> Hold
+              -> Trigger -> Expansion.
+
+    Scanner-determinable states (from sovereign structure_event + retest_status):
+      awaiting_break  — no structural break yet
+      break_confirmed — break/reclaim present, retest not yet underway
+      retesting       — price interacting with the zone (partial/confirmed retest)
+      failed          — retest failed or acceptance invalidated
+
+    Hold/trigger states require hold_status (Claude) and acceptance (tiering) and
+    are reachable only when those are supplied. In Phase 1C-P1 enrich() supplies
+    scanner data only, so the function emits the scanner-view sequence position:
+      hold_confirmed  — retest confirmed and hold confirmed (future-wired)
+      trigger_pending — hold confirmed, entry not yet accepted (future-wired)
+      active_entry    — hold confirmed, entry accepted (future-wired)
+      unknown         — insufficient data
+    """
+    try:
+        se = str(structure_event or "none").lower()
+        rs = str(retest_status or "missing").lower()
+        hs = str(hold_status or "").lower()
+        ac = str(acceptance or "").lower()
+
+        if rs == "failed" or ac == "invalidated":
+            return "failed"
+
+        # Hold/trigger/active states require explicit hold + acceptance inputs.
+        if hs == "confirmed" and rs == "confirmed":
+            if ac == "accepted":
+                return "active_entry"
+            if ac in ("unproven", "damaging", "unknown", ""):
+                return "trigger_pending" if ac else "hold_confirmed"
+            return "hold_confirmed"
+
+        if rs in ("confirmed", "partial"):
+            return "retesting"
+
+        broke = se in (
+            "bos", "mss", "reclaim", "accepted_break", "failed_breakdown_reclaim"
+        )
+        if broke:
+            return "break_confirmed"
+        if se == "none":
+            return "awaiting_break"
+        return "unknown"
+    except Exception as exc:                                # noqa: BLE001
+        log.warning("break_retest_state_error: %s", exc)
+        return "unknown"
+
+
+# ---------------------------------------------------------------------------
 # Main enrichment entry point
 # ---------------------------------------------------------------------------
 
@@ -789,6 +1118,25 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
     rr = estimate_rr(cur, targets, invalidation)
     volume = assess_volume(df, config)
     vcp = detect_vcp(df, swings, smas, config)
+
+    # Phase 1C-P1 — Break & Retest doctrine organs (observational only).
+    # Computed from scanner-authoritative daily-bar fields. break_retest_state is
+    # the scanner-view sequence position (hold/acceptance states are future-wired).
+    entry_family = classify_entry_family(
+        structure["structure_event"], sweep["sweep_detected"],
+        fvg, ob, vcp["vcp_status"], alignment, retest["retest_status"],
+    )
+    retest_quality = assess_retest_quality(
+        df, retest["retest_status"], retest["retest_zone"], fvg, ob
+    )
+    consumption_risk = assess_consumption_risk(df, fvg, ob, retest["retest_zone"])
+    level_authority = assess_level_authority(
+        structure["structure_level"], fvg, ob, swings, retest["retest_zone"]
+    )
+    zone_freshness = assess_zone_freshness(df, fvg, ob, retest["retest_zone"])
+    break_retest_state = classify_break_retest_state(
+        structure["structure_event"], retest["retest_status"]
+    )
 
     prev_close: float | None = None
     if len(df) >= 2:
@@ -861,4 +1209,14 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
         "vcp_ma_alignment":         vcp["vcp_ma_alignment"],
         "vcp_pivot_level":          vcp["vcp_pivot_level"],
         "vcp_failure_flag":         vcp["vcp_failure_flag"],
+        # Phase 1C-P1 — Break & Retest doctrine organs (observational; never read
+        # by gates/scoring/routing/capital/alert formatting). one_hour_momentum_repair
+        # is a deferred organ — no daily-bar proxy is permitted.
+        "entry_family":             entry_family,
+        "retest_quality":           retest_quality,
+        "consumption_risk":         consumption_risk,
+        "level_authority":          level_authority,
+        "zone_freshness":           zone_freshness,
+        "break_retest_state":       break_retest_state,
+        "one_hour_momentum_repair": _BRT_DEFERRED_1H,
     }

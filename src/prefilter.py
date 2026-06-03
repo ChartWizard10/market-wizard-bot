@@ -361,6 +361,16 @@ def _build_key_features(enriched: dict) -> dict:
         "vcp_ma_alignment":         enriched.get("vcp_ma_alignment"),
         "vcp_pivot_level":          enriched.get("vcp_pivot_level"),
         "vcp_failure_flag":         enriched.get("vcp_failure_flag"),
+        # Phase 1C-P1 — Break & Retest doctrine organs (observational; never read
+        # by ranking, scoring, tiering gates, calibration, routing, capital, or
+        # alert formatting). one_hour_momentum_repair is a deferred organ.
+        "entry_family":             enriched.get("entry_family"),
+        "retest_quality":           enriched.get("retest_quality"),
+        "consumption_risk":         enriched.get("consumption_risk"),
+        "level_authority":          enriched.get("level_authority"),
+        "zone_freshness":           enriched.get("zone_freshness"),
+        "break_retest_state":       enriched.get("break_retest_state"),
+        "one_hour_momentum_repair": enriched.get("one_hour_momentum_repair"),
     }
 
 
