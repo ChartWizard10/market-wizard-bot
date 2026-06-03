@@ -1087,6 +1087,79 @@ def classify_break_retest_state(
 
 
 # ---------------------------------------------------------------------------
+# Phase 1D: Market Structure State — evidence-capture engine
+# ---------------------------------------------------------------------------
+# Single field: market_structure_state.  Pure observation of the current
+# auction context.  Never read by any gate, scoring function, calibration
+# step, routing decision, capital authorisation, dedup logic, campaign
+# identity, or alert formatter.  Flows enrich() → prefilter key_features →
+# tiering final_signal → state_store alert_history for future backtesting.
+
+
+def classify_market_structure_state(
+    structure_event: str | None,
+    sweep_detected: bool,
+    retest_status: str | None,
+    sma_value_alignment: str | None,
+    overhead_status: str | None,
+) -> str:
+    """Classify current auction state.
+
+    Returns one of:
+      EXPANSION | ORDERLY_CONTINUATION | COMPRESSION |
+      REPAIR | TRANSITION | FAILURE | UNKNOWN
+
+    Pure observation. Never referenced by any gate, score, routing,
+    capital, or alert-formatting path.
+    """
+    try:
+        se  = str(structure_event or "").upper()
+        rs  = str(retest_status or "").lower()
+        sva = str(sma_value_alignment or "").lower()
+        oh  = str(overhead_status or "").lower()
+        sw  = bool(sweep_detected)
+
+        # 1 — FAILURE: failed retest or hostile alignment with no bullish structure
+        if rs == "failed":
+            return "FAILURE"
+        if sva == "hostile" and se in ("CHOCH", "NONE", ""):
+            return "FAILURE"
+
+        # 2 — TRANSITION: directional structure present but conflicting context.
+        # Evaluated before EXPANSION so overhead and mixed alignment are caught first.
+        if se in ("MSS", "BOS", "RECLAIM", "CONTINUATION"):
+            if sva in ("mixed", "hostile", "unavailable"):
+                return "TRANSITION"
+            if oh in ("blocked", "moderate"):
+                return "TRANSITION"
+
+        # 3 — EXPANSION: displacement with supportive alignment and no conflicts
+        if se == "MSS" and sva == "supportive":
+            return "EXPANSION"
+        if se == "BOS" and sw and sva == "supportive":
+            return "EXPANSION"
+
+        # 4 — REPAIR: sweep without MSS confirmation, or active reclaim in progress
+        if sw and se not in ("MSS",):
+            return "REPAIR"
+        if se == "RECLAIM":
+            return "REPAIR"
+
+        # 5 — ORDERLY_CONTINUATION: clean BOS/continuation, no sweep, supportive
+        if se in ("BOS", "CONTINUATION") and sva == "supportive" and not sw and rs != "failed":
+            return "ORDERLY_CONTINUATION"
+
+        # 6 — COMPRESSION: no clear structure or unresolvable alignment
+        if se in ("NONE", "") or sva in ("mixed", "unavailable"):
+            return "COMPRESSION"
+
+        return "UNKNOWN"
+
+    except Exception:
+        return "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
 # Main enrichment entry point
 # ---------------------------------------------------------------------------
 
@@ -1136,6 +1209,12 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
     zone_freshness = assess_zone_freshness(df, fvg, ob, retest["retest_zone"])
     break_retest_state = classify_break_retest_state(
         structure["structure_event"], retest["retest_status"]
+    )
+
+    # Phase 1D — Market Structure State (observational only).
+    market_structure_state = classify_market_structure_state(
+        structure["structure_event"], sweep["sweep_detected"],
+        retest["retest_status"], alignment, overhead["overhead_status"],
     )
 
     prev_close: float | None = None
@@ -1219,4 +1298,7 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
         "zone_freshness":           zone_freshness,
         "break_retest_state":       break_retest_state,
         "one_hour_momentum_repair": _BRT_DEFERRED_1H,
+        # Phase 1D — Market Structure State (observational; never read by
+        # gates/scoring/routing/capital/alert formatting).
+        "market_structure_state":   market_structure_state,
     }

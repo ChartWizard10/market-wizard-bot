@@ -1116,3 +1116,39 @@ class TestCampaignIdentityDedup:
         result = check_alert(tiering, state, cfg)
         assert result["should_alert"] is True
         assert result["reason"] == "new_campaign"
+
+
+# ===========================================================================
+# Phase 1D — Market Structure State persistence tests
+# ===========================================================================
+
+def test_record_alert_stores_market_structure_state():
+    tr = _tiering(market_structure_state="EXPANSION")
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["market_structure_state"] == "EXPANSION", (
+        f"market_structure_state not stored: got {rec.get('market_structure_state')!r}"
+    )
+
+
+def test_record_alert_market_structure_state_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert "market_structure_state" in rec, "market_structure_state key missing from history record"
+    assert rec["market_structure_state"] is None
+
+
+def test_record_alert_market_structure_state_does_not_affect_dedup_key():
+    tr_plain  = _tiering(trigger=182.50, invalidation=178.20)
+    tr_mktst  = _tiering(
+        trigger=182.50, invalidation=178.20,
+        market_structure_state="FAILURE",
+    )
+    s1 = record_alert("AAPL", tr_plain, _empty(), _cfg())
+    s2 = record_alert("AAPL", tr_mktst, _empty(), _cfg())
+    rec1 = s1["tickers"]["AAPL"]["alert_history"][0]
+    rec2 = s2["tickers"]["AAPL"]["alert_history"][0]
+    assert rec1["dedup_key"] == rec2["dedup_key"], (
+        "market_structure_state must not influence the dedup_key"
+    )

@@ -1964,3 +1964,38 @@ def test_format_alert_brt_does_not_break_wait_suppression():
     text = format_alert(tr).lower()
     assert "break_retest_state" not in text
     assert "consumption_risk" not in text
+
+
+# ===========================================================================
+# Phase 1D — Market Structure State must NOT change alert format
+# ===========================================================================
+
+_MKTSTATE_PAYLOAD = {
+    "market_structure_state": "FAILURE",
+}
+
+
+def test_format_alert_does_not_render_mktstate_field_name():
+    tr = _tiering_result(**_MKTSTATE_PAYLOAD)
+    text = format_alert(tr).lower()
+    assert "market_structure_state" not in text, (
+        "market_structure_state field name leaked into rendered alert"
+    )
+
+
+def test_format_alert_does_not_render_mktstate_values():
+    for state in ("EXPANSION", "ORDERLY_CONTINUATION", "COMPRESSION",
+                  "REPAIR", "TRANSITION", "FAILURE", "UNKNOWN"):
+        tr = _tiering_result(market_structure_state=state)
+        text = format_alert(tr)
+        assert state not in text, (
+            f"market_structure_state value {state!r} leaked into rendered alert"
+        )
+
+
+def test_format_alert_identical_with_and_without_mktstate():
+    tr_without = _tiering_result()
+    tr_with    = _tiering_result(**_MKTSTATE_PAYLOAD)
+    assert format_alert(tr_with) == format_alert(tr_without), (
+        "market_structure_state changed the rendered alert body"
+    )

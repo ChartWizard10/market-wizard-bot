@@ -371,6 +371,9 @@ def _build_key_features(enriched: dict) -> dict:
         "zone_freshness":           enriched.get("zone_freshness"),
         "break_retest_state":       enriched.get("break_retest_state"),
         "one_hour_momentum_repair": enriched.get("one_hour_momentum_repair"),
+        # Phase 1D — Market Structure State (observational; never read by ranking,
+        # scoring, tiering gates, calibration, routing, capital, or alert formatting).
+        "market_structure_state":   enriched.get("market_structure_state"),
     }
 
 

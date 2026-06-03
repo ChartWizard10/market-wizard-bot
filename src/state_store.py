@@ -363,6 +363,8 @@ def record_alert(
         "zone_freshness":           final_signal.get("zone_freshness"),
         "break_retest_state":       final_signal.get("break_retest_state"),
         "one_hour_momentum_repair": final_signal.get("one_hour_momentum_repair"),
+        # ---- Phase 1D: Market Structure State (observational only) ----
+        "market_structure_state":   final_signal.get("market_structure_state"),
 
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),

@@ -28,6 +28,7 @@ from src.indicators import (
     assess_level_authority,
     assess_zone_freshness,
     classify_break_retest_state,
+    classify_market_structure_state,
     enrich,
 )
 
@@ -1090,3 +1091,158 @@ def test_no_disabled_indicators_in_brt_functions():
             assert not re.search(rf"\b{bad}\b", src), (
                 f"forbidden indicator {bad!r} found in {fn.__name__}"
             )
+
+
+# ===========================================================================
+# Phase 1D — Market Structure State (evidence-only)
+# ===========================================================================
+
+_MKTSTATE_VALID = frozenset({
+    "EXPANSION", "ORDERLY_CONTINUATION", "COMPRESSION",
+    "REPAIR", "TRANSITION", "FAILURE", "UNKNOWN",
+})
+
+# Shorthand to avoid 5-arg repetition in tests
+def _mss(se, sw, rs, sva, oh):
+    return classify_market_structure_state(se, sw, rs, sva, oh)
+
+
+# ---- EXPANSION ----
+
+def test_mktstate_expansion_on_mss_sweep_supportive():
+    assert _mss("MSS", True, "confirmed", "supportive", "clear") == "EXPANSION"
+
+
+def test_mktstate_expansion_on_mss_no_sweep_supportive():
+    # MSS alone with supportive alignment is sufficient for EXPANSION
+    assert _mss("MSS", False, "partial", "supportive", "unknown") == "EXPANSION"
+
+
+def test_mktstate_expansion_on_bos_with_sweep_supportive():
+    assert _mss("BOS", True, "partial", "supportive", "clear") == "EXPANSION"
+
+
+# ---- ORDERLY_CONTINUATION ----
+
+def test_mktstate_orderly_continuation_bos_no_sweep():
+    assert _mss("BOS", False, "partial", "supportive", "clear") == "ORDERLY_CONTINUATION"
+
+
+def test_mktstate_orderly_continuation_bos_missing_retest():
+    assert _mss("BOS", False, "missing", "supportive", "clear") == "ORDERLY_CONTINUATION"
+
+
+# ---- COMPRESSION ----
+
+def test_mktstate_compression_no_structure_mixed_alignment():
+    assert _mss("none", False, "missing", "mixed", "unknown") == "COMPRESSION"
+
+
+def test_mktstate_compression_no_structure_unavailable_alignment():
+    assert _mss("none", False, None, "unavailable", None) == "COMPRESSION"
+
+
+def test_mktstate_compression_all_none_inputs():
+    assert _mss(None, False, None, None, None) == "COMPRESSION"
+
+
+# ---- REPAIR ----
+
+def test_mktstate_repair_on_reclaim():
+    assert _mss("reclaim", False, "partial", "supportive", "clear") == "REPAIR"
+
+
+def test_mktstate_repair_sweep_without_mss():
+    # Sweep detected but structure_event is none = repair in progress
+    assert _mss("none", True, "partial", "supportive", "clear") == "REPAIR"
+
+
+def test_mktstate_repair_sweep_with_bos_mixed_alignment():
+    # BOS + sweep but mixed alignment → TRANSITION (not REPAIR)
+    # because TRANSITION check runs first for known structure events
+    result = _mss("BOS", True, "partial", "mixed", "clear")
+    assert result == "TRANSITION"
+
+
+def test_mktstate_repair_reclaim_with_supportive_alignment():
+    assert _mss("reclaim", False, "not_retesting", "supportive", "unknown") == "REPAIR"
+
+
+# ---- TRANSITION ----
+
+def test_mktstate_transition_mss_with_mixed_alignment():
+    assert _mss("MSS", False, "confirmed", "mixed", "clear") == "TRANSITION"
+
+
+def test_mktstate_transition_bos_with_blocked_overhead():
+    assert _mss("BOS", False, "partial", "supportive", "blocked") == "TRANSITION"
+
+
+def test_mktstate_transition_mss_with_moderate_overhead():
+    assert _mss("MSS", True, "confirmed", "supportive", "moderate") == "TRANSITION"
+
+
+def test_mktstate_transition_bos_unavailable_alignment():
+    assert _mss("BOS", False, "partial", "unavailable", "clear") == "TRANSITION"
+
+
+# ---- FAILURE ----
+
+def test_mktstate_failure_on_failed_retest():
+    assert _mss("BOS", False, "failed", "mixed", "blocked") == "FAILURE"
+
+
+def test_mktstate_failure_hostile_no_structure():
+    assert _mss("none", False, "missing", "hostile", "clear") == "FAILURE"
+
+
+def test_mktstate_failure_hostile_empty_structure():
+    assert _mss(None, False, None, "hostile", None) == "FAILURE"
+
+
+def test_mktstate_failure_overrides_structure():
+    # Even strong structure event cannot prevent FAILURE when retest failed
+    assert _mss("MSS", True, "failed", "supportive", "clear") == "FAILURE"
+
+
+# ---- UNKNOWN ----
+
+def test_mktstate_unknown_on_garbage_inputs():
+    assert _mss("GARBAGE_EVENT", False, None, "strong_bull", None) == "UNKNOWN"
+
+
+def test_mktstate_unknown_returns_string():
+    result = _mss("GARBAGE", True, "garbage", "garbage", "garbage")
+    assert isinstance(result, str)
+    # Must be a valid state label
+    assert result in _MKTSTATE_VALID
+
+
+# ---- enrich() integration ----
+
+def test_mktstate_present_in_enrich_output():
+    df = _make_trending_df(300)
+    result = enrich("TEST", df, BASE_CONFIG)
+    assert "market_structure_state" in result, (
+        "market_structure_state missing from enrich() output"
+    )
+
+
+def test_mktstate_enrich_label_within_valid_domain():
+    df = _make_trending_df(300)
+    result = enrich("TEST", df, BASE_CONFIG)
+    assert result["market_structure_state"] in _MKTSTATE_VALID, (
+        f"market_structure_state {result['market_structure_state']!r} not in valid domain"
+    )
+
+
+# ---- source guard ----
+
+def test_no_disabled_indicators_in_mktstate_function():
+    import inspect
+    import re
+    src = inspect.getsource(classify_market_structure_state).lower()
+    for bad in ("rsi", "macd", "bollinger", "stochastic"):
+        assert not re.search(rf"\b{bad}\b", src), (
+            f"forbidden indicator {bad!r} found in classify_market_structure_state"
+        )

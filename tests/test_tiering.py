@@ -2907,3 +2907,115 @@ def test_brt_passthrough_works_for_near_entry():
     result = validate(signal, _pf_sovereign(_kf_with_brt()), _BASE_CONFIG)
     assert result["final_tier"] == "NEAR_ENTRY"
     assert result["final_signal"]["entry_family"] == "zone_core"
+
+
+# ===========================================================================
+# Phase 1D — Market Structure State evidence passthrough + regression
+# ===========================================================================
+
+_MKT_STATE_KF_FIELDS = {
+    "market_structure_state": "EXPANSION",
+}
+
+
+def _kf_with_mktstate(state: str = "EXPANSION", extra: dict | None = None) -> dict:
+    """Build key_features carrying a market_structure_state evidence payload."""
+    kf = {"market_structure_state": state}
+    if extra:
+        kf.update(extra)
+    return kf
+
+
+# 1D-1: market_structure_state lands in final_signal
+def test_mktstate_passthrough_lands_in_final_signal():
+    signal = _snipe_signal()
+    result = validate(signal, _pf_sovereign(_kf_with_mktstate("EXPANSION")), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs.get("market_structure_state") == "EXPANSION", (
+        f"market_structure_state not propagated: got {fs.get('market_structure_state')!r}"
+    )
+
+
+# 1D-2: absent key_features does not synthesize market_structure_state
+def test_mktstate_absent_when_key_features_lacks_field():
+    signal = _snipe_signal()
+    kf = {"current_price": 182.50}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert "market_structure_state" not in fs, (
+        "market_structure_state appeared in final_signal when key_features lacked it"
+    )
+
+
+# 1D-3: None value flows through verbatim
+def test_mktstate_none_value_preserved():
+    signal = _snipe_signal()
+    kf = {"market_structure_state": None}
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_signal"]["market_structure_state"] is None
+
+
+# 1D-4: all valid state labels pass through without any decision change
+def test_mktstate_all_states_do_not_change_tier():
+    signal = _snipe_signal()
+    res_base = validate(signal, _pf_sovereign({}), _BASE_CONFIG)
+    for state in ("EXPANSION", "ORDERLY_CONTINUATION", "COMPRESSION",
+                  "REPAIR", "TRANSITION", "FAILURE", "UNKNOWN"):
+        kf = _kf_with_mktstate(state)
+        res = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+        for key in ("final_tier", "score", "capital_action",
+                    "final_discord_channel", "safe_for_alert"):
+            assert res[key] == res_base[key], (
+                f"market_structure_state={state!r} changed {key!r}: "
+                f"with={res[key]!r} vs base={res_base[key]!r}"
+            )
+
+
+# 1D-5: FAILURE/COMPRESSION state does NOT downgrade a valid SNIPE_IT
+def test_mktstate_adverse_state_does_not_downgrade_snipe_it():
+    signal = _snipe_signal()
+    for bad_state in ("FAILURE", "COMPRESSION", "UNKNOWN"):
+        kf = _kf_with_mktstate(bad_state)
+        result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+        assert result["final_tier"] == "SNIPE_IT", (
+            f"market_structure_state={bad_state!r} unexpectedly downgraded SNIPE_IT "
+            f"to {result['final_tier']!r}"
+        )
+        assert result["safe_for_alert"] is True
+
+
+# 1D-6: market_structure_state never appears as a veto label
+def test_mktstate_not_in_applied_vetoes():
+    signal = _snipe_signal()
+    kf = _kf_with_mktstate("FAILURE")
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    applied = result.get("applied_vetoes", [])
+    assert "market_structure_state" not in applied
+    for veto in applied:
+        assert "market_structure_state" not in str(veto)
+
+
+# 1D-7: WAIT behavior unchanged by any market_structure_state value
+def test_mktstate_wait_unchanged_by_all_states():
+    from src.tiering import validate
+    signal = _wait_signal()
+    for state in ("EXPANSION", "ORDERLY_CONTINUATION", "COMPRESSION",
+                  "REPAIR", "TRANSITION", "FAILURE", "UNKNOWN"):
+        kf = _kf_with_mktstate(state)
+        result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+        assert result["final_tier"] == "WAIT", (
+            f"WAIT downgraded to {result['final_tier']!r} by market_structure_state={state!r}"
+        )
+        assert result["safe_for_alert"] is False
+        assert result["final_discord_channel"] == "none"
+
+
+# 1D-8: coexists with BRT and VCP evidence without interference
+def test_mktstate_coexists_with_brt_and_vcp():
+    signal = _snipe_signal()
+    kf = _kf_with_brt(_kf_with_mktstate("EXPANSION"))
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs.get("market_structure_state") == "EXPANSION"
+    assert fs.get("entry_family") == "zone_core"
+    assert result["final_tier"] == "SNIPE_IT"

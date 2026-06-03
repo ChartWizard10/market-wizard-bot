@@ -1206,6 +1206,32 @@ def _apply_brt_evidence_passthrough(signal: dict, key_features: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Phase 1D — Market Structure State evidence passthrough
+# ---------------------------------------------------------------------------
+# Single observational field.  Same evidence-capture contract as VCP and BRT
+# passthroughs: never read by any gate, scoring function, calibration step,
+# routing decision, capital authorisation, dedup logic, campaign identity, or
+# alert formatter.
+
+_MKT_STATE_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "market_structure_state",
+)
+
+
+def _apply_mkt_state_evidence_passthrough(signal: dict, key_features: dict) -> dict:
+    """Mirror scanner-computed market_structure_state into signal.
+
+    Evidence-capture only. None values are preserved. Does not overwrite any
+    existing non-market-state field in signal.
+    """
+    result = dict(signal)
+    for field in _MKT_STATE_EVIDENCE_FIELDS:
+        if field in key_features:
+            result[field] = key_features[field]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1287,6 +1313,11 @@ def validate(
     # as the VCP passthrough above; never read by any gate, scoring, calibration,
     # routing, capital, dedup, campaign, or alert formatting decision.
     working_signal = _apply_brt_evidence_passthrough(working_signal, key_features)
+
+    # Phase 1D: Pass Market Structure State evidence field through from scanner
+    # key_features. Observational only — same evidence-capture contract as the
+    # VCP and BRT passthroughs above.
+    working_signal = _apply_mkt_state_evidence_passthrough(working_signal, key_features)
 
     if claude_tier == "NEAR_ENTRY":
         existing_mc = working_signal.get("missing_conditions")
