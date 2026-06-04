@@ -1641,6 +1641,16 @@ def format_alert(
         _sanitize(str(_mkt_state_raw)) if _mkt_state_raw else ""
     )
 
+    # Phase 14A — Weekly Sovereignty context (display-only). Scanner-computed
+    # weekly evidence shown beside the daily layer; never read by any gate,
+    # score, routing, or capital decision. Rendered only when present.
+    _wk_sma_raw   = signal.get("weekly_sma_alignment")
+    _wk_trend_raw = signal.get("weekly_trend_state")
+    _wk_ctx_raw   = signal.get("weekly_alignment_context")
+    weekly_sma_alignment     = _sanitize(str(_wk_sma_raw)) if _wk_sma_raw else ""
+    weekly_trend_state       = _sanitize(str(_wk_trend_raw)) if _wk_trend_raw else ""
+    weekly_alignment_context = _sanitize(str(_wk_ctx_raw)) if _wk_ctx_raw else ""
+
     trigger_level      = signal.get("trigger_level")
     retest_status      = _sanitize(str(signal.get("retest_status", "—")))
     hold_status        = _sanitize(str(signal.get("hold_status", "—")))
@@ -1750,11 +1760,26 @@ def format_alert(
     else:
         trend_zone_line = f"Trend: {trend_state}  |  Zone: {zone_type}"
 
+    # Phase 14A: weekly context line, shown beneath the daily line only when any
+    # weekly evidence is present. Daily layer above is never altered.
+    _weekly_line = None
+    if weekly_trend_state or weekly_sma_alignment or weekly_alignment_context:
+        _wk_trend = weekly_trend_state or "unknown"
+        _wk_sma   = weekly_sma_alignment or "unavailable"
+        _wk_ctx   = weekly_alignment_context or "unknown"
+        _weekly_line = (
+            f"Weekly: {_wk_trend} / {_wk_sma}  |  Alignment: {_wk_ctx}"
+        )
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{badge} | {ticker} | Score: {score}",
         f"Setup: {setup_family}  |  Structure: {structure_event}",
         trend_zone_line,
+    ]
+    if _weekly_line:
+        lines.append(_weekly_line)
+    lines += [
         "──────────────────────────────",
         "EXECUTION",
         f"  Trigger:      {_fmt_level(trigger_level)}",

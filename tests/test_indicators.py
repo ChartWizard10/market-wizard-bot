@@ -29,6 +29,10 @@ from src.indicators import (
     assess_zone_freshness,
     classify_break_retest_state,
     classify_market_structure_state,
+    compute_weekly_sma_alignment,
+    compute_weekly_trend_state,
+    compute_weekly_alignment_context,
+    compute_weekly_evidence,
     enrich,
 )
 
@@ -1246,3 +1250,197 @@ def test_no_disabled_indicators_in_mktstate_function():
         assert not re.search(rf"\b{bad}\b", src), (
             f"forbidden indicator {bad!r} found in classify_market_structure_state"
         )
+
+
+# ===========================================================================
+# Phase 14A — Weekly Sovereignty Evidence Layer (evidence-only)
+# ===========================================================================
+
+_WEEKLY_FIELDS = (
+    "weekly_sma_alignment",
+    "weekly_trend_state",
+    "weekly_alignment_context",
+)
+
+_WK_ANCHOR = pd.Timestamp("2025-01-03")  # a Friday
+
+
+def _wk_df(closes, highs=None, lows=None) -> pd.DataFrame:
+    """Build a weekly OHLCV DataFrame (W-FRI index) directly from a close series."""
+    n = len(closes)
+    idx = pd.bdate_range(end=_WK_ANCHOR, periods=n, freq="W-FRI")
+    c = np.array(closes, dtype=float)
+    h = (c + 1.0) if highs is None else np.array(highs, dtype=float)
+    l = (c - 1.0) if lows is None else np.array(lows, dtype=float)
+    return pd.DataFrame(
+        {"open": c, "high": h, "low": l, "close": c, "volume": [1_000_000.0] * n},
+        index=idx,
+    )
+
+
+def _wk_rising(n=60):
+    return _wk_df(list(50 + np.arange(n) * 0.8))
+
+
+def _wk_falling(n=60):
+    return _wk_df(list(120 - np.arange(n) * 0.8))
+
+
+def _wk_mixed():
+    # Long rise then a sharp recent drop: close falls below SMA50 while SMA50
+    # slope is still rising → neither supportive nor hostile → mixed.
+    return _wk_df(list(50 + np.arange(56) * 0.9) + [95, 88, 80, 72])
+
+
+def _wk_basing():
+    # 60 weeks oscillating tightly around 100; last close just below range mid.
+    return _wk_df([100 + (1.5 if i % 2 == 0 else -1.5) for i in range(59)] + [99.0])
+
+
+def _wk_distributing():
+    top = list(50 + np.arange(44) * 1.0)
+    plat_close = [94, 95, 94, 93.5, 94.5, 94, 93.5, 94, 94.5, 94, 93.5, 94, 94.5, 94, 93.8, 94.2]
+    plat_high = [95.5, 96, 95, 94.5, 95, 94.8, 94, 94.5, 95, 94.5, 94, 94.5, 95, 94.5, 94.3, 94.7]
+    return _wk_df(top + plat_close, highs=[x + 1 for x in top] + plat_high)
+
+
+# ---- weekly_sma_alignment (tests 1–4) ----
+
+def test_weekly_sma_alignment_supportive_on_clean_uptrend():
+    assert compute_weekly_sma_alignment(_wk_rising()) == "supportive"
+
+
+def test_weekly_sma_alignment_mixed_on_incomplete_alignment():
+    assert compute_weekly_sma_alignment(_wk_mixed()) == "mixed"
+
+
+def test_weekly_sma_alignment_hostile_on_weekly_breakdown():
+    assert compute_weekly_sma_alignment(_wk_falling()) == "hostile"
+
+
+def test_weekly_sma_alignment_unavailable_on_insufficient_bars():
+    assert compute_weekly_sma_alignment(_wk_df(list(50 + np.arange(20) * 0.8))) == "unavailable"
+
+
+# ---- weekly_trend_state (tests 5–9) ----
+
+def test_weekly_trend_state_advancing():
+    assert compute_weekly_trend_state(_wk_rising()) == "advancing"
+
+
+def test_weekly_trend_state_basing():
+    assert compute_weekly_trend_state(_wk_basing()) == "basing"
+
+
+def test_weekly_trend_state_distributing():
+    assert compute_weekly_trend_state(_wk_distributing()) == "distributing"
+
+
+def test_weekly_trend_state_declining():
+    assert compute_weekly_trend_state(_wk_falling()) == "declining"
+
+
+def test_weekly_trend_state_unknown_on_insufficient_data():
+    assert compute_weekly_trend_state(_wk_df(list(50 + np.arange(15) * 0.8))) == "unknown"
+
+
+# ---- weekly_alignment_context (tests 10–14) ----
+
+def test_weekly_alignment_context_full():
+    assert compute_weekly_alignment_context(
+        "supportive", "advancing", "supportive", "EXPANSION"
+    ) == "full_alignment"
+
+
+def test_weekly_alignment_context_partial():
+    assert compute_weekly_alignment_context(
+        "mixed", "basing", "supportive", "EXPANSION"
+    ) == "partial_alignment"
+
+
+def test_weekly_alignment_context_repair():
+    assert compute_weekly_alignment_context(
+        "mixed", "basing", "mixed", "REPAIR"
+    ) == "repair_alignment"
+
+
+def test_weekly_alignment_context_countertrend():
+    assert compute_weekly_alignment_context(
+        "hostile", "declining", "supportive", "EXPANSION"
+    ) == "countertrend_context"
+
+
+def test_weekly_alignment_context_unknown_when_unavailable():
+    assert compute_weekly_alignment_context(
+        "unavailable", "unknown", "supportive", "EXPANSION"
+    ) == "unknown"
+
+
+# ---- enrich() integration (test 15) ----
+
+def test_enrich_returns_all_weekly_fields():
+    df = _make_trending_df(300)
+    result = enrich("TEST", df, BASE_CONFIG)
+    for key in _WEEKLY_FIELDS:
+        assert key in result, f"weekly field missing from enrich() output: {key}"
+
+
+def test_enrich_weekly_fields_within_valid_domains():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG)
+    assert r["weekly_sma_alignment"] in {"supportive", "mixed", "hostile", "unavailable"}
+    assert r["weekly_trend_state"] in {"advancing", "basing", "distributing", "declining", "unknown"}
+    assert r["weekly_alignment_context"] in {
+        "full_alignment", "partial_alignment", "repair_alignment",
+        "countertrend_context", "unknown",
+    }
+
+
+# ---- safe defaults & failure handling ----
+
+def test_weekly_evidence_safe_defaults_on_short_df():
+    df = _make_df(120)  # ~24 weeks → insufficient for weekly SMA50
+    ev = compute_weekly_evidence(df, "mixed", "COMPRESSION")
+    assert ev["weekly_sma_alignment"] == "unavailable"
+    assert ev["weekly_trend_state"] == "unknown"
+    assert ev["weekly_alignment_context"] == "unknown"
+
+
+def test_weekly_evidence_safe_defaults_on_garbage_input():
+    # Non-DatetimeIndex / empty inputs must not raise.
+    assert compute_weekly_evidence(None, "supportive", "EXPANSION") == {
+        "weekly_sma_alignment": "unavailable",
+        "weekly_trend_state": "unknown",
+        "weekly_alignment_context": "unknown",
+    }
+    empty = pd.DataFrame({"open": [], "high": [], "low": [], "close": [], "volume": []})
+    ev = compute_weekly_evidence(empty, "supportive", "EXPANSION")
+    assert ev["weekly_sma_alignment"] == "unavailable"
+
+
+# ---- forbidden-indicator source guard (test 31) ----
+
+def test_no_disabled_indicators_in_weekly_functions():
+    import inspect
+    import re
+    for fn in (
+        compute_weekly_sma_alignment, compute_weekly_trend_state,
+        compute_weekly_alignment_context, compute_weekly_evidence,
+    ):
+        src = inspect.getsource(fn).lower()
+        for bad in ("rsi", "macd", "bollinger", "stochastic"):
+            assert not re.search(rf"\b{bad}\b", src), (
+                f"forbidden indicator {bad!r} found in {fn.__name__}"
+            )
+
+
+# ---- coexistence with prior evidence layers (test 32, indicators side) ----
+
+def test_weekly_coexists_with_vcp_brt_mktstate_in_enrich():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG)
+    # Prior-phase evidence fields still present alongside weekly fields.
+    for key in ("vcp_status", "entry_family", "break_retest_state",
+                "market_structure_state", "weekly_sma_alignment",
+                "weekly_trend_state", "weekly_alignment_context"):
+        assert key in r, f"expected evidence field missing after Phase 14A: {key}"

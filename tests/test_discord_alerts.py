@@ -2095,3 +2095,76 @@ def test_1e_no_brt_or_vcp_fields_render():
         assert leaked not in text, f"unapproved field {leaked!r} leaked into alert"
     # Market State itself is the only newly-surfaced organ (text is lowercased).
     assert "market state: expansion" in text
+
+
+# ===========================================================================
+# Phase 14A — Weekly Sovereignty context (display-only)
+# ===========================================================================
+
+_WEEKLY_DISPLAY_PAYLOAD = {
+    "weekly_sma_alignment":     "supportive",
+    "weekly_trend_state":       "advancing",
+    "weekly_alignment_context": "partial_alignment",
+}
+
+
+def test_14a_renders_weekly_context_when_present():
+    # 28: weekly context line appears when weekly fields are present.
+    tr = _tiering_result(**_WEEKLY_DISPLAY_PAYLOAD)
+    text = format_alert(tr)
+    assert "Weekly: advancing / supportive  |  Alignment: partial_alignment" in text, (
+        f"weekly context not rendered; alert body:\n{text}"
+    )
+
+
+def test_14a_omits_weekly_context_when_absent():
+    # 29: when weekly fields are missing, no weekly line appears and the daily
+    # trend/zone line is unchanged.
+    tr = _tiering_result()
+    for f in ("weekly_sma_alignment", "weekly_trend_state", "weekly_alignment_context"):
+        tr["final_signal"].pop(f, None)
+    text = format_alert(tr)
+    assert "Weekly:" not in text, "weekly line rendered when all weekly fields absent"
+    assert "Alignment:" not in text
+
+
+def test_14a_omits_weekly_context_when_none():
+    # 29b: explicit None values are treated as absent.
+    tr = _tiering_result(
+        weekly_sma_alignment=None, weekly_trend_state=None, weekly_alignment_context=None
+    )
+    text = format_alert(tr)
+    assert "Weekly:" not in text
+
+
+def test_14a_does_not_render_snake_case_field_names():
+    # 30: raw snake_case field names must never appear as rendered labels.
+    tr = _tiering_result(**_WEEKLY_DISPLAY_PAYLOAD)
+    text = format_alert(tr).lower()
+    for field in ("weekly_sma_alignment", "weekly_trend_state", "weekly_alignment_context"):
+        assert field not in text, f"raw field name {field!r} leaked into rendered alert"
+
+
+def test_14a_weekly_display_does_not_change_decision_fields():
+    # display-only: format_alert must not mutate tier/capital/channel.
+    tr = _tiering_result(**_WEEKLY_DISPLAY_PAYLOAD)
+    before = (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"])
+    _ = format_alert(tr)
+    assert (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"]) == before
+
+
+def test_14a_daily_layer_preserved_with_weekly_present():
+    # Daily Trend / Market State / Zone line must remain intact alongside weekly.
+    tr = _tiering_result(market_structure_state="REPAIR", **_WEEKLY_DISPLAY_PAYLOAD)
+    text = format_alert(tr)
+    assert "Trend: fresh_expansion  |  Market State: REPAIR  |  Zone: FVG" in text
+    assert "Weekly: advancing / supportive  |  Alignment: partial_alignment" in text
+
+
+def test_14a_partial_weekly_payload_renders_with_safe_fillers():
+    # If only the context is present, the line still renders with safe fillers.
+    tr = _tiering_result(weekly_alignment_context="countertrend_context")
+    tr["final_signal"].pop("weekly_sma_alignment", None)
+    tr["final_signal"].pop("weekly_trend_state", None)
+    text = format_alert(tr)
+    assert "Weekly: unknown / unavailable  |  Alignment: countertrend_context" in text

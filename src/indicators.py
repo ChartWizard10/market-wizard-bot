@@ -1160,6 +1160,241 @@ def classify_market_structure_state(
 
 
 # ---------------------------------------------------------------------------
+# Phase 14A: Weekly Sovereignty Evidence Layer — scanner-computed weekly context
+# ---------------------------------------------------------------------------
+# Three observational fields describing the broader (weekly) campaign context.
+# Pure evidence: never read by any gate, scoring function, ranking, calibration,
+# routing decision, capital authorisation, dedup logic, campaign identity, or
+# alert-format decision. Flows enrich() -> prefilter key_features -> tiering
+# final_signal -> state_store alert_history -> Discord display.
+#
+# Weekly bars are derived from the daily DataFrame by resampling (no new network
+# dependency). Only COMPLETED weekly bars are used — the current partial week is
+# dropped so it cannot flip the weekly state. If weekly derivation fails for any
+# reason, all three fields default safely (unavailable / unknown / unknown) and
+# the scanner continues uninterrupted.
+#
+# DOCTRINE: Weekly authorizes; it never triggers. These fields cap nothing and
+# gate nothing in Phase 14A — they are operator-facing context only.
+
+_WEEKLY_SMA_MED            = 50     # weekly SMA50 — primary long-term value
+_WEEKLY_SMA_LONG           = 200    # weekly SMA200 — used only when available
+_WEEKLY_SLOPE_LOOKBACK     = 4      # weeks back used to measure SMA50 slope
+_WEEKLY_STRUCT_WINDOW      = 8      # weeks used for higher-high / lower-low read
+_WEEKLY_FLAT_SLOPE_PCT     = 0.5    # |slope| <= this over the lookback = flat
+_WEEKLY_BASE_BAND_PCT      = 3.0    # |close - sma50| within this %% = near value
+
+_EMPTY_WEEKLY = {
+    "weekly_sma_alignment":      "unavailable",
+    "weekly_trend_state":        "unknown",
+    "weekly_alignment_context":  "unknown",
+}
+
+
+def _resample_weekly(df: pd.DataFrame) -> pd.DataFrame | None:
+    """Resample a daily OHLCV DataFrame to completed weekly bars.
+
+    Returns None on empty/invalid input or if fewer than two weekly bars exist.
+    The final (current, potentially partial) weekly bar is always dropped so a
+    mid-week price cannot flip the weekly state.
+    """
+    if df is None or len(df) == 0:
+        return None
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return None
+    weekly = (
+        df.resample("W-FRI")
+        .agg({"open": "first", "high": "max", "low": "min",
+              "close": "last", "volume": "sum"})
+        .dropna(subset=["close"])
+    )
+    if len(weekly) <= 1:
+        return None
+    # Drop the final week (may be incomplete) — completed bars only.
+    return weekly.iloc[:-1]
+
+
+def compute_weekly_sma_alignment(weekly: pd.DataFrame) -> str:
+    """Classify weekly value alignment: supportive | mixed | hostile | unavailable.
+
+    Uses completed weekly bars only. SMA200 is consulted only when enough weekly
+    bars exist; otherwise the SMA50 relationship and slope govern.
+    """
+    try:
+        c = weekly["close"]
+        if len(c) < _WEEKLY_SMA_MED:
+            return "unavailable"
+        sma50 = c.rolling(_WEEKLY_SMA_MED, min_periods=_WEEKLY_SMA_MED).mean()
+        s50 = float(sma50.iloc[-1])
+        if np.isnan(s50):
+            return "unavailable"
+
+        last_close = float(c.iloc[-1])
+        if len(sma50) > _WEEKLY_SLOPE_LOOKBACK:
+            s50_prev = float(sma50.iloc[-1 - _WEEKLY_SLOPE_LOOKBACK])
+        else:
+            s50_prev = s50
+        slope_up = s50 >= s50_prev
+        slope_down = s50 < s50_prev
+
+        s200: float | None = None
+        if len(c) >= _WEEKLY_SMA_LONG:
+            v = float(c.rolling(_WEEKLY_SMA_LONG, min_periods=_WEEKLY_SMA_LONG)
+                      .mean().iloc[-1])
+            s200 = v if not np.isnan(v) else None
+
+        above_50 = last_close > s50
+        below_50 = last_close < s50
+        s50_above_s200 = (s200 is None) or (s50 > s200)
+
+        if above_50 and s50_above_s200 and slope_up:
+            return "supportive"
+        if below_50 and slope_down:
+            return "hostile"
+        return "mixed"
+    except Exception:
+        return "unavailable"
+
+
+def compute_weekly_trend_state(weekly: pd.DataFrame) -> str:
+    """Classify weekly trend: advancing | basing | distributing | declining | unknown."""
+    try:
+        c = weekly["close"]
+        if len(c) < _WEEKLY_SMA_MED:
+            return "unknown"
+        sma50 = c.rolling(_WEEKLY_SMA_MED, min_periods=_WEEKLY_SMA_MED).mean()
+        s50 = float(sma50.iloc[-1])
+        if np.isnan(s50):
+            return "unknown"
+
+        last_close = float(c.iloc[-1])
+        if len(sma50) > _WEEKLY_SLOPE_LOOKBACK:
+            s50_prev = float(sma50.iloc[-1 - _WEEKLY_SLOPE_LOOKBACK])
+        else:
+            s50_prev = s50
+        slope_pct = ((s50 - s50_prev) / s50 * 100) if s50 else 0.0
+        rising = slope_pct > _WEEKLY_FLAT_SLOPE_PCT
+        falling = slope_pct < -_WEEKLY_FLAT_SLOPE_PCT
+        flat = not rising and not falling
+
+        win = min(_WEEKLY_STRUCT_WINDOW, len(weekly))
+        half = max(1, win // 2)
+        recent = weekly.tail(win)
+        fh_high = float(recent["high"].iloc[:half].max())
+        sh_high = float(recent["high"].iloc[half:].max())
+        fh_low = float(recent["low"].iloc[:half].min())
+        sh_low = float(recent["low"].iloc[half:].min())
+        rising_struct = sh_high > fh_high and sh_low > fh_low
+        falling_struct = sh_high < fh_high and sh_low < fh_low
+        failed_highs = sh_high <= fh_high
+
+        range_hi = float(recent["high"].max())
+        range_lo = float(recent["low"].min())
+        range_mid = (range_hi + range_lo) / 2.0
+        upper_zone = last_close >= range_mid
+
+        above = last_close > s50
+        below = last_close < s50
+        band = s50 * (_WEEKLY_BASE_BAND_PCT / 100.0)
+        near = abs(last_close - s50) <= band
+
+        if below and (falling or falling_struct):
+            return "declining"
+        # Distributing is defined by rejection near the highs (failed highs with
+        # no fresh higher-high structure while price holds the upper range), not
+        # by SMA slope — a long-window SMA lags too far to flatten on a rolling
+        # top. Checked before advancing so a stalling top is not mislabeled.
+        if (above or near) and failed_highs and not rising_struct and upper_zone:
+            return "distributing"
+        if above and (rising or rising_struct):
+            return "advancing"
+        if near and flat:
+            return "basing"
+        # Position fallback — keeps the label honest when structure is ambiguous.
+        if above:
+            return "advancing"
+        if below:
+            return "declining"
+        return "basing"
+    except Exception:
+        return "unknown"
+
+
+def compute_weekly_alignment_context(
+    weekly_sma_alignment: str,
+    weekly_trend_state: str,
+    daily_alignment: str | None,
+    daily_market_state: str | None,
+) -> str:
+    """Synthesize weekly + daily evidence into an alignment context label.
+
+    Returns: full_alignment | partial_alignment | repair_alignment |
+             countertrend_context | unknown
+
+    Read-only synthesis of already-computed fields. No Claude input. Never gates.
+    """
+    try:
+        wk_sma = str(weekly_sma_alignment or "unavailable").lower()
+        wk_trend = str(weekly_trend_state or "unknown").lower()
+        da = str(daily_alignment or "").lower()
+        dms = str(daily_market_state or "").lower()
+
+        if wk_sma == "unavailable" or wk_trend == "unknown":
+            return "unknown"
+
+        weekly_strong = wk_sma == "supportive" or wk_trend == "advancing"
+        weekly_weak = wk_sma == "hostile" or wk_trend == "declining"
+        weekly_soft = wk_sma == "mixed" or wk_trend in ("basing", "distributing")
+
+        daily_constructive = da == "supportive" or dms in (
+            "expansion", "orderly_continuation"
+        )
+        daily_repairing = dms in ("repair", "transition")
+
+        if weekly_strong and daily_constructive:
+            return "full_alignment"
+        if weekly_weak and daily_constructive:
+            return "countertrend_context"
+        if (wk_trend == "basing" or wk_sma == "mixed") and daily_repairing:
+            return "repair_alignment"
+        if weekly_soft and daily_constructive:
+            return "partial_alignment"
+        if weekly_weak:
+            return "countertrend_context"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def compute_weekly_evidence(
+    df: pd.DataFrame,
+    daily_alignment: str | None,
+    daily_market_state: str | None,
+) -> dict:
+    """Top-level orchestrator. Derives weekly bars and computes all three fields.
+
+    Always returns the three weekly evidence keys. On any failure or missing
+    data, returns safe defaults so the scanner never stops on weekly issues.
+    """
+    try:
+        weekly = _resample_weekly(df)
+        if weekly is None:
+            return dict(_EMPTY_WEEKLY)
+        sma_align = compute_weekly_sma_alignment(weekly)
+        trend = compute_weekly_trend_state(weekly)
+        ctx = compute_weekly_alignment_context(
+            sma_align, trend, daily_alignment, daily_market_state
+        )
+        return {
+            "weekly_sma_alignment":     sma_align,
+            "weekly_trend_state":       trend,
+            "weekly_alignment_context": ctx,
+        }
+    except Exception:                                        # noqa: BLE001
+        return dict(_EMPTY_WEEKLY)
+
+
+# ---------------------------------------------------------------------------
 # Main enrichment entry point
 # ---------------------------------------------------------------------------
 
@@ -1216,6 +1451,10 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
         structure["structure_event"], sweep["sweep_detected"],
         retest["retest_status"], alignment, overhead["overhead_status"],
     )
+
+    # Phase 14A — Weekly Sovereignty Evidence (observational only). Derived from
+    # the daily df via weekly resampling; safe defaults on any failure.
+    weekly_evidence = compute_weekly_evidence(df, alignment, market_structure_state)
 
     prev_close: float | None = None
     if len(df) >= 2:
@@ -1301,4 +1540,9 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
         # Phase 1D — Market Structure State (observational; never read by
         # gates/scoring/routing/capital/alert formatting).
         "market_structure_state":   market_structure_state,
+        # Phase 14A — Weekly Sovereignty Evidence (observational; never read by
+        # gates/scoring/ranking/routing/capital/dedup/alert-format decisions).
+        "weekly_sma_alignment":      weekly_evidence["weekly_sma_alignment"],
+        "weekly_trend_state":        weekly_evidence["weekly_trend_state"],
+        "weekly_alignment_context":  weekly_evidence["weekly_alignment_context"],
     }

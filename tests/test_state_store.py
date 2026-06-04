@@ -1152,3 +1152,53 @@ def test_record_alert_market_structure_state_does_not_affect_dedup_key():
     assert rec1["dedup_key"] == rec2["dedup_key"], (
         "market_structure_state must not influence the dedup_key"
     )
+
+
+# ===========================================================================
+# Phase 14A — Weekly Sovereignty Evidence persistence tests
+# ===========================================================================
+
+_WEEKLY_HISTORY_FIELDS = (
+    "weekly_sma_alignment",
+    "weekly_trend_state",
+    "weekly_alignment_context",
+)
+
+
+def test_record_alert_stores_weekly_fields():
+    tr = _tiering(
+        weekly_sma_alignment="supportive",
+        weekly_trend_state="advancing",
+        weekly_alignment_context="full_alignment",
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["weekly_sma_alignment"] == "supportive"
+    assert rec["weekly_trend_state"] == "advancing"
+    assert rec["weekly_alignment_context"] == "full_alignment"
+
+
+def test_record_alert_weekly_fields_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    for field in _WEEKLY_HISTORY_FIELDS:
+        assert field in rec, f"weekly field missing from history record: {field!r}"
+        assert rec[field] is None
+
+
+def test_record_alert_weekly_fields_do_not_affect_dedup_key():
+    tr_plain = _tiering(trigger=182.50, invalidation=178.20)
+    tr_weekly = _tiering(
+        trigger=182.50, invalidation=178.20,
+        weekly_sma_alignment="hostile",
+        weekly_trend_state="declining",
+        weekly_alignment_context="countertrend_context",
+    )
+    s1 = record_alert("AAPL", tr_plain, _empty(), _cfg())
+    s2 = record_alert("AAPL", tr_weekly, _empty(), _cfg())
+    rec1 = s1["tickers"]["AAPL"]["alert_history"][0]
+    rec2 = s2["tickers"]["AAPL"]["alert_history"][0]
+    assert rec1["dedup_key"] == rec2["dedup_key"], (
+        "weekly evidence must not influence the dedup_key"
+    )

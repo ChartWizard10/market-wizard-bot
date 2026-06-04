@@ -1232,6 +1232,35 @@ def _apply_mkt_state_evidence_passthrough(signal: dict, key_features: dict) -> d
 
 
 # ---------------------------------------------------------------------------
+# Phase 14A — Weekly Sovereignty Evidence passthrough
+# ---------------------------------------------------------------------------
+# Three observational weekly-context fields.  Same evidence-capture contract as
+# the VCP / BRT / market-structure passthroughs: never read by any gate, scoring
+# function, ranking, calibration step, routing decision, capital authorisation,
+# dedup logic, campaign identity, or alert formatter. Weekly authorizes campaign
+# context for the operator; it gates nothing in Phase 14A.
+
+_WEEKLY_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "weekly_sma_alignment",
+    "weekly_trend_state",
+    "weekly_alignment_context",
+)
+
+
+def _apply_weekly_evidence_passthrough(signal: dict, key_features: dict) -> dict:
+    """Mirror scanner-computed weekly evidence fields into signal.
+
+    Evidence-capture only: copies fields that exist in key_features (None values
+    preserved). Does not branch on any value and does not influence any gate.
+    """
+    result = dict(signal)
+    for field in _WEEKLY_EVIDENCE_FIELDS:
+        if field in key_features:
+            result[field] = key_features[field]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1318,6 +1347,11 @@ def validate(
     # key_features. Observational only — same evidence-capture contract as the
     # VCP and BRT passthroughs above.
     working_signal = _apply_mkt_state_evidence_passthrough(working_signal, key_features)
+
+    # Phase 14A: Pass Weekly Sovereignty evidence fields through from scanner
+    # key_features. Observational only — operator-facing weekly context; never
+    # read by any gate, score, ranking, routing, capital, or dedup decision.
+    working_signal = _apply_weekly_evidence_passthrough(working_signal, key_features)
 
     if claude_tier == "NEAR_ENTRY":
         existing_mc = working_signal.get("missing_conditions")

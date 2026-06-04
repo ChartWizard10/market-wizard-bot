@@ -365,6 +365,10 @@ def record_alert(
         "one_hour_momentum_repair": final_signal.get("one_hour_momentum_repair"),
         # ---- Phase 1D: Market Structure State (observational only) ----
         "market_structure_state":   final_signal.get("market_structure_state"),
+        # ---- Phase 14A: Weekly Sovereignty Evidence (observational only) ----
+        "weekly_sma_alignment":      final_signal.get("weekly_sma_alignment"),
+        "weekly_trend_state":        final_signal.get("weekly_trend_state"),
+        "weekly_alignment_context":  final_signal.get("weekly_alignment_context"),
 
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),

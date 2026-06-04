@@ -374,6 +374,12 @@ def _build_key_features(enriched: dict) -> dict:
         # Phase 1D — Market Structure State (observational; never read by ranking,
         # scoring, tiering gates, calibration, routing, capital, or alert formatting).
         "market_structure_state":   enriched.get("market_structure_state"),
+        # Phase 14A — Weekly Sovereignty Evidence (observational; never read by
+        # ranking, scoring, tiering gates, calibration, routing, capital, dedup,
+        # or alert formatting). Operator-facing weekly context only.
+        "weekly_sma_alignment":      enriched.get("weekly_sma_alignment"),
+        "weekly_trend_state":        enriched.get("weekly_trend_state"),
+        "weekly_alignment_context":  enriched.get("weekly_alignment_context"),
     }
 
 

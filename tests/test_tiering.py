@@ -3019,3 +3019,150 @@ def test_mktstate_coexists_with_brt_and_vcp():
     assert fs.get("market_structure_state") == "EXPANSION"
     assert fs.get("entry_family") == "zone_core"
     assert result["final_tier"] == "SNIPE_IT"
+
+
+# ===========================================================================
+# Phase 14A — Weekly Sovereignty evidence passthrough + regression
+# ===========================================================================
+
+_WEEKLY_KF_FIELDS = {
+    "weekly_sma_alignment":     "supportive",
+    "weekly_trend_state":       "advancing",
+    "weekly_alignment_context": "full_alignment",
+}
+
+
+def _kf_with_weekly(extra: dict | None = None, **weekly_overrides) -> dict:
+    """Build key_features carrying a full weekly evidence payload."""
+    kf = dict(_WEEKLY_KF_FIELDS)
+    kf.update(weekly_overrides)
+    if extra:
+        kf.update(extra)
+    return kf
+
+
+_WEEKLY_STATES = [
+    ("supportive", "advancing", "full_alignment"),
+    ("mixed", "basing", "partial_alignment"),
+    ("mixed", "basing", "repair_alignment"),
+    ("hostile", "declining", "countertrend_context"),
+    ("unavailable", "unknown", "unknown"),
+]
+
+
+# 14A-17: weekly fields land in final_signal
+def test_weekly_passthrough_lands_in_final_signal():
+    signal = _snipe_signal()
+    result = validate(signal, _pf_sovereign(_kf_with_weekly()), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field, expected in _WEEKLY_KF_FIELDS.items():
+        assert fs.get(field) == expected, (
+            f"weekly field {field!r} not propagated: expected {expected!r}, got {fs.get(field)!r}"
+        )
+
+
+# 14A-18: missing weekly fields do not crash tiering
+def test_weekly_absent_does_not_crash():
+    signal = _snipe_signal()
+    result = validate(signal, _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field in _WEEKLY_KF_FIELDS:
+        assert field not in fs, f"weekly field {field!r} synthesized when key_features lacked it"
+
+
+# 14A-19: None values preserved
+def test_weekly_none_values_preserved():
+    signal = _snipe_signal()
+    kf = _kf_with_weekly(
+        weekly_sma_alignment=None, weekly_trend_state=None, weekly_alignment_context=None
+    )
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["weekly_sma_alignment"] is None
+    assert fs["weekly_trend_state"] is None
+    assert fs["weekly_alignment_context"] is None
+
+
+# 14A-20/21/22/23: all weekly states change nothing in the decision path
+def test_weekly_states_do_not_change_decision_fields():
+    signal = _snipe_signal()
+    res_base = validate(signal, _pf_sovereign({}), _BASE_CONFIG)
+    for sma, trend, ctx in _WEEKLY_STATES:
+        kf = _kf_with_weekly(
+            weekly_sma_alignment=sma, weekly_trend_state=trend, weekly_alignment_context=ctx
+        )
+        res = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+        for key in ("final_tier", "score", "capital_action",
+                    "final_discord_channel", "safe_for_alert"):
+            assert res[key] == res_base[key], (
+                f"weekly state {(sma, trend, ctx)} changed {key!r}: "
+                f"{res[key]!r} vs base {res_base[key]!r}"
+            )
+
+
+# 14A: favorable weekly does not upgrade/downgrade a valid SNIPE_IT
+def test_weekly_favorable_does_not_change_snipe_it():
+    signal = _snipe_signal()
+    kf = _kf_with_weekly()  # supportive / advancing / full_alignment
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["safe_for_alert"] is True
+
+
+# 14A: hostile/countertrend weekly does not downgrade a valid SNIPE_IT
+def test_weekly_hostile_does_not_downgrade_snipe_it():
+    signal = _snipe_signal()
+    kf = _kf_with_weekly(
+        weekly_sma_alignment="hostile", weekly_trend_state="declining",
+        weekly_alignment_context="countertrend_context",
+    )
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT", (
+        "hostile weekly context must NOT veto or downgrade a valid daily SNIPE_IT"
+    )
+    assert result["safe_for_alert"] is True
+
+
+# 14A-24: weekly fields never appear as veto labels
+def test_weekly_fields_not_in_applied_vetoes():
+    signal = _snipe_signal()
+    kf = _kf_with_weekly(
+        weekly_sma_alignment="hostile", weekly_trend_state="declining",
+        weekly_alignment_context="countertrend_context",
+    )
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    applied = result.get("applied_vetoes", [])
+    for field in _WEEKLY_KF_FIELDS:
+        assert field not in applied
+        for veto in applied:
+            assert field not in str(veto)
+
+
+# 14A-25: WAIT still never posts even with favorable weekly context
+def test_weekly_wait_unchanged_by_favorable_context():
+    signal = _wait_signal()
+    kf = _kf_with_weekly()  # most favorable possible weekly payload
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["safe_for_alert"] is False
+    assert result["final_discord_channel"] == "none"
+
+
+# 14A-32 (tiering side): coexists with VCP/BRT/market_structure_state
+def test_weekly_coexists_with_all_prior_evidence():
+    signal = _snipe_signal()
+    kf = _kf_with_brt(_kf_with_mktstate("EXPANSION", _kf_with_weekly()))
+    result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs.get("weekly_alignment_context") == "full_alignment"
+    assert fs.get("market_structure_state") == "EXPANSION"
+    assert fs.get("entry_family") == "zone_core"
+    assert result["final_tier"] == "SNIPE_IT"
+
+
+# 14A: STARTER and NEAR_ENTRY also receive weekly passthrough without tier change
+def test_weekly_passthrough_works_for_starter_and_near_entry():
+    for sig_fn, expected in ((_starter_signal, "STARTER"), (_near_entry_signal, "NEAR_ENTRY")):
+        result = validate(sig_fn(), _pf_sovereign(_kf_with_weekly()), _BASE_CONFIG)
+        assert result["final_tier"] == expected
+        assert result["final_signal"]["weekly_alignment_context"] == "full_alignment"
