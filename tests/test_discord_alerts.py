@@ -2168,3 +2168,123 @@ def test_14a_partial_weekly_payload_renders_with_safe_fillers():
     tr["final_signal"].pop("weekly_trend_state", None)
     text = format_alert(tr)
     assert "Weekly: unknown / unavailable  |  Alignment: countertrend_context" in text
+
+
+# ===========================================================================
+# Phase 14C — Real 4H Operational State context (display-only)
+# ===========================================================================
+
+_4H_DISPLAY_PAYLOAD = {
+    "four_hour_market_state":   "TRANSITION",
+    "four_hour_sma_alignment":  "mixed",
+    "four_hour_reclaim_status": "below_value",
+    "four_hour_structure_note": "lower_high_pressure",
+    "four_hour_data_status":    "current",
+}
+
+_4H_FIELDS = (
+    "four_hour_market_state", "four_hour_sma_alignment",
+    "four_hour_reclaim_status", "four_hour_structure_note",
+    "four_hour_data_status",
+)
+
+# No-authority language that must never appear on the 4H line.
+_4H_FORBIDDEN_WORDS = ("blocked", "approved", "downgraded", "vetoed")
+
+
+def test_14c_renders_4h_context_when_present():
+    tr = _tiering_result(**_4H_DISPLAY_PAYLOAD)
+    text = format_alert(tr)
+    assert (
+        "4H: TRANSITION  |  SMA: mixed  |  Reclaim: below_value  |  Data: current"
+        in text
+    ), f"4H context not rendered; alert body:\n{text}"
+
+
+def test_14c_renders_unavailable_4h_line():
+    tr = _tiering_result(
+        four_hour_market_state="UNAVAILABLE",
+        four_hour_sma_alignment="unavailable",
+        four_hour_reclaim_status="unavailable",
+        four_hour_structure_note="unavailable",
+        four_hour_data_status="unavailable",
+    )
+    text = format_alert(tr)
+    assert (
+        "4H: UNAVAILABLE  |  SMA: unavailable  |  Reclaim: unavailable  |  Data: unavailable"
+        in text
+    )
+
+
+def test_14c_omits_4h_context_when_absent():
+    tr = _tiering_result()
+    for f in _4H_FIELDS:
+        tr["final_signal"].pop(f, None)
+    text = format_alert(tr)
+    assert "4H:" not in text, "4H line rendered when all 4H fields absent"
+
+
+def test_14c_omits_4h_context_when_none():
+    tr = _tiering_result(**{f: None for f in _4H_FIELDS})
+    text = format_alert(tr)
+    assert "4H:" not in text
+
+
+def test_14c_does_not_render_snake_case_field_names():
+    tr = _tiering_result(**_4H_DISPLAY_PAYLOAD)
+    text = format_alert(tr).lower()
+    for field in _4H_FIELDS:
+        assert field not in text, f"raw field name {field!r} leaked into rendered alert"
+
+
+def test_14c_no_authority_language_on_4h_line():
+    tr = _tiering_result(
+        four_hour_market_state="FAILURE",
+        four_hour_sma_alignment="hostile",
+        four_hour_reclaim_status="failed_reclaim",
+        four_hour_structure_note="breakdown_pressure",
+        four_hour_data_status="current",
+    )
+    text = format_alert(tr)
+    # Isolate the 4H line and assert no authority verbs appear on it.
+    line = next((ln for ln in text.splitlines() if ln.strip().startswith("4H:")), "")
+    assert line, "4H line missing"
+    low = line.lower()
+    for word in _4H_FORBIDDEN_WORDS:
+        assert word not in low, f"authority word {word!r} appeared on 4H line: {line!r}"
+
+
+def test_14c_4h_display_does_not_change_decision_fields():
+    tr = _tiering_result(**_4H_DISPLAY_PAYLOAD)
+    before = (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"])
+    _ = format_alert(tr)
+    assert (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"]) == before
+
+
+def test_14c_daily_weekly_layers_preserved_with_4h_present():
+    tr = _tiering_result(
+        market_structure_state="REPAIR",
+        **_WEEKLY_DISPLAY_PAYLOAD, **_4H_DISPLAY_PAYLOAD,
+    )
+    text = format_alert(tr)
+    assert "Trend: fresh_expansion  |  Market State: REPAIR  |  Zone: FVG" in text
+    assert "Weekly: advancing / supportive  |  Alignment: partial_alignment" in text
+    assert "4H: TRANSITION  |  SMA: mixed  |  Reclaim: below_value  |  Data: current" in text
+
+
+def test_14c_adverse_4h_does_not_make_wait_sendable():
+    # WAIT must remain non-sendable regardless of any 4H evidence.
+    tr = _tiering_result(tier="WAIT", safe=False, **_4H_DISPLAY_PAYLOAD)
+    tr["final_discord_channel"] = "none"
+    sendable, _reason = _sendable(tr, None)
+    assert sendable is False
+
+
+def test_14c_does_not_leak_internal_4h_or_prior_fields():
+    tr = _tiering_result(**_4H_DISPLAY_PAYLOAD)
+    text = format_alert(tr).lower()
+    # 4H is the only newly-surfaced layer; structure_note is captured for
+    # backtesting but is NOT a rendered label.
+    assert "four_hour_structure_note" not in text
+    assert "lower_high_pressure" not in text  # structure_note value not displayed
+    assert "4h: transition" in text

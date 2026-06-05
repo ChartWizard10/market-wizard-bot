@@ -1261,6 +1261,37 @@ def _apply_weekly_evidence_passthrough(signal: dict, key_features: dict) -> dict
 
 
 # ---------------------------------------------------------------------------
+# Phase 14C — Real 4H Operational State Evidence passthrough
+# ---------------------------------------------------------------------------
+# Five observational 4H-context fields. Same evidence-capture contract as the
+# VCP / BRT / market-structure / weekly passthroughs: never read by any gate,
+# scoring function, ranking, calibration step, routing decision, capital
+# authorisation, dedup logic, campaign identity, or alert formatter. 4H reports
+# operational condition for the operator; it gates nothing in Phase 14C.
+
+_FOUR_HOUR_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "four_hour_market_state",
+    "four_hour_sma_alignment",
+    "four_hour_reclaim_status",
+    "four_hour_structure_note",
+    "four_hour_data_status",
+)
+
+
+def _apply_four_hour_evidence_passthrough(signal: dict, key_features: dict) -> dict:
+    """Mirror scanner-computed 4H evidence fields into signal.
+
+    Evidence-capture only: copies fields that exist in key_features (None values
+    preserved). Does not branch on any value and does not influence any gate.
+    """
+    result = dict(signal)
+    for field in _FOUR_HOUR_EVIDENCE_FIELDS:
+        if field in key_features:
+            result[field] = key_features[field]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1352,6 +1383,11 @@ def validate(
     # key_features. Observational only — operator-facing weekly context; never
     # read by any gate, score, ranking, routing, capital, or dedup decision.
     working_signal = _apply_weekly_evidence_passthrough(working_signal, key_features)
+
+    # Phase 14C: Pass real 4H Operational State evidence fields through from
+    # scanner key_features. Observational only — operator-facing 4H context;
+    # never read by any gate, score, ranking, routing, capital, or dedup decision.
+    working_signal = _apply_four_hour_evidence_passthrough(working_signal, key_features)
 
     if claude_tier == "NEAR_ENTRY":
         existing_mc = working_signal.get("missing_conditions")

@@ -13,6 +13,14 @@ data:
   interval: "1d"
   fetch_batch_size: 100
   fetch_delay_seconds: 0.3
+  # Phase 14C — real 4H operational-state evidence (observation only).
+  # Default OFF: the scan path is unchanged and 4H fields report UNAVAILABLE.
+  # When true, the scanner fetches intraday 60m bars per ticker and aggregates
+  # them to real 4H bars (adds one network call per ticker). 4H is evidence
+  # only — it gates nothing, scores nothing, and routes nothing.
+  fetch_4h: false
+  fetch_4h_period: "60d"
+  fetch_4h_base_interval: "60m"
 
 disabled_indicators:
   - rsi

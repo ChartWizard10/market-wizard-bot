@@ -7,7 +7,10 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from src.market_data import validate_ticker_data, fetch_ticker, _normalize, _extract_ticker_df, batch_download
+from src.market_data import (
+    validate_ticker_data, fetch_ticker, _normalize, _extract_ticker_df,
+    batch_download, fetch_4h, resample_to_4h,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -290,3 +293,82 @@ def test_batch_download_missing_ticker_falls_back_to_fetch_ticker():
 
     mock_fallback.assert_called_once_with("NVDA", BASE_CONFIG)
     assert results["NVDA"]["data_status"] == "OK"
+
+
+# ---------------------------------------------------------------------------
+# Phase 14C — Real 4H acquisition (config-gated, default OFF)
+# ---------------------------------------------------------------------------
+
+def _intraday_60m(n=200):
+    """Build a normalized 60m OHLCV frame with a DatetimeIndex."""
+    idx = pd.date_range(end=pd.Timestamp("2026-06-05 16:00"), periods=n, freq="60min")
+    c = np.linspace(100.0, 130.0, n)
+    return pd.DataFrame(
+        {"open": c, "high": c + 0.5, "low": c - 0.5, "close": c, "volume": [1e5] * n},
+        index=idx,
+    )
+
+
+def test_fetch_4h_disabled_by_default_returns_none_without_network():
+    # Default config (no fetch_4h key) → None, and yfinance is never called.
+    with patch("src.market_data.yf.download") as mock_dl:
+        result = fetch_4h("AAPL", BASE_CONFIG)
+    assert result is None
+    mock_dl.assert_not_called()
+
+
+def test_fetch_4h_explicit_false_returns_none_without_network():
+    cfg = {"data": {**BASE_CONFIG["data"], "fetch_4h": False}}
+    with patch("src.market_data.yf.download") as mock_dl:
+        result = fetch_4h("AAPL", cfg)
+    assert result is None
+    mock_dl.assert_not_called()
+
+
+def test_fetch_4h_enabled_resamples_60m_to_real_4h():
+    cfg = {"data": {**BASE_CONFIG["data"], "fetch_4h": True}}
+    raw = _intraday_60m(200)
+    with patch("src.market_data.yf.download", return_value=raw) as mock_dl:
+        bars = fetch_4h("AAPL", cfg)
+    mock_dl.assert_called_once()
+    assert bars is not None
+    assert isinstance(bars.index, pd.DatetimeIndex)
+    assert set(["open", "high", "low", "close", "volume"]).issubset(bars.columns)
+    # 4H aggregation must produce strictly fewer bars than the 60m source.
+    assert len(bars) < len(raw)
+
+
+def test_fetch_4h_enabled_returns_none_on_fetch_exception():
+    cfg = {"data": {**BASE_CONFIG["data"], "fetch_4h": True}}
+    with patch("src.market_data.yf.download", side_effect=RuntimeError("boom")):
+        assert fetch_4h("AAPL", cfg) is None
+
+
+def test_fetch_4h_enabled_returns_none_on_empty_response():
+    cfg = {"data": {**BASE_CONFIG["data"], "fetch_4h": True}}
+    with patch("src.market_data.yf.download", return_value=pd.DataFrame()):
+        assert fetch_4h("AAPL", cfg) is None
+
+
+def test_resample_to_4h_aggregates_ohlcv_correctly():
+    raw = _intraday_60m(8)
+    bars = resample_to_4h(raw)
+    assert bars is not None
+    # 4H aggregation strictly coarsens the 60m source (pandas anchors 4H bins at
+    # midnight, so exact bucket count depends on session boundaries).
+    assert 0 < len(bars) < len(raw)
+    # First aggregated bar must open at the first source bar of its bucket and
+    # carry that bucket's max high / min low / summed volume.
+    first_bucket = raw[raw.index < bars.index[1]] if len(bars) > 1 else raw
+    assert bars["open"].iloc[0] == first_bucket["open"].iloc[0]
+    assert bars["high"].iloc[0] == first_bucket["high"].max()
+    assert bars["low"].iloc[0] == first_bucket["low"].min()
+    assert bars["volume"].iloc[0] == first_bucket["volume"].sum()
+
+
+def test_resample_to_4h_handles_bad_input():
+    assert resample_to_4h(None) is None
+    assert resample_to_4h(pd.DataFrame()) is None
+    # Non-DatetimeIndex must not raise.
+    bad = pd.DataFrame({"open": [1], "high": [1], "low": [1], "close": [1], "volume": [1]})
+    assert resample_to_4h(bad) is None

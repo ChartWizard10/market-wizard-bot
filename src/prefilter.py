@@ -380,6 +380,14 @@ def _build_key_features(enriched: dict) -> dict:
         "weekly_sma_alignment":      enriched.get("weekly_sma_alignment"),
         "weekly_trend_state":        enriched.get("weekly_trend_state"),
         "weekly_alignment_context":  enriched.get("weekly_alignment_context"),
+        # Phase 14C — Real 4H Operational State Evidence (observational; never
+        # read by ranking, scoring, tiering gates, calibration, routing, capital,
+        # dedup, or alert formatting). Operator-facing 4H context only.
+        "four_hour_market_state":    enriched.get("four_hour_market_state"),
+        "four_hour_sma_alignment":   enriched.get("four_hour_sma_alignment"),
+        "four_hour_reclaim_status":  enriched.get("four_hour_reclaim_status"),
+        "four_hour_structure_note":  enriched.get("four_hour_structure_note"),
+        "four_hour_data_status":     enriched.get("four_hour_data_status"),
     }
 
 

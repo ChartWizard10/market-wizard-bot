@@ -3166,3 +3166,139 @@ def test_weekly_passthrough_works_for_starter_and_near_entry():
         result = validate(sig_fn(), _pf_sovereign(_kf_with_weekly()), _BASE_CONFIG)
         assert result["final_tier"] == expected
         assert result["final_signal"]["weekly_alignment_context"] == "full_alignment"
+
+
+# ===========================================================================
+# Phase 14C — Real 4H Operational State evidence passthrough + regression
+# ===========================================================================
+
+_4H_KF_FIELDS = {
+    "four_hour_market_state":   "EXPANSION",
+    "four_hour_sma_alignment":  "supportive",
+    "four_hour_reclaim_status": "reclaimed",
+    "four_hour_structure_note": "higher_high_sequence",
+    "four_hour_data_status":    "current",
+}
+
+# The adverse payload that previously had NO 4H read — the DDOG blind spot.
+_4H_ADVERSE = {
+    "four_hour_market_state":   "FAILURE",
+    "four_hour_sma_alignment":  "hostile",
+    "four_hour_reclaim_status": "failed_reclaim",
+    "four_hour_structure_note": "breakdown_pressure",
+    "four_hour_data_status":    "current",
+}
+
+
+def _kf_with_4h(extra: dict | None = None, **overrides) -> dict:
+    """Build key_features carrying a full 4H evidence payload."""
+    kf = dict(_4H_KF_FIELDS)
+    kf.update(overrides)
+    if extra:
+        kf.update(extra)
+    return kf
+
+
+# 14C: 4H fields land in final_signal
+def test_4h_passthrough_lands_in_final_signal():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_4h()), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field, expected in _4H_KF_FIELDS.items():
+        assert fs.get(field) == expected, (
+            f"4H field {field!r} not propagated: expected {expected!r}, got {fs.get(field)!r}"
+        )
+
+
+# 14C: missing 4H fields do not crash tiering or get synthesized
+def test_4h_absent_does_not_crash():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field in _4H_KF_FIELDS:
+        assert field not in fs
+
+
+# 14C: None 4H values preserved (not coerced)
+def test_4h_none_values_preserved():
+    kf = _kf_with_4h(**{f: None for f in _4H_KF_FIELDS})
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field in _4H_KF_FIELDS:
+        assert fs[field] is None
+
+
+# 14C: every 4H state combination changes nothing in the decision path
+def test_4h_states_do_not_change_decision_fields():
+    signal = _snipe_signal()
+    res_base = validate(signal, _pf_sovereign({}), _BASE_CONFIG)
+    states = [
+        _4H_KF_FIELDS, _4H_ADVERSE,
+        {"four_hour_market_state": "UNAVAILABLE", "four_hour_sma_alignment": "unavailable",
+         "four_hour_reclaim_status": "unavailable", "four_hour_structure_note": "unavailable",
+         "four_hour_data_status": "unavailable"},
+        {"four_hour_market_state": "TRANSITION", "four_hour_sma_alignment": "mixed",
+         "four_hour_reclaim_status": "below_value", "four_hour_structure_note": "lower_high_pressure",
+         "four_hour_data_status": "stale"},
+    ]
+    for payload in states:
+        res = validate(signal, _pf_sovereign(dict(payload)), _BASE_CONFIG)
+        for key in ("final_tier", "score", "capital_action",
+                    "final_discord_channel", "safe_for_alert"):
+            assert res[key] == res_base[key], (
+                f"4H payload {payload} changed {key!r}: {res[key]!r} vs base {res_base[key]!r}"
+            )
+
+
+# 14C CRITICAL: adverse 4H evidence must NOT downgrade a valid SNIPE_IT
+def test_4h_adverse_does_not_downgrade_snipe_it():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_4h(**_4H_ADVERSE)), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT", (
+        "adverse 4H (FAILURE/hostile/failed_reclaim/breakdown) must NOT veto or "
+        "downgrade a valid daily SNIPE_IT in Phase 14C"
+    )
+    assert result["safe_for_alert"] is True
+
+
+# 14C: adverse 4H must not downgrade STARTER or NEAR_ENTRY either
+def test_4h_adverse_does_not_downgrade_starter_or_near_entry():
+    for sig_fn, expected in ((_starter_signal, "STARTER"), (_near_entry_signal, "NEAR_ENTRY")):
+        result = validate(sig_fn(), _pf_sovereign(_kf_with_4h(**_4H_ADVERSE)), _BASE_CONFIG)
+        assert result["final_tier"] == expected
+        assert result["final_signal"]["four_hour_market_state"] == "FAILURE"
+
+
+# 14C: favorable 4H must NOT upgrade WAIT, and WAIT still never posts
+def test_4h_favorable_does_not_upgrade_wait():
+    result = validate(_wait_signal(), _pf_sovereign(_kf_with_4h()), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["safe_for_alert"] is False
+    assert result["final_discord_channel"] == "none"
+
+
+# 14C: 4H fields never appear as veto / downgrade labels
+def test_4h_fields_not_in_applied_vetoes():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_4h(**_4H_ADVERSE)), _BASE_CONFIG)
+    applied = result.get("applied_vetoes", [])
+    for field in _4H_KF_FIELDS:
+        assert field not in applied
+        for veto in applied:
+            assert field not in str(veto)
+
+
+# 14C: STARTER and NEAR_ENTRY receive 4H passthrough without tier change
+def test_4h_passthrough_works_for_starter_and_near_entry():
+    for sig_fn, expected in ((_starter_signal, "STARTER"), (_near_entry_signal, "NEAR_ENTRY")):
+        result = validate(sig_fn(), _pf_sovereign(_kf_with_4h()), _BASE_CONFIG)
+        assert result["final_tier"] == expected
+        assert result["final_signal"]["four_hour_market_state"] == "EXPANSION"
+
+
+# 14C: coexists with weekly + VCP/BRT/market_structure_state in one signal
+def test_4h_coexists_with_all_prior_evidence():
+    kf = _kf_with_brt(_kf_with_mktstate("EXPANSION", _kf_with_weekly(_kf_with_4h())))
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs.get("four_hour_market_state") == "EXPANSION"
+    assert fs.get("weekly_alignment_context") == "full_alignment"
+    assert fs.get("market_structure_state") == "EXPANSION"
+    assert fs.get("entry_family") == "zone_core"
+    assert result["final_tier"] == "SNIPE_IT"

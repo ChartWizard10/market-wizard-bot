@@ -305,6 +305,79 @@ def batch_download(tickers: list, config: dict) -> dict:
     return results
 
 
+# ---------------------------------------------------------------------------
+# Phase 14C: Real 4H OHLCV acquisition (config-gated, default OFF)
+# ---------------------------------------------------------------------------
+# Provides genuine 4H bars by aggregating intraday 60m data (yfinance has no
+# native "4h" interval). 4H is NEVER faked from daily bars. Acquisition is gated
+# behind data.fetch_4h (default false), so the default production scan path adds
+# zero network calls and is byte-for-byte unchanged. When disabled, callers
+# receive None and the 4H evidence engine returns honest UNAVAILABLE defaults.
+
+
+def resample_to_4h(df: pd.DataFrame) -> pd.DataFrame | None:
+    """Aggregate a normalized intraday (e.g. 60m) OHLCV DataFrame into 4H bars.
+
+    Returns None on empty/invalid input. This is real intraday aggregation —
+    finer bars combined into coarser 4H bars — not a daily-to-4H fabrication.
+    """
+    if df is None or len(df) == 0:
+        return None
+    if not isinstance(df.index, pd.DatetimeIndex):
+        return None
+    try:
+        bars = (
+            df.resample("4h")
+            .agg({"open": "first", "high": "max", "low": "min",
+                  "close": "last", "volume": "sum"})
+            .dropna(subset=["close"])
+        )
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("RESAMPLE_4H_ERROR: %s", exc)
+        return None
+    if len(bars) == 0:
+        return None
+    return bars
+
+
+def fetch_4h(ticker: str, config: dict) -> pd.DataFrame | None:
+    """Fetch real 4H bars for a ticker, or None when unavailable/disabled.
+
+    Disabled by default (data.fetch_4h=false) — returns None immediately with no
+    network call, preserving the existing scan path. When enabled, downloads
+    intraday 60m bars and aggregates them to 4H. Any failure returns None so the
+    scan never stops on 4H acquisition.
+    """
+    data_cfg = config.get("data", {})
+    if not data_cfg.get("fetch_4h", False):
+        return None
+
+    period = data_cfg.get("fetch_4h_period", "60d")
+    base_interval = data_cfg.get("fetch_4h_base_interval", "60m")
+
+    try:
+        raw = yf.download(
+            ticker,
+            period=period,
+            interval=base_interval,
+            progress=False,
+            auto_adjust=True,
+        )
+    except Exception as exc:
+        log.warning("FETCH_4H_ERROR: %s: %s", ticker, exc)
+        return None
+
+    if raw is None or raw.empty:
+        return None
+
+    try:
+        norm = _normalize(raw)
+        return resample_to_4h(norm)
+    except Exception as exc:
+        log.warning("FETCH_4H_NORMALIZE_ERROR: %s: %s", ticker, exc)
+        return None
+
+
 def _error_result(ticker: str, msg: str) -> dict:
     return {
         "ticker": ticker,

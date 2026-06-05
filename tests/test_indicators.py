@@ -33,6 +33,12 @@ from src.indicators import (
     compute_weekly_trend_state,
     compute_weekly_alignment_context,
     compute_weekly_evidence,
+    compute_4h_sma_alignment,
+    compute_4h_reclaim_status,
+    compute_4h_structure_note,
+    compute_4h_data_status,
+    classify_4h_market_state,
+    compute_four_hour_evidence,
     enrich,
 )
 
@@ -1444,3 +1450,357 @@ def test_weekly_coexists_with_vcp_brt_mktstate_in_enrich():
                 "market_structure_state", "weekly_sma_alignment",
                 "weekly_trend_state", "weekly_alignment_context"):
         assert key in r, f"expected evidence field missing after Phase 14A: {key}"
+
+
+# ===========================================================================
+# Phase 14C — Real 4H Operational State Evidence Engine (evidence-only)
+# ===========================================================================
+
+_4H_END = pd.Timestamp("2026-06-05 16:00")
+_4H_FIELDS = (
+    "four_hour_market_state",
+    "four_hour_sma_alignment",
+    "four_hour_reclaim_status",
+    "four_hour_structure_note",
+    "four_hour_data_status",
+)
+
+
+def _df4h(closes, highs=None, lows=None, opens=None, end=_4H_END):
+    """Build a real 4H OHLCV DataFrame (DatetimeIndex at 4H freq)."""
+    n = len(closes)
+    idx = pd.date_range(end=pd.Timestamp(end), periods=n, freq="4h")
+    c = np.array(closes, dtype=float)
+    h = (c + 0.5) if highs is None else np.array(highs, dtype=float)
+    l = (c - 0.5) if lows is None else np.array(lows, dtype=float)
+    o = c if opens is None else np.array(opens, dtype=float)
+    return pd.DataFrame(
+        {"open": o, "high": h, "low": l, "close": c, "volume": [1_000_000.0] * n},
+        index=idx,
+    )
+
+
+def _4h_pad(closes, highs, lows, fill=12):
+    """Prepend flat filler bars so the shaped last-12 bars drive the structure read."""
+    fc = [closes[0]] * fill
+    fh = [highs[0]] * fill
+    fl = [lows[0]] * fill
+    return _df4h(fc + list(closes), highs=fh + list(highs), lows=fl + list(lows))
+
+
+def _4h_uptrend(n=60):
+    return _df4h(list(50 + np.arange(n) * 0.5))
+
+
+def _4h_downtrend(n=60):
+    return _df4h(list(120 - np.arange(n) * 0.5))
+
+
+# ---- four_hour_sma_alignment (supportive | mixed | hostile | unavailable) ----
+
+def test_4h_sma_alignment_supportive():
+    assert compute_4h_sma_alignment(_4h_uptrend()) == "supportive"
+
+
+def test_4h_sma_alignment_hostile():
+    assert compute_4h_sma_alignment(_4h_downtrend()) == "hostile"
+
+
+def test_4h_sma_alignment_mixed():
+    # Downtrend (sma20 < sma50) then a pop above sma20 → neither full-stack nor hostile.
+    base = list(120 - np.arange(50) * 0.4)
+    m = _df4h(base + [base[-1] + 3, base[-1] + 5])
+    assert compute_4h_sma_alignment(m) == "mixed"
+
+
+def test_4h_sma_alignment_unavailable_on_short_data():
+    assert compute_4h_sma_alignment(_df4h(list(range(10)))) == "unavailable"
+
+
+# ---- four_hour_reclaim_status ----
+
+def test_4h_reclaim_reclaimed():
+    assert compute_4h_reclaim_status(_4h_uptrend()) == "reclaimed"
+
+
+def test_4h_reclaim_below_value():
+    assert compute_4h_reclaim_status(_4h_downtrend()) == "below_value"
+
+
+def test_4h_reclaim_testing():
+    base = list(120 - np.arange(50) * 0.4)
+    m = _df4h(base + [base[-1] + 3, base[-1] + 5])
+    assert compute_4h_reclaim_status(m) == "testing"
+
+
+def test_4h_reclaim_failed_reclaim():
+    base = list(120 - np.arange(40) * 0.5)
+    closes = base + [101, 103, 102]
+    opens = list(closes)
+    highs = [c + 0.5 for c in closes]
+    lows = [c - 0.5 for c in closes]
+    highs[-2] = closes[-2] + 8          # a recent bar pokes above SMA20
+    opens[-1] = closes[-1] + 4          # last bar closes bearish, back below
+    d = _df4h(closes, highs=highs, lows=lows, opens=opens)
+    assert compute_4h_reclaim_status(d) == "failed_reclaim"
+
+
+def test_4h_reclaim_unavailable_on_short_data():
+    assert compute_4h_reclaim_status(_df4h(list(range(8)))) == "unavailable"
+
+
+# ---- four_hour_structure_note ----
+
+def test_4h_structure_higher_high_sequence():
+    d = _df4h([80] * 12 + [90, 92, 94, 96, 98, 100, 102, 104, 106, 108, 110, 112])
+    assert compute_4h_structure_note(d) == "higher_high_sequence"
+
+
+def test_4h_structure_higher_low_repair():
+    hl_c = [91, 92, 93, 92, 94, 93, 95, 94, 96, 95, 97, 96]
+    hl_h = [97] * 12
+    hl_l = [88, 89, 89, 90, 90, 91, 92, 92, 93, 93, 94, 94]
+    assert compute_4h_structure_note(_4h_pad(hl_c, hl_h, hl_l)) == "higher_low_repair"
+
+
+def test_4h_structure_lower_high_pressure():
+    lh_h = [110, 109, 108, 107, 106, 105, 104, 103, 102, 101, 100, 99]
+    lh_l = [95] * 12
+    lh_c = [103, 102, 101, 100, 99, 98, 99, 100, 99, 100, 99, 100]
+    assert compute_4h_structure_note(_4h_pad(lh_c, lh_h, lh_l)) == "lower_high_pressure"
+
+
+def test_4h_structure_range_compression():
+    wide_c = [100] * 6
+    wide_h = [105, 104, 105, 104, 105, 104]
+    wide_l = [95, 96, 95, 96, 95, 96]
+    tight_c = [100] * 6
+    tight_h = [101, 100.8, 101, 100.8, 101, 100.8]
+    tight_l = [99, 99.2, 99, 99.2, 99, 99.2]
+    d = _4h_pad(wide_c + tight_c, wide_h + tight_h, wide_l + tight_l)
+    assert compute_4h_structure_note(d) == "range_compression"
+
+
+def test_4h_structure_breakdown_pressure():
+    bd_h = [110, 108, 106, 104, 102, 100, 98, 96, 94, 92, 90, 88]
+    bd_l = [100, 98, 96, 94, 92, 90, 88, 86, 84, 82, 80, 78]
+    bd_c = [101, 99, 97, 95, 93, 91, 89, 87, 85, 83, 81, 79]
+    assert compute_4h_structure_note(_4h_pad(bd_c, bd_h, bd_l)) == "breakdown_pressure"
+
+
+def test_4h_structure_failed_breakdown_reclaim():
+    fb_l = [100, 100, 100, 100, 100, 100, 99, 98, 95, 97, 99, 100]
+    fb_h = [105, 105, 105, 105, 105, 105, 104, 103, 100, 104, 106, 107]
+    fb_c = [104, 104, 104, 104, 104, 104, 102, 100, 96, 103, 105, 106]
+    assert compute_4h_structure_note(_4h_pad(fb_c, fb_h, fb_l)) == "failed_breakdown_reclaim"
+
+
+def test_4h_structure_unknown():
+    d = _df4h([100] * 24, highs=[101] * 24, lows=[99] * 24)
+    assert compute_4h_structure_note(d) == "unknown"
+
+
+def test_4h_structure_unavailable_on_short_data():
+    assert compute_4h_structure_note(_df4h(list(range(10)))) == "unavailable"
+
+
+# ---- four_hour_data_status (current | degraded | stale | unavailable) ----
+
+def test_4h_data_status_current():
+    d = _4h_uptrend(30)
+    assert compute_4h_data_status(d, None, pd.Timestamp("2026-06-05 18:00")) == "current"
+
+
+def test_4h_data_status_degraded():
+    d = _4h_uptrend(30)
+    assert compute_4h_data_status(d, None, pd.Timestamp("2026-06-06 12:00")) == "degraded"
+
+
+def test_4h_data_status_stale():
+    d = _4h_uptrend(30)
+    assert compute_4h_data_status(d, None, pd.Timestamp("2026-06-10 16:00")) == "stale"
+
+
+def test_4h_data_status_unavailable():
+    assert compute_4h_data_status(None) == "unavailable"
+    empty = pd.DataFrame({"open": [], "high": [], "low": [], "close": [], "volume": []})
+    assert compute_4h_data_status(empty) == "unavailable"
+
+
+# ---- classify_4h_market_state (all 8 states, deterministic synthesis) ----
+
+def test_4h_market_state_expansion():
+    assert classify_4h_market_state(
+        None, "supportive", "reclaimed", "higher_high_sequence"
+    ) == "EXPANSION"
+
+
+def test_4h_market_state_orderly_continuation():
+    assert classify_4h_market_state(
+        None, "supportive", "reclaimed", "higher_low_repair"
+    ) == "ORDERLY_CONTINUATION"
+
+
+def test_4h_market_state_compression():
+    assert classify_4h_market_state(
+        None, "mixed", "below_value", "range_compression"
+    ) == "COMPRESSION"
+
+
+def test_4h_market_state_repair():
+    assert classify_4h_market_state(
+        None, "mixed", "below_value", "failed_breakdown_reclaim"
+    ) == "REPAIR"
+    assert classify_4h_market_state(
+        None, "mixed", "testing", "unknown"
+    ) == "REPAIR"
+
+
+def test_4h_market_state_transition():
+    assert classify_4h_market_state(
+        None, "hostile", "below_value", "lower_high_pressure"
+    ) == "TRANSITION"
+    assert classify_4h_market_state(
+        None, "mixed", "unknown", "unknown"
+    ) == "TRANSITION"
+
+
+def test_4h_market_state_failure():
+    assert classify_4h_market_state(
+        None, "hostile", "below_value", "breakdown_pressure"
+    ) == "FAILURE"
+
+
+def test_4h_market_state_unknown():
+    assert classify_4h_market_state(
+        None, "supportive", "unknown", "unknown"
+    ) == "UNKNOWN"
+
+
+def test_4h_market_state_unavailable():
+    assert classify_4h_market_state(
+        None, "unavailable", "unavailable", "unavailable"
+    ) == "UNAVAILABLE"
+
+
+# ---- compute_four_hour_evidence orchestrator & safe defaults ----
+
+def test_4h_evidence_full_on_real_uptrend():
+    ev = compute_four_hour_evidence(
+        _4h_uptrend(60), None, pd.Timestamp("2026-06-05 18:00")
+    )
+    assert ev["four_hour_market_state"] == "EXPANSION"
+    assert ev["four_hour_sma_alignment"] == "supportive"
+    assert ev["four_hour_reclaim_status"] == "reclaimed"
+    assert ev["four_hour_structure_note"] == "higher_high_sequence"
+    assert ev["four_hour_data_status"] == "current"
+
+
+def test_4h_evidence_unavailable_on_none():
+    assert compute_four_hour_evidence(None) == {
+        "four_hour_market_state": "UNAVAILABLE",
+        "four_hour_sma_alignment": "unavailable",
+        "four_hour_reclaim_status": "unavailable",
+        "four_hour_structure_note": "unavailable",
+        "four_hour_data_status": "unavailable",
+    }
+
+
+def test_4h_evidence_unavailable_on_short_data():
+    ev = compute_four_hour_evidence(_4h_uptrend(10))
+    assert ev["four_hour_market_state"] == "UNAVAILABLE"
+    assert ev["four_hour_sma_alignment"] == "unavailable"
+    assert ev["four_hour_data_status"] == "unavailable"
+
+
+def test_4h_evidence_safe_on_empty_df():
+    empty = pd.DataFrame({"open": [], "high": [], "low": [], "close": [], "volume": []})
+    assert compute_four_hour_evidence(empty) == _EMPTY_4H_EXPECTED
+
+
+def test_4h_evidence_safe_on_nan_data():
+    closes = list(50 + np.arange(30) * 0.5)
+    closes[-1] = np.nan
+    closes[-5] = np.nan
+    d = _df4h(closes)
+    ev = compute_four_hour_evidence(d, None, pd.Timestamp("2026-06-05 18:00"))
+    # Must not raise; every field stays within its valid domain.
+    assert ev["four_hour_market_state"] in {
+        "EXPANSION", "ORDERLY_CONTINUATION", "COMPRESSION", "REPAIR",
+        "TRANSITION", "FAILURE", "UNKNOWN", "UNAVAILABLE",
+    }
+    assert ev["four_hour_sma_alignment"] in {"supportive", "mixed", "hostile", "unavailable"}
+
+
+def test_4h_evidence_safe_on_non_datetime_index():
+    d = _4h_uptrend(60).reset_index(drop=True)  # RangeIndex, not DatetimeIndex
+    assert compute_four_hour_evidence(d) == _EMPTY_4H_EXPECTED
+
+
+_EMPTY_4H_EXPECTED = {
+    "four_hour_market_state": "UNAVAILABLE",
+    "four_hour_sma_alignment": "unavailable",
+    "four_hour_reclaim_status": "unavailable",
+    "four_hour_structure_note": "unavailable",
+    "four_hour_data_status": "unavailable",
+}
+
+
+# ---- enrich() integration ----
+
+def test_enrich_4h_unavailable_when_no_4h_df():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG)  # no four_hour_df → honest UNAVAILABLE
+    assert r["four_hour_market_state"] == "UNAVAILABLE"
+    assert r["four_hour_sma_alignment"] == "unavailable"
+    assert r["four_hour_reclaim_status"] == "unavailable"
+    assert r["four_hour_structure_note"] == "unavailable"
+    assert r["four_hour_data_status"] == "unavailable"
+
+
+def test_enrich_4h_real_values_when_4h_df_supplied():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG, four_hour_df=_4h_uptrend(60))
+    assert r["four_hour_market_state"] == "EXPANSION"
+    assert r["four_hour_sma_alignment"] == "supportive"
+    for key in _4H_FIELDS:
+        assert key in r
+
+
+def test_enrich_4h_does_not_fake_from_daily():
+    # The daily df is a clean uptrend; without a real 4H df, 4H must stay
+    # UNAVAILABLE — proving 4H is never manufactured from daily bars.
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG)
+    assert r["four_hour_market_state"] == "UNAVAILABLE"
+    # Daily proxy (market_structure_state) remains independently populated.
+    assert r["market_structure_state"] != "UNAVAILABLE"
+
+
+# ---- forbidden-indicator source guard ----
+
+def test_no_disabled_indicators_in_4h_functions():
+    import inspect
+    import re
+    for fn in (
+        compute_4h_sma_alignment, compute_4h_reclaim_status,
+        compute_4h_structure_note, compute_4h_data_status,
+        classify_4h_market_state, compute_four_hour_evidence,
+    ):
+        src = inspect.getsource(fn).lower()
+        for bad in ("rsi", "macd", "bollinger", "stochastic"):
+            assert not re.search(rf"\b{bad}\b", src), (
+                f"forbidden indicator {bad!r} found in {fn.__name__}"
+            )
+
+
+# ---- coexistence with all prior evidence layers ----
+
+def test_4h_coexists_with_all_prior_evidence_in_enrich():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG, four_hour_df=_4h_uptrend(60))
+    for key in ("vcp_status", "entry_family", "break_retest_state",
+                "market_structure_state", "weekly_sma_alignment",
+                "weekly_trend_state", "weekly_alignment_context",
+                "four_hour_market_state", "four_hour_data_status"):
+        assert key in r, f"expected evidence field missing after Phase 14C: {key}"

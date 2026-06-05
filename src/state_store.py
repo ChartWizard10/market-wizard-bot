@@ -369,6 +369,12 @@ def record_alert(
         "weekly_sma_alignment":      final_signal.get("weekly_sma_alignment"),
         "weekly_trend_state":        final_signal.get("weekly_trend_state"),
         "weekly_alignment_context":  final_signal.get("weekly_alignment_context"),
+        # ---- Phase 14C: Real 4H Operational State Evidence (observational) ----
+        "four_hour_market_state":    final_signal.get("four_hour_market_state"),
+        "four_hour_sma_alignment":   final_signal.get("four_hour_sma_alignment"),
+        "four_hour_reclaim_status":  final_signal.get("four_hour_reclaim_status"),
+        "four_hour_structure_note":  final_signal.get("four_hour_structure_note"),
+        "four_hour_data_status":     final_signal.get("four_hour_data_status"),
 
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),

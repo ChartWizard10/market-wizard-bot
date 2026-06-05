@@ -1651,6 +1651,19 @@ def format_alert(
     weekly_trend_state       = _sanitize(str(_wk_trend_raw)) if _wk_trend_raw else ""
     weekly_alignment_context = _sanitize(str(_wk_ctx_raw)) if _wk_ctx_raw else ""
 
+    # Phase 14C — Real 4H Operational State context (display-only). Scanner-
+    # computed 4H evidence shown beneath the weekly/daily layers; never read by
+    # any gate, score, routing, or capital decision. Rendered only when present.
+    # No authority language ("blocked"/"approved"/"downgraded"/"vetoed").
+    _4h_state_raw   = signal.get("four_hour_market_state")
+    _4h_sma_raw     = signal.get("four_hour_sma_alignment")
+    _4h_reclaim_raw = signal.get("four_hour_reclaim_status")
+    _4h_data_raw    = signal.get("four_hour_data_status")
+    four_hour_market_state   = _sanitize(str(_4h_state_raw)) if _4h_state_raw else ""
+    four_hour_sma_alignment  = _sanitize(str(_4h_sma_raw)) if _4h_sma_raw else ""
+    four_hour_reclaim_status = _sanitize(str(_4h_reclaim_raw)) if _4h_reclaim_raw else ""
+    four_hour_data_status    = _sanitize(str(_4h_data_raw)) if _4h_data_raw else ""
+
     trigger_level      = signal.get("trigger_level")
     retest_status      = _sanitize(str(signal.get("retest_status", "—")))
     hold_status        = _sanitize(str(signal.get("hold_status", "—")))
@@ -1771,6 +1784,21 @@ def format_alert(
             f"Weekly: {_wk_trend} / {_wk_sma}  |  Alignment: {_wk_ctx}"
         )
 
+    # Phase 14C: 4H operational-condition line, shown beneath the weekly/daily
+    # lines only when any 4H evidence is present. Context only — daily/weekly
+    # layers above are never altered. No authority language.
+    _four_hour_line = None
+    if (four_hour_market_state or four_hour_sma_alignment
+            or four_hour_reclaim_status or four_hour_data_status):
+        _4h_state   = four_hour_market_state or "UNAVAILABLE"
+        _4h_sma     = four_hour_sma_alignment or "unavailable"
+        _4h_reclaim = four_hour_reclaim_status or "unavailable"
+        _4h_data    = four_hour_data_status or "unavailable"
+        _four_hour_line = (
+            f"4H: {_4h_state}  |  SMA: {_4h_sma}  |  "
+            f"Reclaim: {_4h_reclaim}  |  Data: {_4h_data}"
+        )
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{badge} | {ticker} | Score: {score}",
@@ -1779,6 +1807,8 @@ def format_alert(
     ]
     if _weekly_line:
         lines.append(_weekly_line)
+    if _four_hour_line:
+        lines.append(_four_hour_line)
     lines += [
         "──────────────────────────────",
         "EXECUTION",

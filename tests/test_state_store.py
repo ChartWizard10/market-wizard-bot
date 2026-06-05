@@ -1202,3 +1202,61 @@ def test_record_alert_weekly_fields_do_not_affect_dedup_key():
     assert rec1["dedup_key"] == rec2["dedup_key"], (
         "weekly evidence must not influence the dedup_key"
     )
+
+
+# ===========================================================================
+# Phase 14C — Real 4H Operational State Evidence persistence tests
+# ===========================================================================
+
+_4H_HISTORY_FIELDS = (
+    "four_hour_market_state",
+    "four_hour_sma_alignment",
+    "four_hour_reclaim_status",
+    "four_hour_structure_note",
+    "four_hour_data_status",
+)
+
+
+def test_record_alert_stores_4h_fields():
+    tr = _tiering(
+        four_hour_market_state="TRANSITION",
+        four_hour_sma_alignment="mixed",
+        four_hour_reclaim_status="below_value",
+        four_hour_structure_note="lower_high_pressure",
+        four_hour_data_status="current",
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["four_hour_market_state"] == "TRANSITION"
+    assert rec["four_hour_sma_alignment"] == "mixed"
+    assert rec["four_hour_reclaim_status"] == "below_value"
+    assert rec["four_hour_structure_note"] == "lower_high_pressure"
+    assert rec["four_hour_data_status"] == "current"
+
+
+def test_record_alert_4h_fields_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    for field in _4H_HISTORY_FIELDS:
+        assert field in rec, f"4H field missing from history record: {field!r}"
+        assert rec[field] is None
+
+
+def test_record_alert_4h_fields_do_not_affect_dedup_key():
+    tr_plain = _tiering(trigger=182.50, invalidation=178.20)
+    tr_4h = _tiering(
+        trigger=182.50, invalidation=178.20,
+        four_hour_market_state="FAILURE",
+        four_hour_sma_alignment="hostile",
+        four_hour_reclaim_status="failed_reclaim",
+        four_hour_structure_note="breakdown_pressure",
+        four_hour_data_status="current",
+    )
+    s1 = record_alert("AAPL", tr_plain, _empty(), _cfg())
+    s2 = record_alert("AAPL", tr_4h, _empty(), _cfg())
+    rec1 = s1["tickers"]["AAPL"]["alert_history"][0]
+    rec2 = s2["tickers"]["AAPL"]["alert_history"][0]
+    assert rec1["dedup_key"] == rec2["dedup_key"], (
+        "4H evidence must not influence the dedup_key"
+    )

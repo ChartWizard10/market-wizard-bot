@@ -1395,10 +1395,349 @@ def compute_weekly_evidence(
 
 
 # ---------------------------------------------------------------------------
+# Phase 14C: Real 4H Operational State Evidence Engine — scanner-computed
+# ---------------------------------------------------------------------------
+# Five observational fields describing the REAL 4H auction condition, computed
+# from genuine 4H OHLCV bars (aggregated from intraday 60m data — NEVER faked
+# from daily bars). Pure evidence: never read by any gate, scoring function,
+# ranking, calibration, routing decision, capital authorisation, dedup logic,
+# campaign identity, or alert-format decision. Flows enrich(four_hour_df=...) ->
+# prefilter key_features -> tiering final_signal -> state_store alert_history ->
+# Discord display.
+#
+# HARD RULE: when real 4H bars are unavailable, every field returns an honest
+# UNAVAILABLE / unavailable default. A daily-bar proxy already exists as
+# market_structure_state (Phase 1D); Phase 14C never substitutes daily for 4H.
+#
+# DOCTRINE: 4H = operational condition. It triggers nothing, gates nothing, and
+# caps nothing in Phase 14C — it is operator-facing truth only. Even fresh 4H
+# data is evidence; stale 4H data must influence no decision.
+
+_4H_SMA_SHORT          = 20     # 4H SMA20 — operational value
+_4H_SMA_MED            = 50     # 4H SMA50 — intermediate value
+_4H_SMA_LONG           = 200    # 4H SMA200 — used only when enough bars exist
+_4H_MIN_BARS           = 24     # below this, all analytic fields default safely
+_4H_STRUCT_WINDOW      = 12     # 4H bars for HH/HL/LH/LL structure read
+_4H_NEAR_BAND_PCT      = 1.5    # |close - sma20| within this %% = "near"/testing
+_4H_COMPRESSION_RATIO  = 0.6    # 2nd-half range <= this * 1st-half range = coil
+_4H_FRESH_HOURS        = 8.0    # last 4H bar age <= this = current
+_4H_DEGRADED_HOURS     = 28.0   # last 4H bar age <= this = degraded
+# age beyond _4H_DEGRADED_HOURS = stale
+
+_EMPTY_4H = {
+    "four_hour_market_state":   "UNAVAILABLE",
+    "four_hour_sma_alignment":  "unavailable",
+    "four_hour_reclaim_status": "unavailable",
+    "four_hour_structure_note": "unavailable",
+    "four_hour_data_status":    "unavailable",
+}
+
+
+def _4h_smas(df_4h: pd.DataFrame) -> dict:
+    """Return last-bar 4H SMA values (None when insufficient bars)."""
+    c = df_4h["close"]
+    out: dict = {}
+    for key, period in (("s20", _4H_SMA_SHORT), ("s50", _4H_SMA_MED),
+                        ("s200", _4H_SMA_LONG)):
+        if len(c) >= period:
+            v = float(c.rolling(period, min_periods=period).mean().iloc[-1])
+            out[key] = v if not np.isnan(v) else None
+        else:
+            out[key] = None
+    return out
+
+
+def compute_4h_data_status(
+    df_4h: pd.DataFrame,
+    config: dict | None = None,
+    now: pd.Timestamp | None = None,
+) -> str:
+    """Classify 4H data freshness: current | degraded | stale | unavailable.
+
+    Pure freshness read of the last bar's timestamp. Prevents false confidence:
+    even 'current' 4H data is evidence-only in Phase 14C. Never gates.
+    """
+    try:
+        if df_4h is None or len(df_4h) == 0:
+            return "unavailable"
+        if not isinstance(df_4h.index, pd.DatetimeIndex):
+            return "unavailable"
+        last = df_4h.index[-1]
+        if pd.isna(last):
+            return "unavailable"
+
+        last_ts = pd.Timestamp(last)
+        if now is None:
+            now_ts = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None \
+                else pd.Timestamp.now()
+        else:
+            now_ts = pd.Timestamp(now)
+
+        # Normalise tz so subtraction never raises.
+        if last_ts.tz is not None and now_ts.tz is None:
+            last_ts = last_ts.tz_localize(None)
+        elif last_ts.tz is None and now_ts.tz is not None:
+            now_ts = now_ts.tz_localize(None)
+
+        age_hours = (now_ts - last_ts).total_seconds() / 3600.0
+        if age_hours < 0:
+            # Clock skew / future bar — treat as fresh rather than crash.
+            return "current"
+        if age_hours <= _4H_FRESH_HOURS:
+            return "current"
+        if age_hours <= _4H_DEGRADED_HOURS:
+            return "degraded"
+        return "stale"
+    except Exception:
+        return "unavailable"
+
+
+def compute_4h_sma_alignment(df_4h: pd.DataFrame) -> str:
+    """Classify 4H value alignment: supportive | mixed | hostile | unavailable.
+
+    Uses 4H SMA20/SMA50 (and SMA200 when enough bars exist). Pure observation.
+    """
+    try:
+        c = df_4h["close"]
+        if len(c) < _4H_SMA_SHORT:
+            return "unavailable"
+        smas = _4h_smas(df_4h)
+        s20, s50, s200 = smas["s20"], smas["s50"], smas["s200"]
+        if s20 is None:
+            return "unavailable"
+        last = float(c.iloc[-1])
+
+        # SMA20 is always present here; SMA50/200 consulted when available.
+        above_20 = last > s20
+        above_50 = (s50 is None) or (last > s50)
+        above_200 = (s200 is None) or (last > s200)
+        stack_up = (s50 is None) or (s20 >= s50)
+        stack_down = (s50 is not None) and (s20 < s50)
+
+        if above_20 and above_50 and above_200 and stack_up:
+            return "supportive"
+        below_key = (last < s20) and (s50 is not None and last < s50)
+        if below_key and stack_down:
+            return "hostile"
+        return "mixed"
+    except Exception:
+        return "unavailable"
+
+
+def compute_4h_reclaim_status(df_4h: pd.DataFrame) -> str:
+    """Classify 4H reclaim: reclaimed | testing | below_value | failed_reclaim |
+    unknown | unavailable.
+
+    Identifies whether the 4H has repaired enough (relative to SMA20/SMA50) to
+    support a daily swing entry. Pure observation; never gates.
+    """
+    try:
+        c = df_4h["close"]
+        if len(c) < _4H_SMA_SHORT:
+            return "unavailable"
+        smas = _4h_smas(df_4h)
+        s20, s50 = smas["s20"], smas["s50"]
+        if s20 is None:
+            return "unavailable"
+        last = float(c.iloc[-1])
+        band = s20 * (_4H_NEAR_BAND_PCT / 100.0)
+
+        above_20 = last > s20
+        above_50 = (s50 is None) or (last > s50)
+        below_20 = last < s20
+        below_50 = (s50 is not None) and (last < s50)
+
+        # failed_reclaim: a recent bar pushed above SMA20 but the latest bar
+        # closed back below it with a bearish body — a rejected reclaim attempt.
+        win = min(4, len(df_4h))
+        recent = df_4h.tail(win)
+        poked_above = bool((recent["high"] > s20).any())
+        bearish_last = float(df_4h["close"].iloc[-1]) < float(df_4h["open"].iloc[-1])
+        if below_20 and poked_above and bearish_last:
+            return "failed_reclaim"
+
+        if above_20 and above_50:
+            return "reclaimed"
+        if abs(last - s20) <= band:
+            return "testing"
+        if below_20 and below_50:
+            return "below_value"
+        if below_20:
+            return "testing"
+        return "unknown"
+    except Exception:
+        return "unavailable"
+
+
+def compute_4h_structure_note(df_4h: pd.DataFrame) -> str:
+    """Compress 4H structure into a label.
+
+    Returns: higher_high_sequence | higher_low_repair | lower_high_pressure |
+             range_compression | breakdown_pressure | failed_breakdown_reclaim |
+             unknown | unavailable.
+
+    Conservative swing read over the recent 4H window. Pure observation.
+    """
+    try:
+        if df_4h is None or len(df_4h) < _4H_MIN_BARS:
+            return "unavailable"
+        win = min(_4H_STRUCT_WINDOW, len(df_4h))
+        if win < 4:
+            return "unavailable"
+        recent = df_4h.tail(win)
+        half = max(1, win // 2)
+        fh_high = float(recent["high"].iloc[:half].max())
+        sh_high = float(recent["high"].iloc[half:].max())
+        fh_low = float(recent["low"].iloc[:half].min())
+        sh_low = float(recent["low"].iloc[half:].min())
+        last = float(recent["close"].iloc[-1])
+
+        rng_hi = float(recent["high"].max())
+        rng_lo = float(recent["low"].min())
+        rng_mid = (rng_hi + rng_lo) / 2.0
+
+        fh_range = fh_high - fh_low
+        sh_range = sh_high - sh_low
+
+        higher_highs = sh_high > fh_high
+        higher_lows = sh_low > fh_low
+        lower_highs = sh_high < fh_high
+        lower_lows = sh_low < fh_low
+
+        # failed_breakdown_reclaim: window swept a fresh lower low but price
+        # recovered back into the upper half — a reclaimed breakdown.
+        if lower_lows and last >= rng_mid and last > fh_low:
+            return "failed_breakdown_reclaim"
+        if higher_highs and higher_lows:
+            return "higher_high_sequence"
+        if lower_highs and lower_lows and last < rng_mid:
+            return "breakdown_pressure"
+        # range_compression: a converging coil — higher lows AND lower highs with
+        # a materially tighter second-half range. Checked before the directional
+        # repair/pressure labels so a true coil is not mislabeled.
+        if (higher_lows and lower_highs
+                and (fh_range <= 0 or sh_range <= fh_range * _4H_COMPRESSION_RATIO)):
+            return "range_compression"
+        # higher_low_repair: lows rebuilding while highs hold (not lower highs)
+        # and no fresh higher high yet.
+        if higher_lows and not higher_highs and not lower_highs:
+            return "higher_low_repair"
+        if lower_highs:
+            return "lower_high_pressure"
+        return "unknown"
+    except Exception:
+        return "unavailable"
+
+
+def classify_4h_market_state(
+    df_4h: pd.DataFrame,
+    sma_alignment: str,
+    reclaim_status: str,
+    structure_note: str,
+) -> str:
+    """Classify the real 4H auction state.
+
+    Returns one of:
+      EXPANSION | ORDERLY_CONTINUATION | COMPRESSION | REPAIR |
+      TRANSITION | FAILURE | UNKNOWN | UNAVAILABLE
+
+    Deterministic synthesis of the already-computed 4H sub-labels. Mirrors the
+    Phase 1D market_structure_state vocabulary but is derived from real 4H bars.
+    Pure observation — never read by any gate, score, routing, capital path.
+    """
+    try:
+        sa = str(sma_alignment or "unavailable").lower()
+        rc = str(reclaim_status or "unavailable").lower()
+        st = str(structure_note or "unavailable").lower()
+
+        if sa == "unavailable" and rc == "unavailable" and st == "unavailable":
+            return "UNAVAILABLE"
+
+        # FAILURE — confirmed breakdown / rejected reclaim with hostile value.
+        if st == "breakdown_pressure" and (sa == "hostile"
+                                           or rc in ("below_value", "failed_reclaim")):
+            return "FAILURE"
+        if rc == "failed_reclaim" and sa == "hostile":
+            return "FAILURE"
+
+        # EXPANSION — fresh higher-high structure, supportive value, reclaimed.
+        if st == "higher_high_sequence" and sa == "supportive" and rc == "reclaimed":
+            return "EXPANSION"
+
+        # ORDERLY_CONTINUATION — above value, holding, digesting without break.
+        if rc == "reclaimed" and sa in ("supportive", "mixed") and st in (
+            "higher_high_sequence", "higher_low_repair", "range_compression"
+        ):
+            return "ORDERLY_CONTINUATION"
+
+        # REPAIR — rebuilding structure or reclaiming a prior breakdown.
+        if st in ("failed_breakdown_reclaim", "higher_low_repair") or rc == "testing":
+            return "REPAIR"
+
+        # COMPRESSION — coiling sideways with no clean directional break.
+        if st == "range_compression":
+            return "COMPRESSION"
+
+        # TRANSITION — lost expansion posture (lower highs / below short-term
+        # value / mixed) but not a confirmed failure.
+        if st == "lower_high_pressure" or rc == "below_value" or sa == "mixed":
+            return "TRANSITION"
+
+        # FAILURE fallback — residual breakdown pressure.
+        if st == "breakdown_pressure":
+            return "FAILURE"
+
+        return "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
+
+def compute_four_hour_evidence(
+    df_4h: pd.DataFrame | None,
+    config: dict | None = None,
+    now: pd.Timestamp | None = None,
+) -> dict:
+    """Top-level 4H orchestrator. Computes all five evidence fields from REAL
+    4H bars, or returns honest UNAVAILABLE defaults when 4H data is absent.
+
+    Never raises — any failure or missing/short data yields safe defaults so the
+    scanner never stops on 4H issues.
+    """
+    try:
+        if df_4h is None or len(df_4h) == 0:
+            return dict(_EMPTY_4H)
+        if not isinstance(df_4h.index, pd.DatetimeIndex):
+            return dict(_EMPTY_4H)
+        if len(df_4h) < _4H_MIN_BARS:
+            # Too few real 4H bars to characterise the auction honestly.
+            return dict(_EMPTY_4H)
+
+        sma = compute_4h_sma_alignment(df_4h)
+        reclaim = compute_4h_reclaim_status(df_4h)
+        note = compute_4h_structure_note(df_4h)
+        state = classify_4h_market_state(df_4h, sma, reclaim, note)
+        data_status = compute_4h_data_status(df_4h, config, now)
+        return {
+            "four_hour_market_state":   state,
+            "four_hour_sma_alignment":  sma,
+            "four_hour_reclaim_status": reclaim,
+            "four_hour_structure_note": note,
+            "four_hour_data_status":    data_status,
+        }
+    except Exception:                                        # noqa: BLE001
+        return dict(_EMPTY_4H)
+
+
+# ---------------------------------------------------------------------------
 # Main enrichment entry point
 # ---------------------------------------------------------------------------
 
-def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
+def enrich(
+    ticker: str,
+    df: pd.DataFrame,
+    config: dict,
+    four_hour_df: pd.DataFrame | None = None,
+) -> dict:
     """Compute all structure-first features for a validated ticker DataFrame.
 
     Returns a flat feature dict for use by prefilter and claude_client.
@@ -1455,6 +1794,12 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
     # Phase 14A — Weekly Sovereignty Evidence (observational only). Derived from
     # the daily df via weekly resampling; safe defaults on any failure.
     weekly_evidence = compute_weekly_evidence(df, alignment, market_structure_state)
+
+    # Phase 14C — Real 4H Operational State Evidence (observational only).
+    # Computed only from a genuine 4H DataFrame; never faked from daily bars.
+    # When four_hour_df is None/short/invalid, all five fields default to honest
+    # UNAVAILABLE/unavailable. The scanner never stops on 4H issues.
+    four_hour_evidence = compute_four_hour_evidence(four_hour_df, config)
 
     prev_close: float | None = None
     if len(df) >= 2:
@@ -1545,4 +1890,12 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
         "weekly_sma_alignment":      weekly_evidence["weekly_sma_alignment"],
         "weekly_trend_state":        weekly_evidence["weekly_trend_state"],
         "weekly_alignment_context":  weekly_evidence["weekly_alignment_context"],
+        # Phase 14C — Real 4H Operational State Evidence (observational; never
+        # read by gates/scoring/ranking/routing/capital/dedup/alert-format
+        # decisions). UNAVAILABLE defaults when no real 4H bars are supplied.
+        "four_hour_market_state":    four_hour_evidence["four_hour_market_state"],
+        "four_hour_sma_alignment":   four_hour_evidence["four_hour_sma_alignment"],
+        "four_hour_reclaim_status":  four_hour_evidence["four_hour_reclaim_status"],
+        "four_hour_structure_note":  four_hour_evidence["four_hour_structure_note"],
+        "four_hour_data_status":     four_hour_evidence["four_hour_data_status"],
     }
