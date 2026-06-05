@@ -281,6 +281,7 @@ def record_alert(
     final_tier   = tiering_result.get("final_tier", "WAIT")
     final_channel = tiering_result.get("final_discord_channel", "none")
     score        = tiering_result.get("score", 0)
+    safe_for_alert = tiering_result.get("safe_for_alert", False)
     final_signal = tiering_result.get("final_signal") or {}
 
     trigger_level      = final_signal.get("trigger_level")
@@ -306,6 +307,13 @@ def record_alert(
         "alert_history":            [],
     })
 
+    # Phase 14C.5 — immutable unique identifier for the Observation Ledger.
+    # Built from scan_id + ticker + timestamp. Never read by dedup, campaign
+    # identity, cooldown, routing, tiering, or Discord output — it exists only
+    # so the outcome tracker can associate a future price outcome with the
+    # exact alert record that produced it.
+    alert_id = f"{scan_id}|{ticker}|{now}"
+
     history = ticker_state.setdefault("alert_history", [])
     history.append({
         # ---- Phase 6 baseline fields (unchanged) ----
@@ -318,6 +326,9 @@ def record_alert(
         "reason":             reason,
         "dedup_key":          dedup_key,
         "scan_id":            scan_id,
+        # ---- Phase 14C.5: Observation Ledger identity + filter (observational) ----
+        "alert_id":           alert_id,
+        "safe_for_alert":     safe_for_alert,
 
         # ---- Phase 13.3B: REQUIRED_FOR_OUTCOME ----
         "scan_price":         final_signal.get("scan_price"),
@@ -389,6 +400,18 @@ def record_alert(
         "original_claude_tier":              tiering_result.get("original_claude_tier"),
         "applied_vetoes":                    tiering_result.get("applied_vetoes") or [],
         "final_discord_channel":             tiering_result.get("final_discord_channel"),
+
+        # ---- Phase 14C.5: Observation Ledger outcome slots (observational) ----
+        # Initialized to None at alert time; populated later, out of band, by
+        # outcome_tracker. NEVER read by any gate, score, veto, tier, routing,
+        # capital, dedup, campaign, or Discord decision. Backtest material only.
+        "tp1_hit":            None,
+        "tp2_hit":            None,
+        "tp3_hit":            None,
+        "invalidated":        None,
+        "mfe_pct":            None,
+        "mae_pct":            None,
+        "outcome_updated_at": None,
     })
     if len(history) > max_entries:
         ticker_state["alert_history"] = history[-max_entries:]
@@ -409,5 +432,55 @@ def record_alert(
     meta = state.setdefault("meta", {})
     meta["last_updated"] = now
     meta["total_alerts"] = meta.get("total_alerts", 0) + 1
+
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Phase 14C.5 — Observation Ledger: outcome write-back (observational only)
+# ---------------------------------------------------------------------------
+
+# The ONLY fields record_outcome is permitted to write. Any key in outcome_dict
+# that is not in this tuple is ignored. This is the structural guarantee that
+# outcome write-back can never touch tier, routing, capital, dedup, campaign,
+# evidence, or any other decision-path field on a stored record.
+_OUTCOME_FIELDS: tuple[str, ...] = (
+    "tp1_hit",
+    "tp2_hit",
+    "tp3_hit",
+    "invalidated",
+    "mfe_pct",
+    "mae_pct",
+    "outcome_updated_at",
+)
+
+
+def record_outcome(
+    ticker: str,
+    alert_id: str,
+    outcome_dict: dict,
+    state: dict,
+) -> dict:
+    """Write observation-only outcome fields onto a stored alert_history record.
+
+    Observation only. Locates the record by its immutable ``alert_id`` and
+    overwrites ONLY the 7 fields in ``_OUTCOME_FIELDS``. It can never alter
+    final_tier, safe_for_alert, score/prefilter_score, capital_action,
+    final_discord_channel, campaign_id, dedup_key (or its inputs), or any
+    evidence field — those keys are structurally excluded from the write set.
+
+    Returns the (mutated) state dict. Does NOT save to disk — the caller saves.
+    No-op if the ticker or alert_id is not found.
+    """
+    ticker_state = (state.get("tickers") or {}).get(ticker)
+    if not ticker_state:
+        return state
+
+    for record in ticker_state.get("alert_history") or []:
+        if record.get("alert_id") == alert_id:
+            for field in _OUTCOME_FIELDS:
+                if field in outcome_dict:
+                    record[field] = outcome_dict[field]
+            break
 
     return state

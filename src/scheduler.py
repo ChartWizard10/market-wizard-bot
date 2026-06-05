@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from src import discord_alerts
 from src import indicators
 from src import market_data as market_data_mod
+from src import outcome_tracker
 from src import prefilter as prefilter_mod
 from src import campaign_store
 from src import score_calibration
@@ -394,6 +395,25 @@ async def run_scan_pipeline(
         campaign_store.save(campaign_state, config)
     except Exception as exc:
         log.critical("CRITICAL: campaign state write failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Phase 14C.5: Observation Ledger — outcome tracking (observation only).
+    # Fires AFTER all scan/alert decisions and state save. Config-gated and
+    # default OFF: when disabled there are zero extra network calls. When on,
+    # it runs in a worker thread (fire-and-forget) so it never blocks or
+    # influences the scan loop. It can only write the 7 observational outcome
+    # fields via state_store.record_outcome — no decision path is touched.
+    # ------------------------------------------------------------------
+    if config.get("observation", {}).get("enable_outcome_tracking", False):
+        try:
+            state_path = str(state_store._state_path(config))
+            asyncio.create_task(
+                asyncio.to_thread(
+                    outcome_tracker.update_outcomes, state_path, config
+                )
+            )
+        except Exception as exc:
+            log.warning("OUTCOME_TRACKING_DISPATCH_ERROR: %s", exc)
 
     ended_at         = datetime.utcnow().isoformat()
     duration_seconds = (datetime.utcnow() - start_ts).total_seconds()

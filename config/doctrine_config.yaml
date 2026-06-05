@@ -97,3 +97,13 @@ campaign:
   zone_tolerance_pct: 0.5
   invalidation_tolerance_pct: 0.5
   max_campaign_entries: 2000
+
+# Phase 14C.5 — Observation Ledger (observation only).
+# Associates weekly/4H (and other) evidence already stored on each posted alert
+# with the alert's future price outcome (TP1/TP2/TP3 hit, invalidated, MFE/MAE)
+# for backtesting. Observation only: it gates nothing, scores nothing, vetoes
+# nothing, and routes nothing. Default OFF → zero extra network calls and a
+# byte-for-byte unchanged scan path.
+observation:
+  enable_outcome_tracking: false
+  outcome_lookback_days: 30

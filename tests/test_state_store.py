@@ -11,8 +11,10 @@ from src.state_store import (
     load,
     make_dedup_key,
     record_alert,
+    record_outcome,
     save,
     _is_material_change,
+    _OUTCOME_FIELDS,
     _tier_rank,
     _within_cooldown,
 )
@@ -1038,6 +1040,123 @@ def test_record_alert_no_live_behavior_keywords():
         assert keyword not in joined, (
             f"Forbidden live-behavior keyword {keyword!r} found in state_store.py"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 14C.5 — Observation Ledger: alert_id + outcome slots + record_outcome
+# ---------------------------------------------------------------------------
+
+def test_record_alert_initializes_outcome_fields_to_none():
+    """All 7 observational outcome fields start as None on a fresh record."""
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    for field in _OUTCOME_FIELDS:
+        assert field in rec, f"{field} missing from record"
+        assert rec[field] is None, f"{field} should initialize to None"
+
+
+def test_record_alert_assigns_stable_alert_id():
+    """Each record carries an immutable alert_id built from scan_id|ticker|ts."""
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg(), scan_id="scan-001")
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["alert_id"].startswith("scan-001|AAPL|")
+    assert rec["alert_id"].endswith(rec["alerted_at"])
+
+
+def test_alert_id_does_not_affect_dedup_key():
+    """Adding alert_id leaves the dedup key identical to the legacy form."""
+    tr = _tiering(trigger=182.50, invalidation=178.20)
+    state = record_alert("AAPL", tr, _empty(), _cfg(), scan_id="scan-xyz")
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["dedup_key"] == make_dedup_key("AAPL", "SNIPE_IT", 182.50, 178.20)
+    # alert_id is not a component of the dedup key
+    assert rec["alert_id"] not in rec["dedup_key"]
+
+
+def test_record_alert_stores_safe_for_alert_flag():
+    """The observation ledger captures the tiering safe_for_alert verdict."""
+    tr = _tiering(safe=True)
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["safe_for_alert"] is True
+
+
+def test_record_outcome_writes_only_outcome_fields():
+    """record_outcome overwrites the 7 outcome fields and nothing else."""
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg(), scan_id="s1")
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    alert_id = rec["alert_id"]
+
+    outcome = {
+        "tp1_hit": True, "tp2_hit": False, "tp3_hit": None,
+        "invalidated": False, "mfe_pct": 4.2, "mae_pct": -1.1,
+        "outcome_updated_at": "2026-06-05T12:00:00+00:00",
+    }
+    record_outcome("AAPL", alert_id, outcome, state)
+    rec2 = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec2["tp1_hit"] is True
+    assert rec2["tp2_hit"] is False
+    assert rec2["mfe_pct"] == 4.2
+    assert rec2["mae_pct"] == -1.1
+    assert rec2["outcome_updated_at"] == "2026-06-05T12:00:00+00:00"
+
+
+def test_record_outcome_preserves_all_decision_fields():
+    """record_outcome must never alter any decision-path field."""
+    tr = _tiering(
+        ticker="AAPL", final_tier="SNIPE_IT", channel="#snipe-signals",
+        safe=True, score=90, trigger=182.50, invalidation=178.20,
+        capital_action="DEPLOY_FULL",
+        weekly_trend_state="advancing",
+        four_hour_market_state="EXPANSION",
+    )
+    tr["campaign_id"] = "AAPL|continuation|ob|178|178.2"
+    state = record_alert("AAPL", tr, _empty(), _cfg(), scan_id="s1")
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    alert_id = rec["alert_id"]
+
+    before = {
+        "tier": rec["tier"],
+        "trigger_level": rec["trigger_level"],
+        "invalidation_level": rec["invalidation_level"],
+        "score": rec["score"],
+        "dedup_key": rec["dedup_key"],
+        "capital_action": rec["capital_action"],
+        "final_discord_channel": rec["final_discord_channel"],
+        "safe_for_alert": rec["safe_for_alert"],
+        "weekly_trend_state": rec["weekly_trend_state"],
+        "four_hour_market_state": rec["four_hour_market_state"],
+    }
+    # Attempt to also smuggle decision-path keys through outcome_dict — ignored.
+    record_outcome("AAPL", alert_id, {
+        "tp1_hit": True, "outcome_updated_at": "2026-06-05T12:00:00+00:00",
+        "tier": "WAIT", "final_discord_channel": "none", "score": 0,
+        "capital_action": "BLOCK", "safe_for_alert": False,
+    }, state)
+
+    rec2 = state["tickers"]["AAPL"]["alert_history"][0]
+    for key, val in before.items():
+        assert rec2[key] == val, f"decision field {key} was mutated"
+    assert rec2["tp1_hit"] is True  # the legitimate outcome write applied
+
+
+def test_record_outcome_noop_for_unknown_alert_id():
+    """Unknown alert_id leaves all records untouched."""
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg(), scan_id="s1")
+    record_outcome("AAPL", "does-not-exist", {"tp1_hit": True}, state)
+    assert state["tickers"]["AAPL"]["alert_history"][0]["tp1_hit"] is None
+
+
+def test_record_outcome_noop_for_unknown_ticker():
+    """Unknown ticker is a safe no-op."""
+    state = _empty()
+    result = record_outcome("ZZZZ", "x", {"tp1_hit": True}, state)
+    assert result is state
+    assert state["tickers"] == {}
 
 
 # ---------------------------------------------------------------------------
