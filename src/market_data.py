@@ -378,6 +378,50 @@ def fetch_4h(ticker: str, config: dict) -> pd.DataFrame | None:
         return None
 
 
+def fetch_1h(ticker: str, config: dict) -> pd.DataFrame | None:
+    """Fetch real 1H bars for a ticker, or None when unavailable/disabled.
+
+    Disabled by default (data.fetch_1h=false) — returns None immediately with no
+    network call, preserving the existing scan path. When enabled, downloads
+    intraday 60m bars; a 60-minute bar IS a 1H bar, so no resampling is needed —
+    the normalized frame is returned directly. Any failure returns None so the
+    scan never stops on 1H acquisition. Phase 14E is evidence only.
+    """
+    data_cfg = config.get("data", {})
+    if not data_cfg.get("fetch_1h", False):
+        return None
+
+    period = data_cfg.get("fetch_1h_period", "60d")
+    base_interval = data_cfg.get("fetch_1h_base_interval", "60m")
+
+    try:
+        raw = yf.download(
+            ticker,
+            period=period,
+            interval=base_interval,
+            progress=False,
+            auto_adjust=True,
+        )
+    except Exception as exc:
+        log.warning("FETCH_1H_ERROR: %s: %s", ticker, exc)
+        return None
+
+    if raw is None or raw.empty:
+        return None
+
+    try:
+        norm = _normalize(raw)
+    except Exception as exc:
+        log.warning("FETCH_1H_NORMALIZE_ERROR: %s: %s", ticker, exc)
+        return None
+
+    if norm is None or len(norm) == 0:
+        return None
+    if not isinstance(norm.index, pd.DatetimeIndex):
+        return None
+    return norm
+
+
 def _error_result(ticker: str, msg: str) -> dict:
     return {
         "ticker": ticker,

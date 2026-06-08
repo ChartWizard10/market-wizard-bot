@@ -1292,6 +1292,40 @@ def _apply_four_hour_evidence_passthrough(signal: dict, key_features: dict) -> d
 
 
 # ---------------------------------------------------------------------------
+# Phase 14E — Real 1H Entry Trigger Evidence passthrough
+# ---------------------------------------------------------------------------
+# Seven observational 1H trigger-context fields. Same evidence-capture contract
+# as the VCP / BRT / market-structure / weekly / 4H passthroughs: never read by
+# any gate, scoring function, ranking, calibration step, routing decision,
+# capital authorisation, dedup logic, campaign identity, or alert formatter. The
+# 1H layer PROVES trigger quality for the operator and future backtests; it
+# gates nothing, scores nothing, and ranks nothing in Phase 14E.
+
+_ONE_HOUR_EVIDENCE_FIELDS: tuple[str, ...] = (
+    "one_hour_trigger_family",
+    "one_hour_state",
+    "one_hour_retest_quality",
+    "one_hour_acceptance_state",
+    "one_hour_consequence_state",
+    "one_hour_no_chase_status",
+    "one_hour_data_status",
+)
+
+
+def _apply_one_hour_evidence_passthrough(signal: dict, key_features: dict) -> dict:
+    """Mirror scanner-computed 1H evidence fields into signal.
+
+    Evidence-capture only: copies fields that exist in key_features (None values
+    preserved). Does not branch on any value and does not influence any gate.
+    """
+    result = dict(signal)
+    for field in _ONE_HOUR_EVIDENCE_FIELDS:
+        if field in key_features:
+            result[field] = key_features[field]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1388,6 +1422,11 @@ def validate(
     # scanner key_features. Observational only — operator-facing 4H context;
     # never read by any gate, score, ranking, routing, capital, or dedup decision.
     working_signal = _apply_four_hour_evidence_passthrough(working_signal, key_features)
+
+    # Phase 14E: Pass real 1H Entry Trigger evidence fields through from scanner
+    # key_features. Observational only — operator-facing 1H trigger proof; never
+    # read by any gate, score, ranking, routing, capital, or dedup decision.
+    working_signal = _apply_one_hour_evidence_passthrough(working_signal, key_features)
 
     if claude_tier == "NEAR_ENTRY":
         existing_mc = working_signal.get("missing_conditions")

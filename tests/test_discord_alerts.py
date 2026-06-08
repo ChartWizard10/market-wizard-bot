@@ -2288,3 +2288,123 @@ def test_14c_does_not_leak_internal_4h_or_prior_fields():
     assert "four_hour_structure_note" not in text
     assert "lower_high_pressure" not in text  # structure_note value not displayed
     assert "4h: transition" in text
+
+
+# ===========================================================================
+# Phase 14E — Real 1H Entry Trigger context (display-only)
+# ===========================================================================
+
+_1H_DISPLAY_PAYLOAD = {
+    "one_hour_trigger_family":    "break_retest_hold",
+    "one_hour_state":             "expansion",
+    "one_hour_retest_quality":    "clean",
+    "one_hour_acceptance_state":  "accepted",
+    "one_hour_consequence_state": "confirmed",
+    "one_hour_no_chase_status":   "ideal",
+    "one_hour_data_status":       "available",
+}
+
+_1H_FIELDS = (
+    "one_hour_trigger_family", "one_hour_state", "one_hour_retest_quality",
+    "one_hour_acceptance_state", "one_hour_consequence_state",
+    "one_hour_no_chase_status", "one_hour_data_status",
+)
+
+# No-authority language that must never appear on the 1H line.
+_1H_FORBIDDEN_WORDS = ("blocked", "approved", "downgraded", "vetoed", "authorized")
+
+
+def test_14e_renders_1h_context_when_present():
+    tr = _tiering_result(**_1H_DISPLAY_PAYLOAD)
+    text = format_alert(tr)
+    assert (
+        "1H: break_retest_hold  |  Retest: clean  |  Acceptance: accepted  |  "
+        "Consequence: confirmed  |  No-Chase: ideal  |  Data: available"
+        in text
+    ), f"1H context not rendered; alert body:\n{text}"
+
+
+def test_14e_renders_unknown_1h_line():
+    tr = _tiering_result(
+        one_hour_trigger_family="unknown",
+        one_hour_state="unknown",
+        one_hour_retest_quality="unknown",
+        one_hour_acceptance_state="unknown",
+        one_hour_consequence_state="unknown",
+        one_hour_no_chase_status="unknown",
+        one_hour_data_status="unavailable",
+    )
+    text = format_alert(tr)
+    assert (
+        "1H: unknown  |  Retest: unknown  |  Acceptance: unknown  |  "
+        "Consequence: unknown  |  No-Chase: unknown  |  Data: unavailable"
+        in text
+    )
+
+
+def test_14e_omits_1h_context_when_absent():
+    tr = _tiering_result()
+    for f in _1H_FIELDS:
+        tr["final_signal"].pop(f, None)
+    text = format_alert(tr)
+    assert "1H:" not in text, "1H line rendered when all 1H fields absent"
+
+
+def test_14e_omits_1h_context_when_none():
+    tr = _tiering_result(**{f: None for f in _1H_FIELDS})
+    text = format_alert(tr)
+    assert "1H:" not in text
+
+
+def test_14e_does_not_render_snake_case_field_names():
+    tr = _tiering_result(**_1H_DISPLAY_PAYLOAD)
+    text = format_alert(tr).lower()
+    for field in _1H_FIELDS:
+        assert field not in text, f"raw field name {field!r} leaked into rendered alert"
+
+
+def test_14e_no_authority_language_on_1h_line():
+    tr = _tiering_result(
+        one_hour_trigger_family="none",
+        one_hour_state="failure",
+        one_hour_retest_quality="failed",
+        one_hour_acceptance_state="rejected",
+        one_hour_consequence_state="rejected",
+        one_hour_no_chase_status="overextended",
+        one_hour_data_status="available",
+    )
+    text = format_alert(tr)
+    line = next((ln for ln in text.splitlines() if ln.strip().startswith("1H:")), "")
+    assert line, "1H line missing"
+    low = line.lower()
+    for word in _1H_FORBIDDEN_WORDS:
+        assert word not in low, f"authority word {word!r} appeared on 1H line: {line!r}"
+
+
+def test_14e_1h_display_does_not_change_decision_fields():
+    tr = _tiering_result(**_1H_DISPLAY_PAYLOAD)
+    before = (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"])
+    _ = format_alert(tr)
+    assert (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"]) == before
+
+
+def test_14e_higher_timeframe_layers_preserved_with_1h_present():
+    tr = _tiering_result(
+        market_structure_state="REPAIR",
+        four_hour_market_state="TRANSITION",
+        four_hour_sma_alignment="mixed",
+        four_hour_reclaim_status="below_value",
+        four_hour_structure_note="lower_high_pressure",
+        four_hour_data_status="current",
+        **_1H_DISPLAY_PAYLOAD,
+    )
+    text = format_alert(tr)
+    assert "4H: TRANSITION  |  SMA: mixed  |  Reclaim: below_value  |  Data: current" in text
+    assert "1H: break_retest_hold  |  Retest: clean" in text
+
+
+def test_14e_adverse_1h_does_not_make_wait_sendable():
+    tr = _tiering_result(tier="WAIT", safe=False, **_1H_DISPLAY_PAYLOAD)
+    tr["final_discord_channel"] = "none"
+    sendable, _reason = _sendable(tr, None)
+    assert sendable is False

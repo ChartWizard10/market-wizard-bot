@@ -39,6 +39,15 @@ from src.indicators import (
     compute_4h_data_status,
     classify_4h_market_state,
     compute_four_hour_evidence,
+    compute_1h_data_status,
+    classify_one_hour_state,
+    classify_one_hour_trigger_family,
+    classify_one_hour_retest_quality,
+    classify_one_hour_acceptance_state,
+    classify_one_hour_consequence_state,
+    classify_one_hour_no_chase_status,
+    compute_one_hour_evidence,
+    _1h_smas,
     enrich,
 )
 
@@ -1804,3 +1813,356 @@ def test_4h_coexists_with_all_prior_evidence_in_enrich():
                 "weekly_trend_state", "weekly_alignment_context",
                 "four_hour_market_state", "four_hour_data_status"):
         assert key in r, f"expected evidence field missing after Phase 14C: {key}"
+
+
+# ===========================================================================
+# Phase 14E — Real 1H Entry Trigger Evidence Engine (evidence-only)
+# ===========================================================================
+
+_1H_END = pd.Timestamp("2026-06-05 16:00")
+_1H_FIELDS = (
+    "one_hour_trigger_family",
+    "one_hour_state",
+    "one_hour_retest_quality",
+    "one_hour_acceptance_state",
+    "one_hour_consequence_state",
+    "one_hour_no_chase_status",
+    "one_hour_data_status",
+)
+_1H_ALLOWED = {
+    "one_hour_trigger_family": {
+        "break_retest_hold", "sweep_reclaim_retest", "compression_release",
+        "fvg_mitigation_hold", "ma_reclaim", "range_edge_reversal",
+        "none", "unknown",
+    },
+    "one_hour_state": {
+        "expansion", "continuation", "repair", "compression",
+        "transition", "failure", "unknown",
+    },
+    "one_hour_retest_quality": {"clean", "acceptable", "weak", "failed", "unknown"},
+    "one_hour_acceptance_state": {"accepted", "pending", "rejected", "unknown"},
+    "one_hour_consequence_state": {"confirmed", "neutral", "rejected", "unknown"},
+    "one_hour_no_chase_status": {"ideal", "acceptable", "extended", "overextended", "unknown"},
+    "one_hour_data_status": {"available", "partial", "unavailable"},
+}
+_EMPTY_1H_EXPECTED = {
+    "one_hour_trigger_family": "unknown",
+    "one_hour_state": "unknown",
+    "one_hour_retest_quality": "unknown",
+    "one_hour_acceptance_state": "unknown",
+    "one_hour_consequence_state": "unknown",
+    "one_hour_no_chase_status": "unknown",
+    "one_hour_data_status": "unavailable",
+}
+
+
+def _df1h(closes, highs=None, lows=None, opens=None, end=_1H_END):
+    """Build a real 1H OHLCV DataFrame (DatetimeIndex at 1H freq)."""
+    n = len(closes)
+    idx = pd.date_range(end=pd.Timestamp(end), periods=n, freq="1h")
+    c = np.array(closes, dtype=float)
+    h = (c + 0.5) if highs is None else np.array(highs, dtype=float)
+    l = (c - 0.5) if lows is None else np.array(lows, dtype=float)
+    o = c if opens is None else np.array(opens, dtype=float)
+    return pd.DataFrame(
+        {"open": o, "high": h, "low": l, "close": c, "volume": [1_000_000.0] * n},
+        index=idx,
+    )
+
+
+def _1h_uptrend(n=60, end=_1H_END):
+    return _df1h(list(50 + np.arange(n) * 0.3), end=end)
+
+
+def _1h_downtrend(n=60, end=_1H_END):
+    return _df1h(list(120 - np.arange(n) * 0.3), end=end)
+
+
+def _assert_within_vocab(ev):
+    for field, allowed in _1H_ALLOWED.items():
+        assert ev[field] in allowed, f"{field}={ev[field]!r} not in {allowed}"
+
+
+# ---- one_hour_data_status (available | partial | unavailable) ----
+
+def test_1h_data_status_unavailable_on_none():
+    assert compute_1h_data_status(None) == "unavailable"
+
+
+def test_1h_data_status_unavailable_on_short():
+    assert compute_1h_data_status(_1h_uptrend(10)) == "unavailable"
+
+
+def test_1h_data_status_partial_on_thin_history():
+    # Between MIN (30) and FULL (50) bars → partial.
+    assert compute_1h_data_status(_1h_uptrend(40), now=pd.Timestamp("2026-06-05 17:00")) == "partial"
+
+
+def test_1h_data_status_available_on_fresh_full_history():
+    d = _1h_uptrend(60, end=pd.Timestamp("2026-06-05 16:00"))
+    assert compute_1h_data_status(d, now=pd.Timestamp("2026-06-05 17:00")) == "available"
+
+
+def test_1h_data_status_partial_when_stale():
+    d = _1h_uptrend(60, end=pd.Timestamp("2026-06-05 16:00"))
+    # 20 hours later → beyond degraded window → partial (not available).
+    assert compute_1h_data_status(d, now=pd.Timestamp("2026-06-06 12:00")) == "partial"
+
+
+def test_1h_data_status_unavailable_on_non_datetime_index():
+    d = _1h_uptrend(60).reset_index(drop=True)
+    assert compute_1h_data_status(d) == "unavailable"
+
+
+# ---- one_hour_state ----
+
+def test_1h_state_expansion():
+    assert classify_one_hour_state("supportive", "higher_high_sequence", True) == "expansion"
+
+
+def test_1h_state_continuation():
+    assert classify_one_hour_state("mixed", "higher_low_repair", True) == "continuation"
+
+
+def test_1h_state_repair():
+    assert classify_one_hour_state("mixed", "failed_breakdown_reclaim", False) == "repair"
+
+
+def test_1h_state_compression():
+    assert classify_one_hour_state("hostile", "range_compression", False) == "compression"
+
+
+def test_1h_state_transition():
+    assert classify_one_hour_state("mixed", "unknown", False) == "transition"
+
+
+def test_1h_state_failure():
+    assert classify_one_hour_state("hostile", "breakdown_pressure", False) == "failure"
+
+
+def test_1h_state_unknown_on_unavailable():
+    assert classify_one_hour_state("unavailable", "unavailable", False) == "unknown"
+
+
+# ---- one_hour_trigger_family ----
+
+def test_1h_trigger_unknown_on_short():
+    assert classify_one_hour_trigger_family(_1h_uptrend(10), {}) == "unknown"
+
+
+def test_1h_trigger_none_on_featureless_drift():
+    # Smooth uptrend with no sweep/break/reclaim trigger → honest 'none'.
+    d = _1h_uptrend(60)
+    smas = _1h_smas(d)
+    assert classify_one_hour_trigger_family(d, smas) == "none"
+
+
+def test_1h_trigger_ma_reclaim():
+    # Dip below SMA20 then reclaim with a bullish last bar.
+    closes = list(60 + np.arange(36) * 0.1)      # ~rising base, sma20 below
+    # force a dip then reclaim in the last 3 bars
+    closes[-3] = closes[-4] - 4.0
+    closes[-2] = closes[-4] - 3.0
+    closes[-1] = closes[-4] + 2.0                # bullish reclaim
+    opens = list(closes)
+    opens[-1] = closes[-1] - 1.5                 # last bar bullish (close > open)
+    d = _df1h(closes, opens=opens)
+    fam = classify_one_hour_trigger_family(d, _1h_smas(d))
+    assert fam in _1H_ALLOWED["one_hour_trigger_family"]
+    assert fam == "ma_reclaim"
+
+
+def test_1h_trigger_value_always_in_vocab():
+    for d in (_1h_uptrend(60), _1h_downtrend(60), _df1h(list(range(40)))):
+        assert classify_one_hour_trigger_family(d, _1h_smas(d)) in _1H_ALLOWED["one_hour_trigger_family"]
+
+
+# ---- one_hour_retest_quality ----
+
+def test_1h_retest_clean_when_held_above_value():
+    d = _1h_uptrend(60)
+    assert classify_one_hour_retest_quality(d, _1h_smas(d)) == "clean"
+
+
+def test_1h_retest_failed_when_lost_value():
+    d = _1h_downtrend(60)
+    assert classify_one_hour_retest_quality(d, _1h_smas(d)) == "failed"
+
+
+def test_1h_retest_unknown_on_short():
+    d = _1h_uptrend(10)
+    assert classify_one_hour_retest_quality(d, _1h_smas(d)) == "unknown"
+
+
+# ---- one_hour_acceptance_state ----
+
+def test_1h_acceptance_accepted_above_value():
+    d = _1h_uptrend(60)
+    assert classify_one_hour_acceptance_state(d, _1h_smas(d)) == "accepted"
+
+
+def test_1h_acceptance_rejected_below_value():
+    d = _1h_downtrend(60)
+    assert classify_one_hour_acceptance_state(d, _1h_smas(d)) == "rejected"
+
+
+def test_1h_acceptance_unknown_on_short():
+    d = _1h_uptrend(10)
+    assert classify_one_hour_acceptance_state(d, _1h_smas(d)) == "unknown"
+
+
+# ---- one_hour_consequence_state ----
+
+def test_1h_consequence_confirmed_on_continuation():
+    # prior bar bullish, next bar closes higher and bullish → confirmed.
+    d = _df1h([100, 101, 102, 103, 104, 105], opens=[100, 100, 101, 102, 103, 104])
+    assert classify_one_hour_consequence_state(d) == "confirmed"
+
+
+def test_1h_consequence_rejected_on_reversal():
+    # prior bar bullish, next bar closes below prior low → rejected.
+    d = _df1h(
+        [100, 105, 99],
+        highs=[101, 106, 100],
+        lows=[99, 104, 98],
+        opens=[100, 104, 105],
+    )
+    assert classify_one_hour_consequence_state(d) == "rejected"
+
+
+def test_1h_consequence_unknown_on_one_bar():
+    d = _df1h([100])
+    assert classify_one_hour_consequence_state(d) == "unknown"
+
+
+# ---- one_hour_no_chase_status ----
+
+def test_1h_no_chase_ideal_at_value():
+    # Flat series → close ~ sma20 → ideal.
+    d = _df1h([100.0] * 40)
+    assert classify_one_hour_no_chase_status(d, _1h_smas(d)) == "ideal"
+
+
+def test_1h_no_chase_overextended_far_above_value():
+    closes = list(100 + np.arange(39) * 0.05) + [120.0]   # last bar far above sma20
+    d = _df1h(closes)
+    assert classify_one_hour_no_chase_status(d, _1h_smas(d)) == "overextended"
+
+
+def test_1h_no_chase_unknown_without_sma20():
+    d = _df1h(list(range(10)))
+    assert classify_one_hour_no_chase_status(d, _1h_smas(d)) == "unknown"
+
+
+# ---- compute_one_hour_evidence orchestrator & safe defaults ----
+
+def test_1h_evidence_unavailable_on_none():
+    assert compute_one_hour_evidence(None) == _EMPTY_1H_EXPECTED
+
+
+def test_1h_evidence_unavailable_on_short_data():
+    assert compute_one_hour_evidence(_1h_uptrend(10)) == _EMPTY_1H_EXPECTED
+
+
+def test_1h_evidence_safe_on_empty_df():
+    empty = pd.DataFrame({"open": [], "high": [], "low": [], "close": [], "volume": []})
+    assert compute_one_hour_evidence(empty) == _EMPTY_1H_EXPECTED
+
+
+def test_1h_evidence_safe_on_non_datetime_index():
+    d = _1h_uptrend(60).reset_index(drop=True)
+    assert compute_one_hour_evidence(d) == _EMPTY_1H_EXPECTED
+
+
+def test_1h_evidence_safe_on_nan_data():
+    closes = list(50 + np.arange(60) * 0.3)
+    closes[-1] = np.nan
+    closes[-5] = np.nan
+    ev = compute_one_hour_evidence(_df1h(closes), None, pd.Timestamp("2026-06-05 18:00"))
+    _assert_within_vocab(ev)
+
+
+def test_1h_evidence_full_on_real_uptrend():
+    ev = compute_one_hour_evidence(
+        _1h_uptrend(60, end=pd.Timestamp("2026-06-05 16:00")),
+        None, pd.Timestamp("2026-06-05 17:00"),
+    )
+    _assert_within_vocab(ev)
+    assert ev["one_hour_data_status"] == "available"
+    assert ev["one_hour_state"] in {"expansion", "continuation"}
+    assert ev["one_hour_acceptance_state"] == "accepted"
+
+
+# ---- enrich() integration ----
+
+def test_enrich_1h_unavailable_when_no_1h_df():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG)  # no one_hour_df → honest unavailable
+    assert r["one_hour_data_status"] == "unavailable"
+    assert r["one_hour_trigger_family"] == "unknown"
+    assert r["one_hour_state"] == "unknown"
+    for key in _1H_FIELDS:
+        assert key in r
+
+
+def test_enrich_1h_real_values_when_1h_df_supplied():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG,
+               one_hour_df=_1h_uptrend(60, end=pd.Timestamp("2026-06-05 16:00")))
+    for key in _1H_FIELDS:
+        assert key in r
+        assert r[key] in _1H_ALLOWED[key]
+
+
+def test_enrich_1h_does_not_fake_from_daily():
+    # Daily df is a clean uptrend; without a real 1H df, 1H stays unavailable —
+    # proving 1H is never manufactured from daily bars.
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG)
+    assert r["one_hour_data_status"] == "unavailable"
+    # Daily proxy (market_structure_state) remains independently populated.
+    assert r["market_structure_state"] != "UNAVAILABLE"
+
+
+def test_enrich_1h_4h_coexist():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG,
+               four_hour_df=_4h_uptrend(60),
+               one_hour_df=_1h_uptrend(60, end=pd.Timestamp("2026-06-05 16:00")))
+    # Both timeframe layers populated independently and within vocab.
+    assert r["four_hour_market_state"] == "EXPANSION"
+    for key in _1H_FIELDS:
+        assert r[key] in _1H_ALLOWED[key]
+
+
+# ---- forbidden-indicator source guard ----
+
+def test_no_disabled_indicators_in_1h_functions():
+    import inspect
+    import re
+    for fn in (
+        compute_1h_data_status, classify_one_hour_state,
+        classify_one_hour_trigger_family, classify_one_hour_retest_quality,
+        classify_one_hour_acceptance_state, classify_one_hour_consequence_state,
+        classify_one_hour_no_chase_status, compute_one_hour_evidence,
+    ):
+        src = inspect.getsource(fn).lower()
+        for bad in ("rsi", "macd", "bollinger", "stochastic"):
+            assert not re.search(rf"\b{bad}\b", src), (
+                f"forbidden indicator {bad!r} found in {fn.__name__}"
+            )
+
+
+# ---- coexistence with all prior evidence layers ----
+
+def test_1h_coexists_with_all_prior_evidence_in_enrich():
+    df = _make_trending_df(300)
+    r = enrich("TEST", df, BASE_CONFIG,
+               four_hour_df=_4h_uptrend(60),
+               one_hour_df=_1h_uptrend(60, end=pd.Timestamp("2026-06-05 16:00")))
+    for key in ("vcp_status", "entry_family", "break_retest_state",
+                "market_structure_state", "weekly_sma_alignment",
+                "four_hour_market_state", "four_hour_data_status",
+                "one_hour_trigger_family", "one_hour_state",
+                "one_hour_data_status"):
+        assert key in r, f"expected evidence field missing after Phase 14E: {key}"

@@ -1664,6 +1664,24 @@ def format_alert(
     four_hour_reclaim_status = _sanitize(str(_4h_reclaim_raw)) if _4h_reclaim_raw else ""
     four_hour_data_status    = _sanitize(str(_4h_data_raw)) if _4h_data_raw else ""
 
+    # Phase 14E — Real 1H Entry Trigger context (display-only). Scanner-computed
+    # 1H trigger evidence shown beneath the 4H/weekly/daily layers; never read by
+    # any gate, score, routing, or capital decision. Informational only — implies
+    # no authority, no approval, and no capital authorisation. Rendered only when
+    # present. No authority language ("blocked"/"approved"/"downgraded"/"vetoed").
+    _1h_trigger_raw    = signal.get("one_hour_trigger_family")
+    _1h_retest_raw     = signal.get("one_hour_retest_quality")
+    _1h_accept_raw     = signal.get("one_hour_acceptance_state")
+    _1h_conseq_raw     = signal.get("one_hour_consequence_state")
+    _1h_nochase_raw    = signal.get("one_hour_no_chase_status")
+    _1h_data_raw       = signal.get("one_hour_data_status")
+    one_hour_trigger_family    = _sanitize(str(_1h_trigger_raw)) if _1h_trigger_raw else ""
+    one_hour_retest_quality    = _sanitize(str(_1h_retest_raw)) if _1h_retest_raw else ""
+    one_hour_acceptance_state  = _sanitize(str(_1h_accept_raw)) if _1h_accept_raw else ""
+    one_hour_consequence_state = _sanitize(str(_1h_conseq_raw)) if _1h_conseq_raw else ""
+    one_hour_no_chase_status   = _sanitize(str(_1h_nochase_raw)) if _1h_nochase_raw else ""
+    one_hour_data_status       = _sanitize(str(_1h_data_raw)) if _1h_data_raw else ""
+
     trigger_level      = signal.get("trigger_level")
     retest_status      = _sanitize(str(signal.get("retest_status", "—")))
     hold_status        = _sanitize(str(signal.get("hold_status", "—")))
@@ -1799,6 +1817,26 @@ def format_alert(
             f"Reclaim: {_4h_reclaim}  |  Data: {_4h_data}"
         )
 
+    # Phase 14E: 1H trigger-evidence line, shown beneath the 4H/weekly/daily
+    # lines only when any 1H evidence is present. Informational context only —
+    # the higher-timeframe layers above are never altered, and this line never
+    # implies authority or approval. No authority language.
+    _one_hour_line = None
+    if (one_hour_trigger_family or one_hour_retest_quality
+            or one_hour_acceptance_state or one_hour_consequence_state
+            or one_hour_no_chase_status or one_hour_data_status):
+        _1h_trigger = one_hour_trigger_family or "unknown"
+        _1h_retest  = one_hour_retest_quality or "unknown"
+        _1h_accept  = one_hour_acceptance_state or "unknown"
+        _1h_conseq  = one_hour_consequence_state or "unknown"
+        _1h_nochase = one_hour_no_chase_status or "unknown"
+        _1h_data    = one_hour_data_status or "unavailable"
+        _one_hour_line = (
+            f"1H: {_1h_trigger}  |  Retest: {_1h_retest}  |  "
+            f"Acceptance: {_1h_accept}  |  Consequence: {_1h_conseq}  |  "
+            f"No-Chase: {_1h_nochase}  |  Data: {_1h_data}"
+        )
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{badge} | {ticker} | Score: {score}",
@@ -1809,6 +1847,8 @@ def format_alert(
         lines.append(_weekly_line)
     if _four_hour_line:
         lines.append(_four_hour_line)
+    if _one_hour_line:
+        lines.append(_one_hour_line)
     lines += [
         "──────────────────────────────",
         "EXECUTION",

@@ -372,3 +372,52 @@ def test_resample_to_4h_handles_bad_input():
     # Non-DatetimeIndex must not raise.
     bad = pd.DataFrame({"open": [1], "high": [1], "low": [1], "close": [1], "volume": [1]})
     assert resample_to_4h(bad) is None
+
+
+# ===========================================================================
+# Phase 14E — fetch_1h (real 1H bars = 60m bars, no resample; config-gated)
+# ===========================================================================
+
+def test_fetch_1h_disabled_by_default_returns_none_without_network():
+    from src.market_data import fetch_1h
+    with patch("src.market_data.yf.download") as mock_dl:
+        result = fetch_1h("AAPL", BASE_CONFIG)
+    assert result is None
+    mock_dl.assert_not_called()
+
+
+def test_fetch_1h_explicit_false_returns_none_without_network():
+    from src.market_data import fetch_1h
+    cfg = {"data": {**BASE_CONFIG["data"], "fetch_1h": False}}
+    with patch("src.market_data.yf.download") as mock_dl:
+        result = fetch_1h("AAPL", cfg)
+    assert result is None
+    mock_dl.assert_not_called()
+
+
+def test_fetch_1h_enabled_returns_60m_bars_without_resampling():
+    from src.market_data import fetch_1h
+    cfg = {"data": {**BASE_CONFIG["data"], "fetch_1h": True}}
+    raw = _intraday_60m(120)
+    with patch("src.market_data.yf.download", return_value=raw) as mock_dl:
+        bars = fetch_1h("AAPL", cfg)
+    mock_dl.assert_called_once()
+    assert bars is not None
+    assert isinstance(bars.index, pd.DatetimeIndex)
+    assert set(["open", "high", "low", "close", "volume"]).issubset(bars.columns)
+    # A 60m bar IS a 1H bar — no coarsening; bar count is preserved.
+    assert len(bars) == len(raw)
+
+
+def test_fetch_1h_enabled_returns_none_on_fetch_exception():
+    from src.market_data import fetch_1h
+    cfg = {"data": {**BASE_CONFIG["data"], "fetch_1h": True}}
+    with patch("src.market_data.yf.download", side_effect=RuntimeError("boom")):
+        assert fetch_1h("AAPL", cfg) is None
+
+
+def test_fetch_1h_enabled_returns_none_on_empty_response():
+    from src.market_data import fetch_1h
+    cfg = {"data": {**BASE_CONFIG["data"], "fetch_1h": True}}
+    with patch("src.market_data.yf.download", return_value=pd.DataFrame()):
+        assert fetch_1h("AAPL", cfg) is None

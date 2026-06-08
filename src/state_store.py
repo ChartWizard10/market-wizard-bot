@@ -386,6 +386,17 @@ def record_alert(
         "four_hour_reclaim_status":  final_signal.get("four_hour_reclaim_status"),
         "four_hour_structure_note":  final_signal.get("four_hour_structure_note"),
         "four_hour_data_status":     final_signal.get("four_hour_data_status"),
+        # ---- Phase 14E: Real 1H Entry Trigger Evidence (observational) ----
+        # Stored to enable future backtesting of trigger-family vs outcome. None
+        # of these fields are read by any gate, score, calibration, routing,
+        # capital, dedup, campaign, or alert decision in the current scanner.
+        "one_hour_trigger_family":    final_signal.get("one_hour_trigger_family"),
+        "one_hour_state":             final_signal.get("one_hour_state"),
+        "one_hour_retest_quality":    final_signal.get("one_hour_retest_quality"),
+        "one_hour_acceptance_state":  final_signal.get("one_hour_acceptance_state"),
+        "one_hour_consequence_state": final_signal.get("one_hour_consequence_state"),
+        "one_hour_no_chase_status":   final_signal.get("one_hour_no_chase_status"),
+        "one_hour_data_status":       final_signal.get("one_hour_data_status"),
 
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),

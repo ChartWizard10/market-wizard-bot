@@ -3302,3 +3302,144 @@ def test_4h_coexists_with_all_prior_evidence():
     assert fs.get("market_structure_state") == "EXPANSION"
     assert fs.get("entry_family") == "zone_core"
     assert result["final_tier"] == "SNIPE_IT"
+
+
+# ===========================================================================
+# Phase 14E — Real 1H Entry Trigger evidence passthrough + regression
+# ===========================================================================
+
+_1H_KF_FIELDS = {
+    "one_hour_trigger_family":    "break_retest_hold",
+    "one_hour_state":             "expansion",
+    "one_hour_retest_quality":    "clean",
+    "one_hour_acceptance_state":  "accepted",
+    "one_hour_consequence_state": "confirmed",
+    "one_hour_no_chase_status":   "ideal",
+    "one_hour_data_status":       "available",
+}
+
+# An adverse 1H payload — failed trigger, lost acceptance, overextended chase.
+# This must never veto, downgrade, or suppress a valid higher-timeframe signal.
+_1H_ADVERSE = {
+    "one_hour_trigger_family":    "none",
+    "one_hour_state":             "failure",
+    "one_hour_retest_quality":    "failed",
+    "one_hour_acceptance_state":  "rejected",
+    "one_hour_consequence_state": "rejected",
+    "one_hour_no_chase_status":   "overextended",
+    "one_hour_data_status":       "available",
+}
+
+
+def _kf_with_1h(extra: dict | None = None, **overrides) -> dict:
+    """Build key_features carrying a full 1H evidence payload."""
+    kf = dict(_1H_KF_FIELDS)
+    kf.update(overrides)
+    if extra:
+        kf.update(extra)
+    return kf
+
+
+# 14E: 1H fields land in final_signal
+def test_1h_passthrough_lands_in_final_signal():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_1h()), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field, expected in _1H_KF_FIELDS.items():
+        assert fs.get(field) == expected, (
+            f"1H field {field!r} not propagated: expected {expected!r}, got {fs.get(field)!r}"
+        )
+
+
+# 14E: missing 1H fields do not crash tiering or get synthesized
+def test_1h_absent_does_not_crash():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field in _1H_KF_FIELDS:
+        assert field not in fs
+
+
+# 14E: None 1H values preserved (not coerced)
+def test_1h_none_values_preserved():
+    kf = _kf_with_1h(**{f: None for f in _1H_KF_FIELDS})
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    for field in _1H_KF_FIELDS:
+        assert fs[field] is None
+
+
+# 14E: every 1H state combination changes nothing in the decision path
+def test_1h_states_do_not_change_decision_fields():
+    signal = _snipe_signal()
+    res_base = validate(signal, _pf_sovereign({}), _BASE_CONFIG)
+    states = [
+        _1H_KF_FIELDS, _1H_ADVERSE,
+        {f: "unknown" for f in _1H_KF_FIELDS} | {"one_hour_data_status": "unavailable"},
+        {"one_hour_trigger_family": "ma_reclaim", "one_hour_state": "repair",
+         "one_hour_retest_quality": "weak", "one_hour_acceptance_state": "pending",
+         "one_hour_consequence_state": "neutral", "one_hour_no_chase_status": "extended",
+         "one_hour_data_status": "partial"},
+    ]
+    for payload in states:
+        res = validate(signal, _pf_sovereign(dict(payload)), _BASE_CONFIG)
+        for key in ("final_tier", "score", "capital_action",
+                    "final_discord_channel", "safe_for_alert"):
+            assert res[key] == res_base[key], (
+                f"1H payload {payload} changed {key!r}: {res[key]!r} vs base {res_base[key]!r}"
+            )
+
+
+# 14E CRITICAL: adverse 1H evidence must NOT downgrade a valid SNIPE_IT
+def test_1h_adverse_does_not_downgrade_snipe_it():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_1h(**_1H_ADVERSE)), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT", (
+        "adverse 1H (failure/failed/rejected/overextended) must NOT veto or "
+        "downgrade a valid higher-timeframe SNIPE_IT in Phase 14E"
+    )
+    assert result["safe_for_alert"] is True
+
+
+# 14E: adverse 1H must not downgrade STARTER or NEAR_ENTRY either
+def test_1h_adverse_does_not_downgrade_starter_or_near_entry():
+    for sig_fn, expected in ((_starter_signal, "STARTER"), (_near_entry_signal, "NEAR_ENTRY")):
+        result = validate(sig_fn(), _pf_sovereign(_kf_with_1h(**_1H_ADVERSE)), _BASE_CONFIG)
+        assert result["final_tier"] == expected
+        assert result["final_signal"]["one_hour_state"] == "failure"
+
+
+# 14E: favorable 1H must NOT upgrade WAIT, and WAIT still never posts
+def test_1h_favorable_does_not_upgrade_wait():
+    result = validate(_wait_signal(), _pf_sovereign(_kf_with_1h()), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["safe_for_alert"] is False
+    assert result["final_discord_channel"] == "none"
+
+
+# 14E: 1H fields never appear as veto / downgrade labels
+def test_1h_fields_not_in_applied_vetoes():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_1h(**_1H_ADVERSE)), _BASE_CONFIG)
+    applied = result.get("applied_vetoes", [])
+    for field in _1H_KF_FIELDS:
+        assert field not in applied
+        for veto in applied:
+            assert field not in str(veto)
+
+
+# 14E: STARTER and NEAR_ENTRY receive 1H passthrough without tier change
+def test_1h_passthrough_works_for_starter_and_near_entry():
+    for sig_fn, expected in ((_starter_signal, "STARTER"), (_near_entry_signal, "NEAR_ENTRY")):
+        result = validate(sig_fn(), _pf_sovereign(_kf_with_1h()), _BASE_CONFIG)
+        assert result["final_tier"] == expected
+        assert result["final_signal"]["one_hour_trigger_family"] == "break_retest_hold"
+
+
+# 14E: coexists with 4H + weekly + VCP/BRT/market_structure_state in one signal
+def test_1h_coexists_with_all_prior_evidence():
+    kf = _kf_with_1h(_kf_with_brt(_kf_with_mktstate(
+        "EXPANSION", _kf_with_weekly(_kf_with_4h()))))
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs.get("one_hour_trigger_family") == "break_retest_hold"
+    assert fs.get("four_hour_market_state") == "EXPANSION"
+    assert fs.get("weekly_alignment_context") == "full_alignment"
+    assert fs.get("market_structure_state") == "EXPANSION"
+    assert result["final_tier"] == "SNIPE_IT"

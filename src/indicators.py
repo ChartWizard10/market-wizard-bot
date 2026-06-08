@@ -1729,6 +1729,483 @@ def compute_four_hour_evidence(
 
 
 # ---------------------------------------------------------------------------
+# Phase 14E: 1H Entry Trigger Evidence Engine — scanner-computed
+# ---------------------------------------------------------------------------
+# Seven observational fields describing the REAL 1H trigger condition, computed
+# from genuine 1H OHLCV bars (yfinance 60m bars ARE 1H bars — no fabrication
+# from daily/4H). Pure evidence: never read by any gate, scoring function,
+# ranking, calibration, routing decision, capital authorisation, dedup logic,
+# campaign identity, or alert-format decision. Flows enrich(one_hour_df=...) ->
+# prefilter key_features -> tiering final_signal -> state_store alert_history ->
+# Discord display -> future outcome tracking.
+#
+# DOCTRINE (1H Entry Sniper Playbook): "The higher timeframes authorize. The 4H
+# locates. The 1H proves. The 15m refines." The 1H layer OBSERVES trigger
+# quality; it never gains authority. When real 1H bars are unavailable, every
+# field defaults to an honest "unknown" / "unavailable" — the scanner never
+# stops, never blocks, never manufactures quality.
+#
+# CLASSIFICATION PHILOSOPHY: when evidence is unclear, choose the WEAKER reading.
+# Never infer acceptance. Never assume confirmation. Never upgrade ambiguous
+# structure. "none" means data was present but no trigger was proven; "unknown"
+# means data was insufficient to read.
+
+_1H_SMA_SHORT               = 20      # 1H SMA20 — operational value / retest zone
+_1H_SMA_MED                 = 50      # 1H SMA50 — intermediate value
+_1H_SMA_LONG                = 200     # 1H SMA200 — consulted only when enough bars
+_1H_MIN_BARS                = 30      # below this → unavailable (all unknown)
+_1H_FULL_BARS               = 50      # below this (but >= min) → data_status partial
+_1H_STRUCT_WINDOW           = 12      # 1H bars for HH/HL/LH/LL structure read
+_1H_NEAR_BAND_PCT           = 1.0     # |close - sma20| within this %% = at-zone
+_1H_COMPRESSION_RATIO       = 0.6     # 2nd-half range <= this * 1st-half = coil
+_1H_FRESH_HOURS             = 2.0     # last 1H bar age <= this = fresh
+_1H_DEGRADED_HOURS          = 8.0     # last 1H bar age <= this = degraded (partial)
+_1H_NO_CHASE_IDEAL_PCT      = 1.0     # close <= this %% above sma20 = ideal entry
+_1H_NO_CHASE_ACCEPTABLE_PCT = 2.5     # <= this %% above sma20 = acceptable
+_1H_NO_CHASE_EXTENDED_PCT   = 4.5     # <= this %% above sma20 = extended; beyond = overextended
+
+_EMPTY_1H = {
+    "one_hour_trigger_family":    "unknown",
+    "one_hour_state":             "unknown",
+    "one_hour_retest_quality":    "unknown",
+    "one_hour_acceptance_state":  "unknown",
+    "one_hour_consequence_state": "unknown",
+    "one_hour_no_chase_status":   "unknown",
+    "one_hour_data_status":       "unavailable",
+}
+
+
+def _1h_smas(df_1h: pd.DataFrame) -> dict:
+    """Return last-bar 1H SMA values (None when insufficient bars)."""
+    c = df_1h["close"]
+    out: dict = {}
+    for key, period in (("s20", _1H_SMA_SHORT), ("s50", _1H_SMA_MED),
+                        ("s200", _1H_SMA_LONG)):
+        if len(c) >= period:
+            v = float(c.rolling(period, min_periods=period).mean().iloc[-1])
+            out[key] = v if not np.isnan(v) else None
+        else:
+            out[key] = None
+    return out
+
+
+def compute_1h_data_status(
+    df_1h: pd.DataFrame,
+    config: dict | None = None,
+    now: pd.Timestamp | None = None,
+) -> str:
+    """Classify 1H data sufficiency + freshness: available | partial | unavailable.
+
+    Prevents false confidence. 'unavailable' when no usable bars; 'partial' when
+    bars are thin or the last bar is aging; 'available' otherwise. Never gates.
+    """
+    try:
+        if df_1h is None or len(df_1h) == 0:
+            return "unavailable"
+        if not isinstance(df_1h.index, pd.DatetimeIndex):
+            return "unavailable"
+        if len(df_1h) < _1H_MIN_BARS:
+            return "unavailable"
+
+        last = df_1h.index[-1]
+        if pd.isna(last):
+            return "unavailable"
+        last_ts = pd.Timestamp(last)
+        if now is None:
+            now_ts = pd.Timestamp.now(tz=last_ts.tz) if last_ts.tz is not None \
+                else pd.Timestamp.now()
+        else:
+            now_ts = pd.Timestamp(now)
+        if last_ts.tz is not None and now_ts.tz is None:
+            last_ts = last_ts.tz_localize(None)
+        elif last_ts.tz is None and now_ts.tz is not None:
+            now_ts = now_ts.tz_localize(None)
+
+        age_hours = (now_ts - last_ts).total_seconds() / 3600.0
+
+        # Thin history or an aging last bar → honest 'partial'.
+        if len(df_1h) < _1H_FULL_BARS:
+            return "partial"
+        if age_hours > _1H_DEGRADED_HOURS:
+            return "partial"
+        return "available"
+    except Exception:
+        return "unavailable"
+
+
+def _1h_sma_alignment(df_1h: pd.DataFrame, smas: dict) -> str:
+    """Internal: 1H value alignment supportive | mixed | hostile | unavailable.
+
+    Helper feeding one_hour_state. Not exposed as a standalone evidence field.
+    """
+    try:
+        c = df_1h["close"]
+        if len(c) < _1H_SMA_SHORT:
+            return "unavailable"
+        s20, s50, s200 = smas.get("s20"), smas.get("s50"), smas.get("s200")
+        if s20 is None:
+            return "unavailable"
+        last = float(c.iloc[-1])
+        above_20 = last > s20
+        above_50 = (s50 is None) or (last > s50)
+        above_200 = (s200 is None) or (last > s200)
+        stack_up = (s50 is None) or (s20 >= s50)
+        stack_down = (s50 is not None) and (s20 < s50)
+        if above_20 and above_50 and above_200 and stack_up:
+            return "supportive"
+        below_key = (last < s20) and (s50 is not None and last < s50)
+        if below_key and stack_down:
+            return "hostile"
+        return "mixed"
+    except Exception:
+        return "unavailable"
+
+
+def _1h_structure_note(df_1h: pd.DataFrame) -> str:
+    """Internal: compress recent 1H swing structure into a label.
+
+    Returns: higher_high_sequence | higher_low_repair | lower_high_pressure |
+             range_compression | breakdown_pressure | failed_breakdown_reclaim |
+             unknown | unavailable. Helper feeding one_hour_state. Pure read.
+    """
+    try:
+        if df_1h is None or len(df_1h) < _1H_MIN_BARS:
+            return "unavailable"
+        win = min(_1H_STRUCT_WINDOW, len(df_1h))
+        if win < 4:
+            return "unavailable"
+        recent = df_1h.tail(win)
+        half = max(1, win // 2)
+        fh_high = float(recent["high"].iloc[:half].max())
+        sh_high = float(recent["high"].iloc[half:].max())
+        fh_low = float(recent["low"].iloc[:half].min())
+        sh_low = float(recent["low"].iloc[half:].min())
+        last = float(recent["close"].iloc[-1])
+        rng_hi = float(recent["high"].max())
+        rng_lo = float(recent["low"].min())
+        rng_mid = (rng_hi + rng_lo) / 2.0
+        fh_range = fh_high - fh_low
+        sh_range = sh_high - sh_low
+        higher_highs = sh_high > fh_high
+        higher_lows = sh_low > fh_low
+        lower_highs = sh_high < fh_high
+        lower_lows = sh_low < fh_low
+
+        if lower_lows and last >= rng_mid and last > fh_low:
+            return "failed_breakdown_reclaim"
+        if higher_highs and higher_lows:
+            return "higher_high_sequence"
+        if lower_highs and lower_lows and last < rng_mid:
+            return "breakdown_pressure"
+        if (higher_lows and lower_highs
+                and (fh_range <= 0 or sh_range <= fh_range * _1H_COMPRESSION_RATIO)):
+            return "range_compression"
+        if higher_lows and not higher_highs and not lower_highs:
+            return "higher_low_repair"
+        if lower_highs:
+            return "lower_high_pressure"
+        return "unknown"
+    except Exception:
+        return "unavailable"
+
+
+def classify_one_hour_state(
+    sma_alignment: str,
+    structure_note: str,
+    reclaim_above: bool,
+) -> str:
+    """Classify the real 1H operational state.
+
+    Returns: expansion | continuation | repair | compression | transition |
+             failure | unknown. Deterministic synthesis of internal 1H
+             sub-labels. Pure observation — never read by any decision path.
+    """
+    try:
+        sa = str(sma_alignment or "unavailable").lower()
+        st = str(structure_note or "unavailable").lower()
+        if sa == "unavailable" and st == "unavailable":
+            return "unknown"
+        if st == "breakdown_pressure" and sa == "hostile":
+            return "failure"
+        if st == "higher_high_sequence" and sa == "supportive":
+            return "expansion"
+        if (st in ("higher_high_sequence", "higher_low_repair", "range_compression")
+                and sa in ("supportive", "mixed") and reclaim_above):
+            return "continuation"
+        if st in ("failed_breakdown_reclaim", "higher_low_repair"):
+            return "repair"
+        if st == "range_compression":
+            return "compression"
+        if st == "lower_high_pressure" or sa == "mixed":
+            return "transition"
+        if st == "breakdown_pressure":
+            return "failure"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def classify_one_hour_trigger_family(df_1h: pd.DataFrame, smas: dict) -> str:
+    """Classify the 1H entry trigger family.
+
+    Returns one of: break_retest_hold | sweep_reclaim_retest | compression_release
+    | fvg_mitigation_hold | ma_reclaim | range_edge_reversal | none | unknown.
+
+    Conservative detectors over the recent 1H window, evaluated in a fixed
+    priority. 'none' = data present but no trigger proven; 'unknown' = data
+    insufficient. Doctrine: never manufacture a trigger — default to 'none'.
+    Pure observation; never gates, scores, or ranks.
+    """
+    try:
+        if df_1h is None or len(df_1h) < _1H_MIN_BARS:
+            return "unknown"
+        win = min(_1H_STRUCT_WINDOW, len(df_1h))
+        recent = df_1h.tail(win)
+        highs = recent["high"].astype(float)
+        lows = recent["low"].astype(float)
+        closes = recent["close"].astype(float)
+        opens = recent["open"].astype(float)
+        if len(recent) < 5:
+            return "unknown"
+
+        last_close = float(closes.iloc[-1])
+        last_open = float(opens.iloc[-1])
+        last_low = float(lows.iloc[-1])
+        last_high = float(highs.iloc[-1])
+
+        # Prior structure excludes the final two bars (the "trigger zone").
+        prior_high = float(highs.iloc[:-2].max())
+        prior_low = float(lows.iloc[:-2].min())
+        rng_hi = float(highs.max())
+        rng_lo = float(lows.min())
+        rng = rng_hi - rng_lo
+        s20 = smas.get("s20")
+        s50 = smas.get("s50")
+
+        bull_last = last_close > last_open
+
+        # 1) sweep_reclaim_retest — last 2 bars swept below prior low then
+        #    reclaimed it on a bullish close.
+        swept = bool((lows.iloc[-2:] < prior_low).any())
+        if swept and last_close > prior_low and bull_last:
+            return "sweep_reclaim_retest"
+
+        # 2) break_retest_hold — an earlier bar broke above prior high; price
+        #    pulled back toward it and the last bar holds above.
+        broke = bool((closes.iloc[:-1] > prior_high).any())
+        retested = last_low <= prior_high * (1 + _1H_NEAR_BAND_PCT / 100.0)
+        if broke and last_close > prior_high and retested:
+            return "break_retest_hold"
+
+        # 3) ma_reclaim — a recent bar closed below SMA20 and the last bar
+        #    reclaimed it with a bullish close.
+        if s20 is not None:
+            dipped_below = bool((closes.iloc[-3:] < s20).any())
+            if dipped_below and last_close > s20 and bull_last:
+                return "ma_reclaim"
+
+        # 4) compression_release — tight first-half range, last bar expands and
+        #    closes in the upper portion of the window (release up).
+        half = max(1, win // 2)
+        fh_range = float(highs.iloc[:half].max() - lows.iloc[:half].min())
+        bar_ranges = (highs - lows)
+        avg_range = float(bar_ranges.iloc[:-1].mean()) if len(bar_ranges) > 1 else 0.0
+        last_range = float(last_high - last_low)
+        compressed = (rng > 0 and fh_range <= rng * _1H_COMPRESSION_RATIO)
+        expansion_bar = (avg_range > 0 and last_range >= avg_range * 1.5)
+        if compressed and expansion_bar and bull_last and last_close >= rng_lo + 0.6 * rng:
+            return "compression_release"
+
+        # 5) fvg_mitigation_hold — a bullish 1H gap formed in the window, price
+        #    returned into it, and the last bar holds at/above the gap top.
+        if len(recent) >= 3:
+            gap_top = None
+            for i in range(2, len(recent)):
+                lo_i = float(lows.iloc[i])
+                hi_im2 = float(highs.iloc[i - 2])
+                if lo_i > hi_im2:                 # bullish gap (i.low above i-2.high)
+                    gap_top = hi_im2
+            if gap_top is not None and last_low <= gap_top and last_close >= gap_top and bull_last:
+                return "fvg_mitigation_hold"
+
+        # 6) range_edge_reversal — last bar reversed up off the range low.
+        if rng > 0 and last_low <= rng_lo + 0.15 * rng and last_close >= rng_lo + 0.5 * rng and bull_last:
+            return "range_edge_reversal"
+
+        return "none"
+    except Exception:
+        return "unknown"
+
+
+def classify_one_hour_retest_quality(df_1h: pd.DataFrame, smas: dict) -> str:
+    """Classify 1H retest quality: clean | acceptable | weak | failed | unknown.
+
+    Body defense relative to the SMA20 value/retest zone. Doctrine: body
+    acceptance = control; wicks are not control. Weakest reading wins on
+    ambiguity. Pure observation.
+    """
+    try:
+        s20 = smas.get("s20")
+        if df_1h is None or len(df_1h) < _1H_MIN_BARS or s20 is None:
+            return "unknown"
+        recent = df_1h.tail(5)
+        closes = recent["close"].astype(float)
+        lows = recent["low"].astype(float)
+        n = len(closes)
+        if n < 3:
+            return "unknown"
+        band = s20 * (_1H_NEAR_BAND_PCT / 100.0)
+        last_close = float(closes.iloc[-1])
+
+        if last_close < s20 - band:
+            return "failed"                       # acceptance / level lost
+
+        bodies_above = int((closes >= s20).sum())
+        wick_violations = int((lows < s20 - band).sum())
+
+        if bodies_above == n and wick_violations == 0:
+            return "clean"
+        if bodies_above >= n - 1 and wick_violations <= 1:
+            return "acceptable"
+        if last_close >= s20 - band:
+            return "weak"
+        return "failed"
+    except Exception:
+        return "unknown"
+
+
+def classify_one_hour_acceptance_state(df_1h: pd.DataFrame, smas: dict) -> str:
+    """Classify 1H acceptance: accepted | pending | rejected | unknown.
+
+    Doctrine: Touch != Acceptance. Wick != Control. Body acceptance = control.
+    Weakest reading wins. Pure observation.
+    """
+    try:
+        s20 = smas.get("s20")
+        if df_1h is None or len(df_1h) < _1H_MIN_BARS or s20 is None:
+            return "unknown"
+        recent = df_1h.tail(3)
+        closes = recent["close"].astype(float)
+        if len(closes) < 2:
+            return "unknown"
+        band = s20 * (_1H_NEAR_BAND_PCT / 100.0)
+        last_close = float(closes.iloc[-1])
+
+        if last_close < s20 - band:
+            return "rejected"                     # body closed back below the zone
+        last_two_above = bool((closes.iloc[-2:] >= s20).all())
+        if last_two_above and last_close >= s20:
+            return "accepted"                     # consecutive body acceptance
+        if abs(last_close - s20) <= band:
+            return "pending"                      # at the zone, not yet decided
+        if last_close >= s20:
+            return "accepted"
+        return "pending"
+    except Exception:
+        return "unknown"
+
+
+def classify_one_hour_consequence_state(df_1h: pd.DataFrame) -> str:
+    """Classify 1H next-candle consequence: confirmed | neutral | rejected | unknown.
+
+    Doctrine: "The first candle makes the claim. The next candle judges the
+    claim." Evaluates whether the last completed bar validated the prior bar's
+    directional claim. Pure observation.
+    """
+    try:
+        if df_1h is None or len(df_1h) < 2:
+            return "unknown"
+        prev = df_1h.iloc[-2]
+        last = df_1h.iloc[-1]
+        prev_o, prev_c = float(prev["open"]), float(prev["close"])
+        prev_h, prev_l = float(prev["high"]), float(prev["low"])
+        last_o, last_c = float(last["open"]), float(last["close"])
+
+        prev_bull = prev_c > prev_o
+        prev_bear = prev_c < prev_o
+
+        if prev_bull:
+            if last_c >= prev_c and last_c > last_o:
+                return "confirmed"                # bullish claim validated
+            if last_c < prev_l:
+                return "rejected"                 # bullish claim negated
+            return "neutral"
+        if prev_bear:
+            if last_c <= prev_c and last_c < last_o:
+                return "confirmed"                # bearish claim validated
+            if last_c > prev_h:
+                return "rejected"                 # bearish claim negated
+            return "neutral"
+        return "neutral"                          # prior bar was a doji — no claim
+    except Exception:
+        return "unknown"
+
+
+def classify_one_hour_no_chase_status(df_1h: pd.DataFrame, smas: dict) -> str:
+    """Classify distance from the valid retest zone: ideal | acceptable |
+    extended | overextended | unknown.
+
+    Measures the last close's extension above the SMA20 value/retest zone.
+    Observation only — never scored, never gated, never vetoed.
+    """
+    try:
+        s20 = smas.get("s20")
+        if df_1h is None or len(df_1h) < _1H_MIN_BARS or s20 is None or s20 <= 0:
+            return "unknown"
+        last_close = float(df_1h["close"].iloc[-1])
+        ext = (last_close - s20) / s20 * 100.0
+        if ext <= _1H_NO_CHASE_IDEAL_PCT:
+            return "ideal"
+        if ext <= _1H_NO_CHASE_ACCEPTABLE_PCT:
+            return "acceptable"
+        if ext <= _1H_NO_CHASE_EXTENDED_PCT:
+            return "extended"
+        return "overextended"
+    except Exception:
+        return "unknown"
+
+
+def compute_one_hour_evidence(
+    df_1h: pd.DataFrame | None,
+    config: dict | None = None,
+    now: pd.Timestamp | None = None,
+) -> dict:
+    """Top-level 1H orchestrator. Computes all seven evidence fields from REAL
+    1H bars, or returns honest 'unknown'/'unavailable' defaults when 1H data is
+    absent or insufficient.
+
+    Never raises — any failure or missing/short data yields safe defaults so the
+    scanner never stops on 1H issues.
+    """
+    try:
+        data_status = compute_1h_data_status(df_1h, config, now)
+        if data_status == "unavailable":
+            return dict(_EMPTY_1H)
+        if df_1h is None or not isinstance(df_1h.index, pd.DatetimeIndex):
+            return dict(_EMPTY_1H)
+
+        smas = _1h_smas(df_1h)
+        s20 = smas.get("s20")
+        reclaim_above = (s20 is not None) and (float(df_1h["close"].iloc[-1]) > s20)
+
+        sma_alignment = _1h_sma_alignment(df_1h, smas)
+        structure_note = _1h_structure_note(df_1h)
+
+        return {
+            "one_hour_trigger_family":    classify_one_hour_trigger_family(df_1h, smas),
+            "one_hour_state":             classify_one_hour_state(
+                sma_alignment, structure_note, reclaim_above),
+            "one_hour_retest_quality":    classify_one_hour_retest_quality(df_1h, smas),
+            "one_hour_acceptance_state":  classify_one_hour_acceptance_state(df_1h, smas),
+            "one_hour_consequence_state": classify_one_hour_consequence_state(df_1h),
+            "one_hour_no_chase_status":   classify_one_hour_no_chase_status(df_1h, smas),
+            "one_hour_data_status":       data_status,
+        }
+    except Exception:                                        # noqa: BLE001
+        return dict(_EMPTY_1H)
+
+
+# ---------------------------------------------------------------------------
 # Main enrichment entry point
 # ---------------------------------------------------------------------------
 
@@ -1737,6 +2214,7 @@ def enrich(
     df: pd.DataFrame,
     config: dict,
     four_hour_df: pd.DataFrame | None = None,
+    one_hour_df: pd.DataFrame | None = None,
 ) -> dict:
     """Compute all structure-first features for a validated ticker DataFrame.
 
@@ -1800,6 +2278,13 @@ def enrich(
     # When four_hour_df is None/short/invalid, all five fields default to honest
     # UNAVAILABLE/unavailable. The scanner never stops on 4H issues.
     four_hour_evidence = compute_four_hour_evidence(four_hour_df, config)
+
+    # Phase 14E — Real 1H Entry Trigger Evidence (observational only). Computed
+    # only from a genuine 1H DataFrame (yfinance 60m bars ARE 1H bars); never
+    # faked from daily/4H. When one_hour_df is None/short/invalid, all seven
+    # fields default to honest unknown/unavailable. The scanner never stops,
+    # never blocks, and never manufactures trigger quality on 1H issues.
+    one_hour_evidence = compute_one_hour_evidence(one_hour_df, config)
 
     prev_close: float | None = None
     if len(df) >= 2:
@@ -1898,4 +2383,14 @@ def enrich(
         "four_hour_reclaim_status":  four_hour_evidence["four_hour_reclaim_status"],
         "four_hour_structure_note":  four_hour_evidence["four_hour_structure_note"],
         "four_hour_data_status":     four_hour_evidence["four_hour_data_status"],
+        # Phase 14E — Real 1H Entry Trigger Evidence (observational; never read
+        # by gates/scoring/ranking/routing/capital/dedup/alert-format decisions).
+        # unknown/unavailable defaults when no real 1H bars are supplied.
+        "one_hour_trigger_family":    one_hour_evidence["one_hour_trigger_family"],
+        "one_hour_state":             one_hour_evidence["one_hour_state"],
+        "one_hour_retest_quality":    one_hour_evidence["one_hour_retest_quality"],
+        "one_hour_acceptance_state":  one_hour_evidence["one_hour_acceptance_state"],
+        "one_hour_consequence_state": one_hour_evidence["one_hour_consequence_state"],
+        "one_hour_no_chase_status":   one_hour_evidence["one_hour_no_chase_status"],
+        "one_hour_data_status":       one_hour_evidence["one_hour_data_status"],
     }

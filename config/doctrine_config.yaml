@@ -21,6 +21,15 @@ data:
   fetch_4h: false
   fetch_4h_period: "60d"
   fetch_4h_base_interval: "60m"
+  # Phase 14E — real 1H entry-trigger evidence (observation only).
+  # Default OFF: the scan path is unchanged and 1H fields report unavailable.
+  # When true, the scanner fetches intraday 60m bars per ticker (a 60m bar IS a
+  # 1H bar — no resampling needed) and classifies trigger quality. 1H is
+  # evidence only — it proves trigger quality for backtesting; it gates nothing,
+  # scores nothing, ranks nothing, and routes nothing.
+  fetch_1h: false
+  fetch_1h_period: "60d"
+  fetch_1h_base_interval: "60m"
 
 disabled_indicators:
   - rsi

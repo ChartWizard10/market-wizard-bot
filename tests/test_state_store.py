@@ -1379,3 +1379,69 @@ def test_record_alert_4h_fields_do_not_affect_dedup_key():
     assert rec1["dedup_key"] == rec2["dedup_key"], (
         "4H evidence must not influence the dedup_key"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 14E — Real 1H Entry Trigger Evidence (observational) in alert_history
+# ---------------------------------------------------------------------------
+
+_1H_HISTORY_FIELDS = (
+    "one_hour_trigger_family",
+    "one_hour_state",
+    "one_hour_retest_quality",
+    "one_hour_acceptance_state",
+    "one_hour_consequence_state",
+    "one_hour_no_chase_status",
+    "one_hour_data_status",
+)
+
+
+def test_record_alert_stores_1h_fields():
+    tr = _tiering(
+        one_hour_trigger_family="break_retest_hold",
+        one_hour_state="expansion",
+        one_hour_retest_quality="clean",
+        one_hour_acceptance_state="accepted",
+        one_hour_consequence_state="confirmed",
+        one_hour_no_chase_status="ideal",
+        one_hour_data_status="available",
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["one_hour_trigger_family"] == "break_retest_hold"
+    assert rec["one_hour_state"] == "expansion"
+    assert rec["one_hour_retest_quality"] == "clean"
+    assert rec["one_hour_acceptance_state"] == "accepted"
+    assert rec["one_hour_consequence_state"] == "confirmed"
+    assert rec["one_hour_no_chase_status"] == "ideal"
+    assert rec["one_hour_data_status"] == "available"
+
+
+def test_record_alert_1h_fields_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    for field in _1H_HISTORY_FIELDS:
+        assert field in rec, f"1H field missing from history record: {field!r}"
+        assert rec[field] is None
+
+
+def test_record_alert_1h_fields_do_not_affect_dedup_key():
+    tr_plain = _tiering(trigger=182.50, invalidation=178.20)
+    tr_1h = _tiering(
+        trigger=182.50, invalidation=178.20,
+        one_hour_trigger_family="none",
+        one_hour_state="failure",
+        one_hour_retest_quality="failed",
+        one_hour_acceptance_state="rejected",
+        one_hour_consequence_state="rejected",
+        one_hour_no_chase_status="overextended",
+        one_hour_data_status="available",
+    )
+    s1 = record_alert("AAPL", tr_plain, _empty(), _cfg())
+    s2 = record_alert("AAPL", tr_1h, _empty(), _cfg())
+    rec1 = s1["tickers"]["AAPL"]["alert_history"][0]
+    rec2 = s2["tickers"]["AAPL"]["alert_history"][0]
+    assert rec1["dedup_key"] == rec2["dedup_key"], (
+        "1H evidence must not influence the dedup_key"
+    )

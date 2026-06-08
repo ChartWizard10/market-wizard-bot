@@ -388,6 +388,16 @@ def _build_key_features(enriched: dict) -> dict:
         "four_hour_reclaim_status":  enriched.get("four_hour_reclaim_status"),
         "four_hour_structure_note":  enriched.get("four_hour_structure_note"),
         "four_hour_data_status":     enriched.get("four_hour_data_status"),
+        # Phase 14E — Real 1H Entry Trigger Evidence (observational; never read
+        # by ranking, scoring, tiering gates, calibration, routing, capital,
+        # dedup, or alert formatting). Operator-facing 1H trigger context only.
+        "one_hour_trigger_family":    enriched.get("one_hour_trigger_family"),
+        "one_hour_state":             enriched.get("one_hour_state"),
+        "one_hour_retest_quality":    enriched.get("one_hour_retest_quality"),
+        "one_hour_acceptance_state":  enriched.get("one_hour_acceptance_state"),
+        "one_hour_consequence_state": enriched.get("one_hour_consequence_state"),
+        "one_hour_no_chase_status":   enriched.get("one_hour_no_chase_status"),
+        "one_hour_data_status":       enriched.get("one_hour_data_status"),
     }
 
 

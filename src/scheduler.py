@@ -207,8 +207,11 @@ async def run_scan_pipeline(
         try:
             # Phase 14C: real 4H bars (config-gated, default off → None).
             four_hour_df = market_data_mod.fetch_4h(ticker, config)
+            # Phase 14E: real 1H bars (config-gated, default off → None).
+            one_hour_df = market_data_mod.fetch_1h(ticker, config)
             enriched = indicators.enrich(
-                ticker, mres["df"], config, four_hour_df=four_hour_df
+                ticker, mres["df"], config,
+                four_hour_df=four_hour_df, one_hour_df=one_hour_df,
             )
             enriched["data_status"]  = "OK"
             enriched["latest_close"] = mres["latest_close"]
@@ -551,8 +554,11 @@ async def run_analyze(
         try:
             # Phase 14C: real 4H bars (config-gated, default off → None).
             four_hour_df = market_data_mod.fetch_4h(ticker, config)
+            # Phase 14E: real 1H bars (config-gated, default off → None).
+            one_hour_df = market_data_mod.fetch_1h(ticker, config)
             enriched = indicators.enrich(
-                ticker, mres["df"], config, four_hour_df=four_hour_df
+                ticker, mres["df"], config,
+                four_hour_df=four_hour_df, one_hour_df=one_hour_df,
             )
             enriched["data_status"]  = "OK"
             enriched["latest_close"] = mres["latest_close"]
