@@ -3226,15 +3226,19 @@ def test_4h_none_values_preserved():
         assert fs[field] is None
 
 
-# 14C: every 4H state combination changes nothing in the decision path
+# 14C (amended by 14F): non-material 4H payloads change nothing in the
+# decision path. Material contradiction payloads (_4H_ADVERSE) are now
+# decision-relevant for SNIPE_IT via the Phase 14F Active Auction Conflict
+# Governor and are exercised in the Phase 14F section below.
 def test_4h_states_do_not_change_decision_fields():
     signal = _snipe_signal()
     res_base = validate(signal, _pf_sovereign({}), _BASE_CONFIG)
     states = [
-        _4H_KF_FIELDS, _4H_ADVERSE,
+        _4H_KF_FIELDS,
         {"four_hour_market_state": "UNAVAILABLE", "four_hour_sma_alignment": "unavailable",
          "four_hour_reclaim_status": "unavailable", "four_hour_structure_note": "unavailable",
          "four_hour_data_status": "unavailable"},
+        # below_value alone scores +2 — under the 14F threshold (3), no change.
         {"four_hour_market_state": "TRANSITION", "four_hour_sma_alignment": "mixed",
          "four_hour_reclaim_status": "below_value", "four_hour_structure_note": "lower_high_pressure",
          "four_hour_data_status": "stale"},
@@ -3248,14 +3252,18 @@ def test_4h_states_do_not_change_decision_fields():
             )
 
 
-# 14C CRITICAL: adverse 4H evidence must NOT downgrade a valid SNIPE_IT
-def test_4h_adverse_does_not_downgrade_snipe_it():
+# 14C CRITICAL (superseded by 14F): adverse 4H with real bars now caps a
+# SNIPE_IT via the Active Auction Conflict Governor. FAILURE (+2) +
+# failed_reclaim (+2) = 4 points → STARTER cap. The 4H evidence engine itself
+# still gates nothing — the cap is applied by the governor in tiering only.
+def test_4h_adverse_caps_snipe_it_via_governor():
     result = validate(_snipe_signal(), _pf_sovereign(_kf_with_4h(**_4H_ADVERSE)), _BASE_CONFIG)
-    assert result["final_tier"] == "SNIPE_IT", (
-        "adverse 4H (FAILURE/hostile/failed_reclaim/breakdown) must NOT veto or "
-        "downgrade a valid daily SNIPE_IT in Phase 14C"
+    assert result["final_tier"] == "STARTER", (
+        "adverse 4H (FAILURE/failed_reclaim with current data) must cap "
+        "SNIPE_IT to STARTER under the Phase 14F governor"
     )
     assert result["safe_for_alert"] is True
+    assert "active_auction_conflict" in result["applied_vetoes"]
 
 
 # 14C: adverse 4H must not downgrade STARTER or NEAR_ENTRY either
@@ -3367,16 +3375,21 @@ def test_1h_none_values_preserved():
         assert fs[field] is None
 
 
-# 14E: every 1H state combination changes nothing in the decision path
+# 14E (amended by 14F): non-material 1H payloads change nothing in the
+# decision path. Material contradiction payloads (_1H_ADVERSE, repair/pending
+# combinations ≥ 3 points) are now decision-relevant for SNIPE_IT via the
+# Phase 14F Active Auction Conflict Governor and are exercised in the Phase
+# 14F section below.
 def test_1h_states_do_not_change_decision_fields():
     signal = _snipe_signal()
     res_base = validate(signal, _pf_sovereign({}), _BASE_CONFIG)
     states = [
-        _1H_KF_FIELDS, _1H_ADVERSE,
+        _1H_KF_FIELDS,
         {f: "unknown" for f in _1H_KF_FIELDS} | {"one_hour_data_status": "unavailable"},
-        {"one_hour_trigger_family": "ma_reclaim", "one_hour_state": "repair",
-         "one_hour_retest_quality": "weak", "one_hour_acceptance_state": "pending",
-         "one_hour_consequence_state": "neutral", "one_hour_no_chase_status": "extended",
+        # Mild caution: pending (+1) + neutral (+1) = 2 — under threshold (3).
+        {"one_hour_trigger_family": "ma_reclaim", "one_hour_state": "continuation",
+         "one_hour_retest_quality": "acceptable", "one_hour_acceptance_state": "pending",
+         "one_hour_consequence_state": "neutral", "one_hour_no_chase_status": "ideal",
          "one_hour_data_status": "partial"},
     ]
     for payload in states:
@@ -3388,14 +3401,19 @@ def test_1h_states_do_not_change_decision_fields():
             )
 
 
-# 14E CRITICAL: adverse 1H evidence must NOT downgrade a valid SNIPE_IT
-def test_1h_adverse_does_not_downgrade_snipe_it():
+# 14E CRITICAL (superseded by 14F): severe adverse 1H with real bars now caps
+# a SNIPE_IT via the Active Auction Conflict Governor. failure (+2) + rejected
+# acceptance (+2) + rejected consequence (+2) + overextended (+1) + trigger
+# none (+1) = 8 points → NEAR_ENTRY cap. The 1H evidence engine itself still
+# gates nothing — the cap is applied by the governor in tiering only.
+def test_1h_adverse_caps_snipe_it_via_governor():
     result = validate(_snipe_signal(), _pf_sovereign(_kf_with_1h(**_1H_ADVERSE)), _BASE_CONFIG)
-    assert result["final_tier"] == "SNIPE_IT", (
-        "adverse 1H (failure/failed/rejected/overextended) must NOT veto or "
-        "downgrade a valid higher-timeframe SNIPE_IT in Phase 14E"
+    assert result["final_tier"] == "NEAR_ENTRY", (
+        "severe adverse 1H (failure/rejected/rejected/overextended with "
+        "available data) must cap SNIPE_IT to NEAR_ENTRY under the Phase 14F governor"
     )
     assert result["safe_for_alert"] is True
+    assert "active_auction_conflict" in result["applied_vetoes"]
 
 
 # 14E: adverse 1H must not downgrade STARTER or NEAR_ENTRY either
@@ -3443,3 +3461,227 @@ def test_1h_coexists_with_all_prior_evidence():
     assert fs.get("weekly_alignment_context") == "full_alignment"
     assert fs.get("market_structure_state") == "EXPANSION"
     assert result["final_tier"] == "SNIPE_IT"
+
+
+# ===========================================================================
+# Phase 14F — Active Auction Conflict Governor
+# ===========================================================================
+# Doctrine: current auction wins over historical strength. The governor caps
+# SNIPE_IT (and only SNIPE_IT) when live 4H/1H evidence materially contradicts
+# the continuation thesis. 3-4 points → STARTER; 5+ → NEAR_ENTRY.
+# Unavailable evidence never punishes; nothing is ever upgraded.
+
+# The live ARM failure pattern: weekly/daily bullish, scanner sees BOS + zone
+# + confirmed retest/hold, but the 4H auction is corrective below value and
+# the 1H is stabilizing only. Points: below_value (+2) + repair (+1) +
+# pending (+1) + neutral (+1) + trigger none (+1) = 6 → NEAR_ENTRY cap.
+_ARM_LIKE_CONFLICT = {
+    "four_hour_market_state":     "TRANSITION",
+    "four_hour_sma_alignment":    "mixed",
+    "four_hour_reclaim_status":   "below_value",
+    "four_hour_structure_note":   "lower_high_pressure",
+    "four_hour_data_status":      "current",
+    "one_hour_trigger_family":    "none",
+    "one_hour_state":             "repair",
+    "one_hour_retest_quality":    "weak",
+    "one_hour_acceptance_state":  "pending",
+    "one_hour_consequence_state": "neutral",
+    "one_hour_no_chase_status":   "acceptable",
+    "one_hour_data_status":       "available",
+}
+
+# Moderate contradiction: below_value (+2) + pending acceptance (+1) = 3 →
+# STARTER cap (full-size withheld; participation preserved).
+_MODERATE_CONFLICT = {
+    "four_hour_market_state":     "TRANSITION",
+    "four_hour_sma_alignment":    "mixed",
+    "four_hour_reclaim_status":   "below_value",
+    "four_hour_structure_note":   "lower_high_pressure",
+    "four_hour_data_status":      "current",
+    "one_hour_trigger_family":    "break_retest_hold",
+    "one_hour_state":             "continuation",
+    "one_hour_retest_quality":    "acceptable",
+    "one_hour_acceptance_state":  "pending",
+    "one_hour_consequence_state": "confirmed",
+    "one_hour_no_chase_status":   "ideal",
+    "one_hour_data_status":       "available",
+}
+
+
+# 14F-1: ARM-like conflict caps SNIPE_IT (severe → NEAR_ENTRY)
+def test_14f_arm_like_conflict_caps_snipe_it():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_1h(_ARM_LIKE_CONFLICT)), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["final_tier"] != "SNIPE_IT"
+    assert result["capital_action"] == CAPITAL_MAP["NEAR_ENTRY"]
+    assert result["final_discord_channel"] == CHANNEL_MAP["NEAR_ENTRY"]
+    assert result["safe_for_alert"] is True
+    fs = result["final_signal"]
+    assert fs["active_auction_conflict"] is True
+    assert fs["active_auction_conflict_points"] == 6
+    assert fs["active_auction_conflict_reasons"]
+    assert fs["active_auction_conflict_note"]
+    assert fs["tier"] == "NEAR_ENTRY"
+    assert fs["capital_action"] == CAPITAL_MAP["NEAR_ENTRY"]
+
+
+# 14F-2: moderate conflict caps SNIPE_IT → STARTER with starter routing
+def test_14f_moderate_conflict_caps_snipe_it_to_starter():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_1h(_MODERATE_CONFLICT)), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["capital_action"] == "starter_only"
+    assert result["final_discord_channel"] == "#starter-signals"
+    assert result["safe_for_alert"] is True
+    fs = result["final_signal"]
+    assert fs["active_auction_conflict"] is True
+    assert fs["active_auction_conflict_points"] == 3
+    assert fs["tier"] == "STARTER"
+    assert fs["capital_action"] == "starter_only"
+
+
+# 14F-3: clean SNIPE_IT with favorable live 4H + 1H evidence remains SNIPE_IT
+def test_14f_clean_snipe_it_remains_snipe_it():
+    kf = _kf_with_1h(_kf_with_4h())
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["capital_action"] == "full_quality_allowed"
+    assert result["safe_for_alert"] is True
+    fs = result["final_signal"]
+    assert fs["active_auction_conflict"] is False
+    assert fs["active_auction_conflict_points"] == 0
+    assert fs["active_auction_conflict_note"] is None
+    assert "active_auction_conflict" not in result["applied_vetoes"]
+    assert not result["downgrades"]
+
+
+# 14F-4: unavailable 4H/1H evidence scores zero — never punishes
+def test_14f_unavailable_evidence_does_not_downgrade():
+    kf = {
+        "four_hour_market_state":     "FAILURE",
+        "four_hour_reclaim_status":   "failed_reclaim",
+        "four_hour_data_status":      "unavailable",
+        "one_hour_state":             "failure",
+        "one_hour_acceptance_state":  "rejected",
+        "one_hour_consequence_state": "rejected",
+        "one_hour_trigger_family":    "none",
+        "one_hour_no_chase_status":   "overextended",
+        "one_hour_data_status":       "unavailable",
+    }
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["final_signal"]["active_auction_conflict"] is False
+    assert result["final_signal"]["active_auction_conflict_points"] == 0
+
+
+# 14F-5: default-OFF fetch path (no 4H/1H fields at all) is untouched
+def test_14f_default_off_path_unaffected():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["final_signal"]["active_auction_conflict"] is False
+    assert result["final_signal"]["active_auction_conflict_points"] == 0
+    assert "active_auction_conflict" not in result["applied_vetoes"]
+
+
+# 14F-6: mild 1H caution (pending + neutral = 2 points) does not downgrade
+def test_14f_mild_1h_neutral_does_not_downgrade():
+    kf = _kf_with_1h(_kf_with_4h(), **{
+        "one_hour_acceptance_state":  "pending",
+        "one_hour_consequence_state": "neutral",
+    })
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["final_signal"]["active_auction_conflict"] is False
+    assert result["final_signal"]["active_auction_conflict_points"] == 2
+
+
+# 14F-7: severe 4H failure alone (FAILURE +2, failed_reclaim +2 = 4) downgrades
+def test_14f_severe_4h_failure_downgrades():
+    kf = _kf_with_4h(**_4H_ADVERSE)  # 1H absent entirely
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["final_signal"]["active_auction_conflict"] is True
+    assert result["final_signal"]["active_auction_conflict_points"] == 4
+
+
+# 14F-8: severe 1H rejection alone (8 points) downgrades to NEAR_ENTRY
+def test_14f_severe_1h_rejection_downgrades():
+    kf = _kf_with_1h(**_1H_ADVERSE)  # 4H absent entirely
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["final_signal"]["active_auction_conflict"] is True
+    assert result["final_signal"]["active_auction_conflict_points"] == 8
+
+
+# 14F-9: governor never touches STARTER or NEAR_ENTRY input tiers
+def test_14f_does_not_touch_starter_or_near_entry():
+    adverse = _kf_with_1h(_kf_with_4h(**_4H_ADVERSE), **_1H_ADVERSE)
+    for sig_fn, expected in ((_starter_signal, "STARTER"), (_near_entry_signal, "NEAR_ENTRY")):
+        result = validate(sig_fn(), _pf_sovereign(dict(adverse)), _BASE_CONFIG)
+        assert result["final_tier"] == expected
+        assert result["final_signal"]["active_auction_conflict"] is False
+        assert "active_auction_conflict" not in result["applied_vetoes"]
+
+
+# 14F-10: favorable 4H/1H still cannot upgrade WAIT — WAIT never posts
+def test_14f_favorable_evidence_cannot_upgrade_wait():
+    kf = _kf_with_1h(_kf_with_4h())
+    result = validate(_wait_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["safe_for_alert"] is False
+    assert result["final_discord_channel"] == "none"
+    assert result["capital_action"] == "no_trade"
+
+
+# 14F-11: audit trail — applied_vetoes label + downgrade reason recorded
+def test_14f_audit_trail_recorded():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_1h(_ARM_LIKE_CONFLICT)), _BASE_CONFIG)
+    assert "active_auction_conflict" in result["applied_vetoes"]
+    assert any("active_auction_conflict" in d for d in result["downgrades"])
+    assert any("SNIPE_IT→NEAR_ENTRY" in d for d in result["downgrades"])
+    reasons = result["final_signal"]["active_auction_conflict_reasons"]
+    assert any("four_hour_reclaim_status=below_value" in r for r in reasons)
+    assert any("one_hour_acceptance_state=pending" in r for r in reasons)
+
+
+# 14F-12: governor cap never produces WAIT — safe_for_alert stays True
+def test_14f_cap_never_produces_wait():
+    worst = _kf_with_1h(_kf_with_4h(**_4H_ADVERSE), **_1H_ADVERSE)  # 12 points
+    result = validate(_snipe_signal(), _pf_sovereign(worst), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["safe_for_alert"] is True
+
+
+# 14F-13: a gate-cascade downgrade (already non-SNIPE) is not double-capped
+def test_14f_gate_downgraded_signal_not_double_capped():
+    # Score below SNIPE floor → cascade lands on STARTER before the governor.
+    sig = _snipe_signal(score=80)
+    adverse = _kf_with_1h(_kf_with_4h(**_4H_ADVERSE), **_1H_ADVERSE)
+    result = validate(sig, _pf_sovereign(dict(adverse)), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["final_signal"]["active_auction_conflict"] is False
+
+
+# 14F-14: Claude prompt construction reads no 4H/1H/governor fields
+def test_14f_claude_prompt_untouched():
+    import inspect
+    from src import claude_client
+    src = inspect.getsource(claude_client)
+    assert "active_auction" not in src
+    assert "one_hour_" not in src
+    assert "four_hour_" not in src
+
+
+# 14F-15: governor source introduces no forbidden indicators
+def test_14f_no_forbidden_indicators_in_governor():
+    import inspect
+    import re as _re
+    from src.tiering import (
+        _detect_active_auction_conflict,
+        _apply_active_auction_conflict_governor,
+    )
+    for fn in (_detect_active_auction_conflict, _apply_active_auction_conflict_governor):
+        src = inspect.getsource(fn).lower()
+        for word in ("rsi", "macd", "bollinger", "stochastic"):
+            assert not _re.search(rf"\b{word}\b", src), (
+                f"forbidden indicator {word!r} in {fn.__name__}"
+            )

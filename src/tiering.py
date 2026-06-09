@@ -1326,6 +1326,146 @@ def _apply_one_hour_evidence_passthrough(signal: dict, key_features: dict) -> di
 
 
 # ---------------------------------------------------------------------------
+# Phase 14F — Active Auction Conflict Governor
+# ---------------------------------------------------------------------------
+# Narrow downgrade-only safety layer. Doctrine: higher timeframes authorize,
+# 4H locates, 1H proves — the CURRENT auction wins over historical strength.
+# A chart cannot carry full-quality SNIPE_IT capital while the active 4H/1H
+# auction is materially contradicting the claimed continuation thesis
+# (live defect: ARM called SNIPE_IT on old BOS + weekly strength while the
+# 4H/1H auction was still corrective).
+#
+# Scope limits (hard laws):
+#   * Runs ONLY when the gate cascade has already produced final_tier=SNIPE_IT.
+#     STARTER / NEAR_ENTRY / WAIT results are never touched.
+#   * Cap-only: SNIPE_IT→STARTER, or SNIPE_IT→NEAR_ENTRY when severe. It never
+#     upgrades anything and never produces WAIT, so safe_for_alert stays true.
+#   * Unavailable evidence never punishes: each timeframe side is scored only
+#     when its data_status proves real intraday bars were classified.
+#   * Deterministic point model — no fuzzy scoring, no new indicators. The 1H
+#     and 4H evidence engines remain evidence-only everywhere else; this
+#     governor is the single sanctioned reader on the decision path.
+
+# Point thresholds: 0-2 no action; 3-4 cap to STARTER; 5+ cap to NEAR_ENTRY
+# (the architecture's watch tier — there is no separate WATCHLIST tier).
+_AAC_CAP_TO_STARTER_POINTS = 3
+_AAC_CAP_TO_NEAR_ENTRY_POINTS = 5
+
+
+def _detect_active_auction_conflict(signal: dict) -> tuple[int, list[str]]:
+    """Score active-auction contradiction against a claimed continuation.
+
+    Deterministic point model. Returns (points, reasons). Hard contradictions
+    score +2, soft cautions +1. Each timeframe is scored only when its
+    data_status shows real bars were classified — unavailable evidence never
+    punishes (fetch_4h / fetch_1h default OFF must change nothing). Unknown
+    sub-labels count only on that same condition, and only because the caller
+    invokes this for SNIPE_IT candidates: a full-quality claim with live
+    intraday data that cannot prove acceptance is itself a caution.
+    """
+    points = 0
+    reasons: list[str] = []
+
+    def _norm(field: str) -> str:
+        return str(signal.get(field) or "").lower().strip()
+
+    # ---- 4H side: scored only when real 4H bars were classified ----
+    if _norm("four_hour_data_status") in ("current", "degraded", "stale"):
+        state_4h = _norm("four_hour_market_state")
+        if state_4h in ("failure", "breakdown"):
+            points += 2
+            reasons.append(f"four_hour_market_state={state_4h} (+2)")
+        reclaim_4h = _norm("four_hour_reclaim_status")
+        if reclaim_4h in ("failed_reclaim", "below_value"):
+            points += 2
+            reasons.append(f"four_hour_reclaim_status={reclaim_4h} (+2)")
+
+    # ---- 1H side: scored only when real 1H bars were classified ----
+    if _norm("one_hour_data_status") in ("available", "partial"):
+        state_1h = _norm("one_hour_state")
+        if state_1h == "failure":
+            points += 2
+            reasons.append("one_hour_state=failure (+2)")
+        elif state_1h in ("repair", "transition"):
+            points += 1
+            reasons.append(f"one_hour_state={state_1h} (+1)")
+
+        accept_1h = _norm("one_hour_acceptance_state")
+        if accept_1h == "rejected":
+            points += 2
+            reasons.append("one_hour_acceptance_state=rejected (+2)")
+        elif accept_1h in ("pending", "unknown"):
+            points += 1
+            reasons.append(f"one_hour_acceptance_state={accept_1h} (+1)")
+
+        conseq_1h = _norm("one_hour_consequence_state")
+        if conseq_1h == "rejected":
+            points += 2
+            reasons.append("one_hour_consequence_state=rejected (+2)")
+        elif conseq_1h in ("neutral", "unknown"):
+            points += 1
+            reasons.append(f"one_hour_consequence_state={conseq_1h} (+1)")
+
+        nochase_1h = _norm("one_hour_no_chase_status")
+        if nochase_1h in ("extended", "overextended"):
+            points += 1
+            reasons.append(f"one_hour_no_chase_status={nochase_1h} (+1)")
+
+        trigger_1h = _norm("one_hour_trigger_family")
+        if trigger_1h in ("none", "unknown"):
+            points += 1
+            reasons.append(f"one_hour_trigger_family={trigger_1h} (+1)")
+
+    return points, reasons
+
+
+def _apply_active_auction_conflict_governor(
+    final_tier: str,
+    signal: dict,
+) -> tuple[str, dict]:
+    """Cap SNIPE_IT when the active 4H/1H auction contradicts continuation.
+
+    Returns (possibly capped tier, audit dict). The audit dict always contains
+    active_auction_conflict (bool), active_auction_conflict_points (int),
+    active_auction_conflict_reasons (list[str]), and
+    active_auction_conflict_note (str | None — operator-facing, set only when
+    the cap fires). Non-SNIPE_IT tiers are returned unchanged with an inert
+    audit dict; this function never upgrades and never returns WAIT.
+    """
+    audit: dict = {
+        "active_auction_conflict": False,
+        "active_auction_conflict_points": 0,
+        "active_auction_conflict_reasons": [],
+        "active_auction_conflict_note": None,
+    }
+    if final_tier != "SNIPE_IT":
+        return final_tier, audit
+
+    points, reasons = _detect_active_auction_conflict(signal)
+    audit["active_auction_conflict_points"] = points
+    audit["active_auction_conflict_reasons"] = reasons
+
+    if points < _AAC_CAP_TO_STARTER_POINTS:
+        return final_tier, audit
+
+    audit["active_auction_conflict"] = True
+    if points >= _AAC_CAP_TO_NEAR_ENTRY_POINTS:
+        audit["active_auction_conflict_note"] = (
+            "Capital withheld. Higher-timeframe trend remains constructive, "
+            "but the active 4H/1H auction is contradicting continuation; "
+            "wait for acceptance proof."
+        )
+        return "NEAR_ENTRY", audit
+
+    audit["active_auction_conflict_note"] = (
+        "Full-size capital withheld. Higher-timeframe trend remains "
+        "constructive, but the 4H/1H auction has not yet proven "
+        "continuation acceptance."
+    )
+    return "STARTER", audit
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1446,11 +1586,29 @@ def validate(
         claude_tier, working_signal, prefilter_vetoes, score, config, current_price, key_features
     )
 
+    # Phase 14F: Active Auction Conflict Governor — runs only when the gate
+    # cascade produced SNIPE_IT. Caps full-quality authorization when the
+    # active 4H/1H auction materially contradicts the continuation thesis.
+    # Cap-only: never upgrades, never produces WAIT, and unavailable 4H/1H
+    # evidence (the default-OFF fetch path) scores zero points.
+    _aac_pre_tier = final_tier
+    final_tier, _aac_audit = _apply_active_auction_conflict_governor(
+        final_tier, working_signal
+    )
+    if _aac_audit["active_auction_conflict"]:
+        downgrades.append(
+            f"{_aac_pre_tier}→{final_tier}: active_auction_conflict"
+            f" (points={_aac_audit['active_auction_conflict_points']};"
+            f" {'; '.join(_aac_audit['active_auction_conflict_reasons'])})"
+        )
+
     # applied_vetoes: prefilter vetoes + signal-derived vetoes (deduplicated)
     applied_vetoes = list(prefilter_vetoes)
     for v in _signal_derived_vetoes(working_signal):
         if v not in applied_vetoes:
             applied_vetoes.append(v)
+    if _aac_audit["active_auction_conflict"] and "active_auction_conflict" not in applied_vetoes:
+        applied_vetoes.append("active_auction_conflict")
 
     # Build corrected final_signal with deterministic routing applied.
     # Use working_signal so 12B-backfilled missing_conditions are visible.
@@ -1460,6 +1618,14 @@ def validate(
     final_signal["capital_action"] = CAPITAL_MAP[final_tier]
     # Entry acceptance stored for entry grade display layer (informational only; no gate effects).
     final_signal["entry_acceptance"] = _classify_current_acceptance(working_signal, key_features)
+
+    # Phase 14F: Active Auction Conflict audit evidence — always present so the
+    # observation ledger can backtest governor behavior. The decision itself was
+    # already applied to final_tier above; these fields are a record of it.
+    final_signal["active_auction_conflict"] = _aac_audit["active_auction_conflict"]
+    final_signal["active_auction_conflict_points"] = _aac_audit["active_auction_conflict_points"]
+    final_signal["active_auction_conflict_reasons"] = _aac_audit["active_auction_conflict_reasons"]
+    final_signal["active_auction_conflict_note"] = _aac_audit["active_auction_conflict_note"]
 
     # Phase 12A: sanitize Claude prose so alerts cannot display tier-contradicting language
     final_signal["sanitized_reason"] = _sanitize_reason_for_tier(

@@ -397,6 +397,14 @@ def record_alert(
         "one_hour_consequence_state": final_signal.get("one_hour_consequence_state"),
         "one_hour_no_chase_status":   final_signal.get("one_hour_no_chase_status"),
         "one_hour_data_status":       final_signal.get("one_hour_data_status"),
+        # ---- Phase 14F: Active Auction Conflict Governor audit record ----
+        # Records whether the governor capped the tier and why, so the
+        # observation ledger can backtest governor accuracy. The decision was
+        # already applied by tiering.py; these fields never feed dedup,
+        # campaign identity, or any future read of this store.
+        "active_auction_conflict":         final_signal.get("active_auction_conflict"),
+        "active_auction_conflict_points":  final_signal.get("active_auction_conflict_points"),
+        "active_auction_conflict_reasons": final_signal.get("active_auction_conflict_reasons"),
 
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),

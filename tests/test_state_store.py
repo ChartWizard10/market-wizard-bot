@@ -1445,3 +1445,61 @@ def test_record_alert_1h_fields_do_not_affect_dedup_key():
     assert rec1["dedup_key"] == rec2["dedup_key"], (
         "1H evidence must not influence the dedup_key"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 14F — Active Auction Conflict Governor audit record in alert_history
+# ---------------------------------------------------------------------------
+
+_14F_HISTORY_FIELDS = (
+    "active_auction_conflict",
+    "active_auction_conflict_points",
+    "active_auction_conflict_reasons",
+)
+
+
+def test_record_alert_stores_active_auction_conflict_fields():
+    tr = _tiering(
+        final_tier="STARTER",
+        channel="#starter-signals",
+        active_auction_conflict=True,
+        active_auction_conflict_points=4,
+        active_auction_conflict_reasons=[
+            "four_hour_market_state=failure (+2)",
+            "four_hour_reclaim_status=failed_reclaim (+2)",
+        ],
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["active_auction_conflict"] is True
+    assert rec["active_auction_conflict_points"] == 4
+    assert rec["active_auction_conflict_reasons"] == [
+        "four_hour_market_state=failure (+2)",
+        "four_hour_reclaim_status=failed_reclaim (+2)",
+    ]
+
+
+def test_record_alert_active_auction_conflict_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    for field in _14F_HISTORY_FIELDS:
+        assert field in rec, f"14F field missing from history record: {field!r}"
+        assert rec[field] is None
+
+
+def test_record_alert_active_auction_conflict_does_not_affect_dedup_key():
+    tr_plain = _tiering(trigger=182.50, invalidation=178.20)
+    tr_conflict = _tiering(
+        trigger=182.50, invalidation=178.20,
+        active_auction_conflict=True,
+        active_auction_conflict_points=6,
+        active_auction_conflict_reasons=["one_hour_acceptance_state=rejected (+2)"],
+    )
+    s1 = record_alert("AAPL", tr_plain, _empty(), _cfg())
+    s2 = record_alert("AAPL", tr_conflict, _empty(), _cfg())
+    rec1 = s1["tickers"]["AAPL"]["alert_history"][0]
+    rec2 = s2["tickers"]["AAPL"]["alert_history"][0]
+    assert rec1["dedup_key"] == rec2["dedup_key"], (
+        "active_auction_conflict audit fields must not influence the dedup_key"
+    )

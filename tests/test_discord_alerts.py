@@ -2408,3 +2408,131 @@ def test_14e_adverse_1h_does_not_make_wait_sendable():
     tr["final_discord_channel"] = "none"
     sendable, _reason = _sendable(tr, None)
     assert sendable is False
+
+
+# ===========================================================================
+# Phase 14F — Active Auction Conflict notice (displays a tiering decision)
+# ===========================================================================
+
+_14F_STARTER_NOTE = (
+    "Full-size capital withheld. Higher-timeframe trend remains "
+    "constructive, but the 4H/1H auction has not yet proven "
+    "continuation acceptance."
+)
+_14F_NEAR_ENTRY_NOTE = (
+    "Capital withheld. Higher-timeframe trend remains constructive, "
+    "but the active 4H/1H auction is contradicting continuation; "
+    "wait for acceptance proof."
+)
+
+
+def _14f_starter_capped_result(**extra) -> dict:
+    tr = _tiering_result(
+        tier="STARTER",
+        capital_action="starter_only",
+        active_auction_conflict=True,
+        active_auction_conflict_points=4,
+        active_auction_conflict_reasons=["four_hour_reclaim_status=failed_reclaim (+2)"],
+        active_auction_conflict_note=_14F_STARTER_NOTE,
+        **extra,
+    )
+    tr["capital_action"] = "starter_only"
+    tr["final_discord_channel"] = "#starter-signals"
+    return tr
+
+
+def test_14f_renders_conflict_block_when_capped_to_starter():
+    text = format_alert(_14f_starter_capped_result())
+    assert "ACTIVE AUCTION CONFLICT" in text
+    assert "Full-size capital withheld." in text
+    assert "has not yet proven" in text
+
+
+def test_14f_capped_starter_does_not_say_full_quality():
+    text = format_alert(_14f_starter_capped_result())
+    # The sizing line must be the STARTER contract, not the SNIPE one.
+    assert "STARTER SIZE ONLY" in text
+    assert "FULL QUALITY" not in text
+    assert "capital authorized after live-chart verification" not in text
+
+
+def test_14f_renders_conflict_block_when_capped_to_near_entry():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        capital_action="wait_no_capital",
+        active_auction_conflict=True,
+        active_auction_conflict_points=6,
+        active_auction_conflict_reasons=["one_hour_acceptance_state=pending (+1)"],
+        active_auction_conflict_note=_14F_NEAR_ENTRY_NOTE,
+    )
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "ACTIVE AUCTION CONFLICT" in text
+    assert "Capital withheld." in text
+
+
+def test_14f_omits_conflict_block_when_not_triggered():
+    tr = _tiering_result(
+        active_auction_conflict=False,
+        active_auction_conflict_points=0,
+        active_auction_conflict_reasons=[],
+        active_auction_conflict_note=None,
+    )
+    text = format_alert(tr)
+    assert "ACTIVE AUCTION CONFLICT" not in text
+
+
+def test_14f_omits_conflict_block_when_fields_absent():
+    tr = _tiering_result()
+    text = format_alert(tr)
+    assert "ACTIVE AUCTION CONFLICT" not in text
+
+
+def test_14f_conflict_block_does_not_alter_evidence_lines():
+    tr = _14f_starter_capped_result(
+        four_hour_market_state="TRANSITION",
+        four_hour_sma_alignment="mixed",
+        four_hour_reclaim_status="below_value",
+        four_hour_structure_note="lower_high_pressure",
+        four_hour_data_status="current",
+        one_hour_trigger_family="none",
+        one_hour_state="repair",
+        one_hour_retest_quality="weak",
+        one_hour_acceptance_state="pending",
+        one_hour_consequence_state="neutral",
+        one_hour_no_chase_status="acceptable",
+        one_hour_data_status="available",
+    )
+    text = format_alert(tr)
+    assert "4H: TRANSITION  |  SMA: mixed  |  Reclaim: below_value  |  Data: current" in text
+    assert (
+        "1H: none  |  Retest: weak  |  Acceptance: pending  |  "
+        "Consequence: neutral  |  No-Chase: acceptable  |  Data: available"
+        in text
+    )
+    # The 4H/1H evidence lines themselves stay authority-free.
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s.startswith("4H:") or s.startswith("1H:"):
+            low = s.lower()
+            for word in _1H_FORBIDDEN_WORDS:
+                assert word not in low, f"authority word {word!r} on evidence line: {ln!r}"
+
+
+def test_14f_conflict_does_not_make_wait_sendable():
+    tr = _tiering_result(
+        tier="WAIT", safe=False,
+        active_auction_conflict=True,
+        active_auction_conflict_note=_14F_NEAR_ENTRY_NOTE,
+    )
+    tr["final_discord_channel"] = "none"
+    sendable, _reason = _sendable(tr, None)
+    assert sendable is False
+
+
+def test_14f_conflict_block_display_does_not_change_decision_fields():
+    tr = _14f_starter_capped_result()
+    before = (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"])
+    _ = format_alert(tr)
+    assert (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"]) == before

@@ -1966,6 +1966,22 @@ def format_alert(
     if _calibration_display:
         lines.append(f"  Score realism: {_calibration_display}")
 
+    # Phase 14F: Active Auction Conflict notice — rendered only when the
+    # governor in tiering.py already capped the tier. This block displays a
+    # decision that was made upstream; it makes no decision here and the
+    # 4H/1H evidence lines above remain authority-free.
+    if signal.get("active_auction_conflict"):
+        _aac_note_raw = signal.get("active_auction_conflict_note")
+        _aac_note = _sanitize(str(_aac_note_raw)) if _aac_note_raw else (
+            "Full-size capital withheld. The active 4H/1H auction has not "
+            "yet proven continuation acceptance."
+        )
+        lines += [
+            "──────────────────────────────",
+            "⚠️  ACTIVE AUCTION CONFLICT",
+            f"  {_aac_note}",
+        ]
+
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
         "──────────────────────────────",
