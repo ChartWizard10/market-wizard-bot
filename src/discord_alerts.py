@@ -33,8 +33,10 @@ _TIER_BADGE = {
     "WAIT":       "⚪ WAIT",
 }
 
+# Phase 15C: "FULL QUALITY" prestige label retired from the public surface —
+# capital permission is stated as execution validity, not quality hype.
 _CAPITAL_LABEL = {
-    "full_quality_allowed": "FULL QUALITY",
+    "full_quality_allowed": "EXECUTION-VALID",
     "starter_only":         "STARTER SIZE ONLY",
     "wait_no_capital":      "NO CAPITAL — WATCH ONLY",
     "no_trade":             "NO TRADE",
@@ -61,7 +63,9 @@ _CAPITAL_LABEL = {
 CAPITAL_CONTRACT: dict[str, dict] = {
     "SNIPE_IT": {
         "headline": "SNIPE_IT conditions met.",
-        "sizing": "FULL QUALITY — capital authorized after live-chart verification.",
+        # Phase 15C: "FULL QUALITY — capital authorized" retired; the sizing
+        # line states execution validity without prestige inflation.
+        "sizing": "Execution-valid — completed proof chain present after live-chart verification.",
         "capital_state": "capital_authorized",
         # Forbidden in SNIPE_IT alert text — longest first within each group.
         "forbidden": [
@@ -340,6 +344,92 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
     if final_tier == "NEAR_ENTRY":
         result = _apply_near_entry_capital_firewall(result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 15C: Quality Language Guard — prestige-phrase firewall.
+# ---------------------------------------------------------------------------
+# Doctrine: verdict before prestige; evidence before adjective. Premium quality
+# adjectives may not outrun the evidence ledger. This guard runs on the fully
+# rendered body (after the capital contract guard, before the narrative
+# sovereignty guard) and is display-only — it never reads or writes any
+# decision field.
+#
+# "__PDC__" is an internal placeholder substituted with the audit-safe
+# "premium dimensions: X/5" form — the only sanctioned rendering of dimension
+# counts. "All 5 dimensions premium / institutional-grade" never renders.
+
+# Applied to EVERY tier, always.
+_QLG_ALWAYS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\ball\s+(?:5|five)\s+(?:quality\s+)?dimensions?\s+"
+                r"(?:are\s+)?(?:institutional[-\s]grade|premium)\b", re.IGNORECASE), "__PDC__"),
+    (re.compile(r"\ball\s+(?:5|five)\s+(?:quality\s+)?dimensions?\b", re.IGNORECASE), "__PDC__"),
+    (re.compile(r"\ball\s+dimensions\s+premium\b", re.IGNORECASE), "__PDC__"),
+    (re.compile(r"\binstitutional[-\s]grade\b", re.IGNORECASE), "evidence-graded"),
+    (re.compile(r"\binstitutional\b", re.IGNORECASE), "structured"),
+    (re.compile(r"\belite\b", re.IGNORECASE), "strong"),
+    (re.compile(r"\bperfect\b", re.IGNORECASE), "strong"),
+    (re.compile(r"\bguaranteed\b", re.IGNORECASE), "expected"),
+    (re.compile(r"\bmonster\b", re.IGNORECASE), "large"),
+    (re.compile(r"\bcan'?t\s+miss\b", re.IGNORECASE), "notable"),
+    (re.compile(r"\bobvious\s+winner\b", re.IGNORECASE), "valid candidate"),
+]
+
+# Additionally applied to NEAR_ENTRY and WAIT.
+_QLG_NEAR_ENTRY: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\ball\s+conditions\s+(?:are\s+)?(?:satisfied|met)\b", re.IGNORECASE),
+     "proof incomplete"),
+    (re.compile(r"\bsnipe\s+conditions\s+met\b", re.IGNORECASE), "watch conditions only"),
+    (re.compile(r"\ball\s+(?:5|five)\b", re.IGNORECASE), "several"),
+    (re.compile(r"\bhigh[-\s]quality\b", re.IGNORECASE), "structured"),
+    (re.compile(r"\bcomplete\s+sequence\b", re.IGNORECASE), "developing sequence"),
+    (re.compile(r"\bpremium\b", re.IGNORECASE), "quality"),
+    (re.compile(r"\bA\+"), "Watch-grade"),
+    (re.compile(r"\bprime\b", re.IGNORECASE), "valid"),
+]
+
+# Additionally applied to STARTER.
+_QLG_STARTER: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\ball\s+conditions\s+(?:are\s+)?(?:satisfied|met)\b", re.IGNORECASE),
+     "starter conditions met"),
+    (re.compile(r"\ball\s+(?:5|five)\b", re.IGNORECASE), "several"),
+    (re.compile(r"\bhigh[-\s]quality\b", re.IGNORECASE), "strong tactical"),
+    # Affirmative full-size grants only — denial language ("full-size
+    # authorization not granted", "full-size capital withheld") must survive.
+    (re.compile(r"\bfull[-\s]siz(?:e|ed)\s+(?:allowed|authorized|authorization\s+granted"
+                r"|position|entry)\b", re.IGNORECASE), "starter size only"),
+]
+
+# Additionally applied to SNIPE_IT when the quality label contract did not
+# explicitly allow premium language (quality_label_allowed is not True —
+# absent/legacy records are treated as denied; conservative default).
+_QLG_SNIPE_DENIED: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bhigh[-\s]quality\b", re.IGNORECASE), "execution-valid"),
+    (re.compile(r"\bpremium\b", re.IGNORECASE), "quality"),
+]
+
+
+def _apply_quality_language_guard(final_tier: str, signal: dict, body: str) -> str:
+    """Phase 15C prestige-phrase firewall. Display-only; no decision reads."""
+    count = str(signal.get("premium_dimension_count") or "").strip()
+    if not count:
+        _n_premium, _ = _evaluate_quality_dimensions(signal)
+        count = f"{_n_premium}/5"
+    pdc_text = f"premium dimensions: {count}"
+
+    def _run(patterns: list[tuple[re.Pattern, str]], text: str) -> str:
+        for pat, repl in patterns:
+            text = pat.sub(repl, text)
+        return text
+
+    body = _run(_QLG_ALWAYS, body).replace("__PDC__", pdc_text)
+    if final_tier in ("NEAR_ENTRY", "WAIT"):
+        body = _run(_QLG_NEAR_ENTRY, body)
+    elif final_tier == "STARTER":
+        body = _run(_QLG_STARTER, body)
+    elif final_tier == "SNIPE_IT" and signal.get("quality_label_allowed") is not True:
+        body = _run(_QLG_SNIPE_DENIED, body)
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -1181,13 +1271,17 @@ def _apply_narrative_sovereignty_guard(
 # ---------------------------------------------------------------------------
 
 # Short canonical prefixes for the top three labels — used as the dict values
-# so existing `_QUALITY_LABEL_PHRASES["X"] in result` assertions remain valid
 # while _build_quality_phrase() generates fuller dynamic text.
 # Lower three labels keep their full static phrases (unchanged from 13.8A).
+#
+# Phase 15C: prestige labels retired. "Elite candidate" / "A+ candidate" /
+# "institutional-grade" may no longer appear on the public alert surface.
+# Internal label KEYS (A_PLUS_ELITE etc.) are unchanged — they are never
+# rendered; only the phrases below are.
 _QUALITY_LABEL_PHRASES: dict[str, str] = {
-    "A_PLUS_ELITE":   "Elite candidate",
-    "A_PLUS_CANDIDATE": "A+ candidate",
-    "CLEAN_STARTER":  "Clean starter",
+    "A_PLUS_ELITE":   "High-quality executable",
+    "A_PLUS_CANDIDATE": "Complete sequence",
+    "CLEAN_STARTER":  "Confirmed sequence",
     "WATCH_ONLY_VALID": (
         "Watch-only valid — structure exists, but retest and hold are incomplete."
     ),
@@ -1300,67 +1394,65 @@ def _evaluate_quality_dimensions(signal: dict) -> tuple[int, int]:
 def _build_quality_phrase(label: str, signal: dict, final_tier: str = "") -> str:
     """Build the human-readable quality phrase for the ACTION section.
 
-    Top three labels get dynamic phrases that name dimension counts.
-    Lower three labels return their full static phrases (unchanged from 13.8A).
+    Top three labels get dynamic phrases; lower three labels return their
+    static phrases (unchanged from 13.8A).
 
-    Phase 13.8C: When final_tier == NEAR_ENTRY and both retest+hold are confirmed,
-    the phrase names the remaining blocker from missing_conditions so the quality
-    read does not contradict the "NO CAPITAL" directive without explanation.
+    Phase 15C: tier-governed language authority. NEAR_ENTRY top labels read
+    as "Strong context, proof incomplete"; STARTER top labels as "Strong
+    tactical setup"; SNIPE_IT premium adjectives appear only when the
+    tiering-computed quality_label_allowed contract is explicitly True
+    (absent/legacy records are treated as denied — conservative default).
+    Dimension counts render only in the audit-safe "premium dimensions: X/5"
+    form; "all five … institutional-grade" phrasing is retired.
+
+    Phase 13.8C behavior preserved: NEAR_ENTRY phrases still name the
+    remaining blocker so the quality read never contradicts "NO CAPITAL".
 
     Informational only — no side effects on tier, capital, or routing.
     """
     n_premium, _n_discount = _evaluate_quality_dimensions(signal)
+    label_allowed = signal.get("quality_label_allowed") is True
 
-    # Phase 13.8C Fix 3: NEAR_ENTRY + both_confirmed — quality phrase must name the
-    # remaining blocker, not claim the setup is fully ready (which contradicts NE tier).
     if final_tier == "NEAR_ENTRY" and label in ("A_PLUS_ELITE", "A_PLUS_CANDIDATE", "CLEAN_STARTER"):
         missing = signal.get("missing_conditions") or []
         if missing:
             blocker = "; ".join(_humanize_missing_condition(str(m)) for m in missing[:2])
-            if label == "A_PLUS_ELITE":
-                return f"Elite setup — confirmed sequence and hold; pending: {blocker}."
-            if label == "A_PLUS_CANDIDATE":
-                return (
-                    f"A+ setup — {n_premium} of 5 dimensions premium, "
-                    f"confirmed sequence and hold; pending: {blocker}."
-                )
-            # CLEAN_STARTER
-            premium_note = (
-                "quality factors mixed" if n_premium == 0
-                else f"{n_premium} of 5 quality factors premium"
+            return (
+                "Strong context, proof incomplete — confirmed sequence and "
+                f"hold; pending: {blocker}."
             )
-            return f"Near-ready — confirmed sequence and hold, {premium_note}; pending: {blocker}."
-        else:
-            # No missing_conditions listed — generic near-ready phrasing
-            if label == "A_PLUS_ELITE":
-                return "Elite setup — confirmed sequence and hold; near-ready pending blocker resolution."
-            if label == "A_PLUS_CANDIDATE":
-                return (
-                    f"A+ setup — {n_premium} of 5 dimensions premium, "
-                    "confirmed sequence and hold; near-ready pending blocker resolution."
-                )
-            premium_note = (
-                "quality factors mixed" if n_premium == 0
-                else f"{n_premium} of 5 quality factors premium"
-            )
-            return f"Near-ready — confirmed sequence and hold, {premium_note}; pending blocker resolution."
+        return (
+            "Strong context, proof incomplete — confirmed sequence and hold; "
+            "near-ready pending blocker resolution."
+        )
+
+    if final_tier == "STARTER" and label in ("A_PLUS_ELITE", "A_PLUS_CANDIDATE", "CLEAN_STARTER"):
+        return (
+            "Strong tactical setup — confirmed sequence and hold; "
+            "full authorization requires upgrade proof."
+        )
 
     if label == "A_PLUS_ELITE":
-        return "Elite candidate — all five quality dimensions institutional-grade."
+        if label_allowed:
+            return (
+                "High-quality executable — premium dimensions: 5/5; "
+                "complete sequence confirmed."
+            )
+        return "Execution-valid — complete sequence confirmed; restricted label withheld."
     if label == "A_PLUS_CANDIDATE":
-        return (
-            f"A+ candidate — {n_premium} of 5 dimensions premium, "
-            "confirmed sequence and hold."
-        )
+        if label_allowed:
+            return (
+                f"Complete sequence — premium dimensions: {n_premium}/5; "
+                "confirmed sequence and hold."
+            )
+        return "Execution-valid — confirmed sequence and hold; restricted label withheld."
     if label == "CLEAN_STARTER":
-        # Phase 13.8C Fix 2: "0 of 5 quality factors premium" reads poorly —
-        # replace with "quality factors mixed" when no dimensions are premium.
-        if n_premium == 0:
-            return "Clean starter — retest and hold confirmed; quality factors mixed."
-        return (
-            f"Clean starter — retest and hold confirmed, "
-            f"{n_premium} of 5 quality factors premium."
-        )
+        if label_allowed and n_premium > 0:
+            return (
+                f"Confirmed sequence — retest and hold confirmed; "
+                f"premium dimensions: {n_premium}/5."
+            )
+        return "Confirmed sequence — retest and hold confirmed; quality factors mixed."
     return _QUALITY_LABEL_PHRASES.get(label, label)
 
 
@@ -2048,6 +2140,25 @@ def format_alert(
             _der_joined = _sanitize("; ".join(str(r) for r in _der_reasons[:3]))
             lines.append(f"  Reasons: {_der_joined}")
 
+    # Phase 15C: Quality Language Control notice — rendered only when the
+    # tiering-computed contract explicitly denied the premium label. Clean
+    # SNIPE_IT (label allowed) and legacy records (fields absent) render no
+    # block, keeping clean alerts concise. Display-only.
+    if signal.get("quality_label_denied") is True:
+        _qlc_lang = _sanitize(str(signal.get("permitted_quality_language") or "").strip())
+        if not _qlc_lang:
+            _qlc_lang = "Tier-safe language only."
+        lines += [
+            "──────────────────────────────",
+            "QUALITY LANGUAGE CONTROL",
+            "  Restricted label denied.",
+            f"  Permitted language: {_qlc_lang}",
+        ]
+        _qlc_reasons = signal.get("quality_language_cap_reasons")
+        if isinstance(_qlc_reasons, list) and _qlc_reasons:
+            _qlc_joined = _sanitize("; ".join(str(r) for r in _qlc_reasons[:2]))
+            lines.append(f"  Reason: {_qlc_joined}")
+
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
         "──────────────────────────────",
@@ -2086,6 +2197,10 @@ def format_alert(
     # runs after all prior passes with access to the full validated signal dict.
     rendered = "\n".join(lines)
     rendered = _apply_final_body_contract_guard(final_tier, rendered)
+    # Phase 15C: quality language guard — prestige words cannot outrun the
+    # evidence ledger. Runs after the capital contract guard so its safe
+    # replacements are also screened; sovereignty guard remains the final pass.
+    rendered = _apply_quality_language_guard(final_tier, signal, rendered)
     return _apply_narrative_sovereignty_guard(final_tier, signal, rendered)
 
 

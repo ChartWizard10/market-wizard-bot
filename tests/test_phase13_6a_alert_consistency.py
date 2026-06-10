@@ -264,7 +264,7 @@ def test_starter_capital_language_correct():
 # ---------------------------------------------------------------------------
 
 def test_snipe_it_capital_and_action_language_correct():
-    """SNIPE_IT alert must carry FULL QUALITY and the SNIPE_IT action label.
+    """SNIPE_IT alert must carry the execution-validity sizing and action label.
 
     Must NOT say NO CAPITAL, WATCH ONLY, or include a blocker section.
     """
@@ -281,8 +281,9 @@ def test_snipe_it_capital_and_action_language_correct():
     # Must say SNIPE_IT action label (Phase 13.7B contract headline)
     assert "SNIPE_IT conditions met." in text
 
-    # Must say FULL QUALITY capital label
-    assert "FULL QUALITY" in text
+    # Must say the Phase 15C execution-validity sizing line
+    # ("FULL QUALITY" prestige label retired by the quality language contract)
+    assert "Execution-valid" in text
 
     # Must NOT say NO CAPITAL or WATCH ONLY
     assert "NO CAPITAL" not in text

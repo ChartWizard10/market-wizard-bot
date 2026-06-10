@@ -1622,3 +1622,71 @@ def test_record_alert_daily_execution_reality_does_not_affect_dedup_key():
     assert rec1["dedup_key"] == rec2["dedup_key"], (
         "daily_execution_reality audit fields must not influence the dedup_key"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 15C — Quality Label Contract audit record in alert_history
+# ---------------------------------------------------------------------------
+
+_15C_HISTORY_FIELDS = (
+    "quality_label_allowed",
+    "quality_label_risk",
+    "quality_language_cap_reasons",
+)
+
+
+def test_record_alert_stores_quality_label_fields():
+    tr = _tiering(
+        final_tier="STARTER",
+        channel="#starter-signals",
+        quality_label_allowed=False,
+        quality_label_risk="HIGH",
+        quality_language_cap_reasons=["final tier is STARTER"],
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["quality_label_allowed"] is False
+    assert rec["quality_label_risk"] == "HIGH"
+    assert rec["quality_language_cap_reasons"] == ["final tier is STARTER"]
+
+
+def test_record_alert_quality_label_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    for field in _15C_HISTORY_FIELDS:
+        assert field in rec, f"15C field missing from history record: {field!r}"
+        assert rec[field] is None
+
+
+def test_record_alert_quality_display_fields_not_persisted():
+    tr = _tiering(
+        quality_label_allowed=True,
+        quality_label_risk="LOW",
+        quality_language_cap_reasons=[],
+        premium_dimension_count="5/5",
+        permitted_quality_language="High-quality executable; no active quality caps.",
+        quality_label_denied=False,
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert "premium_dimension_count" not in rec
+    assert "permitted_quality_language" not in rec
+    assert "quality_label_denied" not in rec
+
+
+def test_record_alert_quality_fields_do_not_affect_dedup_key():
+    tr_plain = _tiering(trigger=182.50, invalidation=178.20)
+    tr_quality = _tiering(
+        trigger=182.50, invalidation=178.20,
+        quality_label_allowed=False,
+        quality_label_risk="CRITICAL",
+        quality_language_cap_reasons=["final tier is NEAR_ENTRY"],
+    )
+    s1 = record_alert("AAPL", tr_plain, _empty(), _cfg())
+    s2 = record_alert("AAPL", tr_quality, _empty(), _cfg())
+    rec1 = s1["tickers"]["AAPL"]["alert_history"][0]
+    rec2 = s2["tickers"]["AAPL"]["alert_history"][0]
+    assert rec1["dedup_key"] == rec2["dedup_key"], (
+        "quality label audit fields must not influence the dedup_key"
+    )

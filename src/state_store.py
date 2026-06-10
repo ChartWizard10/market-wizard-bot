@@ -420,6 +420,13 @@ def record_alert(
         "daily_execution_reality_points":   final_signal.get("daily_execution_reality_points"),
         "daily_execution_reality_reasons":  final_signal.get("daily_execution_reality_reasons"),
 
+        # ---- Phase 15C: Quality Label Contract audit record ----
+        # Language-governance audit only. premium_dimension_count and
+        # permitted_quality_language are display-only and not persisted.
+        "quality_label_allowed":        final_signal.get("quality_label_allowed"),
+        "quality_label_risk":           final_signal.get("quality_label_risk"),
+        "quality_language_cap_reasons": final_signal.get("quality_language_cap_reasons"),
+
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),
         "trend_state":                       final_signal.get("trend_state"),

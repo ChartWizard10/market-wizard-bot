@@ -262,9 +262,11 @@ class TestCleanStarterZeroPremiumPhrase:
             "risk_realism_state": "healthy",
             "risk_reward": 3.2,          # healthy but rr<4 → not all premium
             "sma_value_alignment": "supportive",
+            # Phase 15C: count renders only when the contract allows it.
+            "quality_label_allowed": True,
         }
         phrase = _build_quality_phrase("CLEAN_STARTER", signal)
-        assert "of 5" in phrase
+        assert "premium dimensions: 4/5" in phrase
         assert "0 of 5" not in phrase
 
     def test_clean_starter_phrase_always_mentions_confirmed(self):
@@ -397,8 +399,8 @@ class TestNearEntryBothConfirmedQualityContradiction:
         result = format_alert(tr)
         assert "NO CAPITAL" in result
 
-    def test_snipe_it_elite_phrase_unchanged(self):
-        """For SNIPE_IT, A_PLUS_ELITE phrase is still 'Elite candidate'."""
+    def test_snipe_it_elite_phrase_is_governed(self):
+        """Phase 15C: SNIPE_IT A_PLUS_ELITE phrase is execution-language, never 'Elite'."""
         signal = {
             "retest_status": "confirmed",
             "hold_status": "confirmed",
@@ -413,10 +415,12 @@ class TestNearEntryBothConfirmedQualityContradiction:
             "missing_conditions": [],
         }
         phrase = _build_quality_phrase("A_PLUS_ELITE", signal, final_tier="SNIPE_IT")
-        assert "Elite candidate" in phrase
+        # No contract flag in signal → denied path (conservative default).
+        assert "Execution-valid" in phrase
+        assert "Elite candidate" not in phrase
 
-    def test_starter_elite_phrase_unchanged(self):
-        """For STARTER, A_PLUS_ELITE phrase is still 'Elite candidate'."""
+    def test_starter_elite_phrase_is_governed(self):
+        """Phase 15C: STARTER top labels render the tactical phrase, never 'Elite'."""
         signal = {
             "retest_status": "confirmed",
             "hold_status": "confirmed",
@@ -431,7 +435,8 @@ class TestNearEntryBothConfirmedQualityContradiction:
             "missing_conditions": [],
         }
         phrase = _build_quality_phrase("A_PLUS_ELITE", signal, final_tier="STARTER")
-        assert "Elite candidate" in phrase
+        assert "Strong tactical setup" in phrase
+        assert "Elite candidate" not in phrase
 
 
 # ---------------------------------------------------------------------------

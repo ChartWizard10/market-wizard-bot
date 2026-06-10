@@ -416,11 +416,13 @@ class TestFormatAlertQualityPhrases:
     """Correct quality phrase emitted for each label scenario."""
 
     def test_a_plus_phrase_for_clean_snipe_it(self):
+        # Phase 15C: premium phrase requires the quality label contract.
         result = format_alert(_tiering_result(
             "SNIPE_IT",
             risk_realism_state="healthy",
             overhead_status="clear",
             sma_value_alignment="supportive",
+            quality_label_allowed=True,
         ))
         assert _QUALITY_LABEL_PHRASES["A_PLUS_CANDIDATE"] in result
 
@@ -433,7 +435,8 @@ class TestFormatAlertQualityPhrases:
             overhead_status="clear",
             sma_value_alignment="supportive",
         ))
-        assert _QUALITY_LABEL_PHRASES["CLEAN_STARTER"] in result
+        # Phase 15C: STARTER top labels render the tier-safe tactical phrase.
+        assert "Strong tactical setup" in result
 
     def test_clean_starter_phrase_for_hostile_sma(self):
         result = format_alert(_tiering_result(
@@ -444,7 +447,8 @@ class TestFormatAlertQualityPhrases:
             overhead_status="clear",
             sma_value_alignment="hostile",
         ))
-        assert _QUALITY_LABEL_PHRASES["CLEAN_STARTER"] in result
+        # Phase 15C: STARTER top labels render the tier-safe tactical phrase.
+        assert "Strong tactical setup" in result
 
     def test_watch_only_phrase_for_near_entry(self):
         result = format_alert(_ne_tiering_result(
@@ -485,7 +489,7 @@ class TestFormatAlertQualityNoSideEffects:
     def test_capital_label_unchanged_snipe_it(self):
         result = format_alert(_tiering_result("SNIPE_IT"))
         assert "SNIPE_IT conditions met." in result
-        assert "FULL QUALITY" in result
+        assert "Execution-valid" in result    # Phase 15C sizing language
 
     def test_capital_label_unchanged_starter(self):
         result = format_alert(_tiering_result("STARTER"))
@@ -514,6 +518,7 @@ class TestFormatAlertQualityNoSideEffects:
             risk_realism_state="healthy",
             overhead_status="clear",
             sma_value_alignment="supportive",
+            quality_label_allowed=True,
         ))
         phrase = _QUALITY_LABEL_PHRASES["A_PLUS_CANDIDATE"]
         assert result.count(phrase) == 1
@@ -525,8 +530,9 @@ class TestFormatAlertQualityNoSideEffects:
             risk_realism_state="healthy",
             overhead_status="clear",
             sma_value_alignment="supportive",
+            quality_label_allowed=True,
         ))
-        assert "A+ candidate" in result
+        assert "Complete sequence" in result   # Phase 15C phrase
 
     def test_watch_only_phrase_survives_ne_firewall(self):
         """Watch-only valid phrase must not be caught by the NEAR_ENTRY firewall."""
@@ -586,7 +592,7 @@ class TestFormatAlertQualityRegressionGuards:
     def test_quality_line_between_sizing_and_next(self):
         """Quality read line is sandwiched between sizing and Next in ACTION."""
         result = self._render_snipe()
-        sizing_pos  = result.find("FULL QUALITY")
+        sizing_pos  = result.find("Execution-valid")
         quality_pos = result.find("Quality read:")
         next_pos    = result.find("  Next:")
         assert sizing_pos  != -1

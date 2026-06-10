@@ -118,10 +118,10 @@ def test_snipe_it_contract_blocks_no_capital_language():
     assert "near-entry watch" not in text.lower()
     assert "blocker resolves" not in text.lower()
 
-    # Contract headline and sizing must appear
+    # Contract headline and sizing must appear (Phase 15C sizing language)
     assert "SNIPE_IT conditions met." in text
-    assert "FULL QUALITY" in text
-    assert "capital authorized after live-chart verification" in text.lower()
+    assert "Execution-valid" in text
+    assert "completed proof chain present after live-chart verification" in text.lower()
 
 
 def test_snipe_it_contract_blocks_starter_size_only_language():
@@ -133,8 +133,8 @@ def test_snipe_it_contract_blocks_starter_size_only_language():
     )
     text = format_alert(tr)
     assert "starter size only" not in text.lower()
-    # Still has the SNIPE_IT contract sizing
-    assert "FULL QUALITY" in text
+    # Still has the SNIPE_IT contract sizing (Phase 15C language)
+    assert "Execution-valid" in text
 
 
 def test_snipe_it_contract_blocks_no_capital_yet():
@@ -486,9 +486,9 @@ def test_contract_guard_snipe_it_cleans_near_entry_language_from_reason():
     assert "near-entry watch" not in text.lower()
     assert "no capital yet" not in text.lower()
     assert "blocker resolves" not in text.lower()
-    # SNIPE_IT contract intact
+    # SNIPE_IT contract intact (Phase 15C sizing language)
     assert "SNIPE_IT conditions met." in text
-    assert "FULL QUALITY" in text
+    assert "Execution-valid" in text
 
 
 # ===========================================================================
@@ -523,8 +523,11 @@ def test_capital_contract_headlines_per_tier():
 
 
 def test_capital_contract_sizing_contains_key_phrases():
-    assert "FULL QUALITY" in CAPITAL_CONTRACT["SNIPE_IT"]["sizing"]
-    assert "capital authorized" in CAPITAL_CONTRACT["SNIPE_IT"]["sizing"]
+    # Phase 15C: prestige sizing retired — execution-validity language instead.
+    assert "Execution-valid" in CAPITAL_CONTRACT["SNIPE_IT"]["sizing"]
+    assert "completed proof chain" in CAPITAL_CONTRACT["SNIPE_IT"]["sizing"]
+    assert "FULL QUALITY" not in CAPITAL_CONTRACT["SNIPE_IT"]["sizing"]
+    assert "capital authorized" not in CAPITAL_CONTRACT["SNIPE_IT"]["sizing"]
     assert "STARTER SIZE ONLY" in CAPITAL_CONTRACT["STARTER"]["sizing"]
     assert "reduced-size" in CAPITAL_CONTRACT["STARTER"]["sizing"]
     assert "NO CAPITAL" in CAPITAL_CONTRACT["NEAR_ENTRY"]["sizing"]

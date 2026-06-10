@@ -4280,3 +4280,158 @@ def test_15b_no_forbidden_indicators_in_governor():
             assert not _re.search(rf"\b{word}\b", src), (
                 f"forbidden indicator {word!r} in {fn.__name__}"
             )
+
+
+# ===========================================================================
+# Phase 15C — Quality Label Contract (language governance, audit-only)
+# ===========================================================================
+# Doctrine: verdict before prestige; evidence before adjective; capital
+# permission controls language permission. The contract fields govern public
+# language only — they never change tier, score, capital, routing, or dedup.
+
+from src.tiering import _build_quality_label_contract, _grade_quality_dimensions
+
+_QLC_FIELDS = (
+    "quality_label_allowed", "quality_label_denied", "quality_label_risk",
+    "premium_dimension_count", "quality_language_cap_reasons",
+    "permitted_quality_language",
+)
+
+
+# 15C-1: contract fields always exist on final_signal, every tier
+def test_15c_contract_fields_always_on_final_signal():
+    for sig_fn in (_snipe_signal, _starter_signal, _near_entry_signal, _wait_signal):
+        result = validate(sig_fn(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+        fs = result["final_signal"]
+        for field in _QLC_FIELDS:
+            assert field in fs, f"{field!r} missing for {sig_fn.__name__}"
+
+
+# 15C-2: clean SNIPE_IT → label allowed, risk LOW, no cap reasons
+def test_15c_clean_snipe_it_label_allowed():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert result["final_tier"] == "SNIPE_IT"
+    assert fs["quality_label_allowed"] is True
+    assert fs["quality_label_denied"] is False
+    assert fs["quality_label_risk"] == "LOW"
+    assert fs["quality_language_cap_reasons"] == []
+    assert "High-quality executable" in fs["permitted_quality_language"]
+
+
+# 15C-3: STARTER → denied, risk HIGH, starter-valid language
+def test_15c_starter_label_denied_high_risk():
+    result = validate(_starter_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert result["final_tier"] == "STARTER"
+    assert fs["quality_label_allowed"] is False
+    assert fs["quality_label_denied"] is True
+    assert fs["quality_label_risk"] == "HIGH"
+    assert any("STARTER" in r for r in fs["quality_language_cap_reasons"])
+    assert "Starter-valid" in fs["permitted_quality_language"]
+
+
+# 15C-4: NEAR_ENTRY → denied, risk CRITICAL, watch-only language
+def test_15c_near_entry_label_denied_critical():
+    result = validate(_near_entry_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert fs["quality_label_allowed"] is False
+    assert fs["quality_label_risk"] == "CRITICAL"
+    assert "Watch-only valid" in fs["permitted_quality_language"]
+
+
+# 15C-5: governor-capped setup (15B at-target) → denied, CRITICAL
+def test_15c_governor_capped_label_denied_critical():
+    # Price at/beyond T1 → 15B caps SNIPE_IT → NEAR_ENTRY
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 196.00}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert fs["daily_execution_reality_conflict"] is True
+    assert fs["quality_label_allowed"] is False
+    assert fs["quality_label_risk"] == "CRITICAL"
+
+
+# 15C-6: governor-capped to STARTER (15B moderate extension) → denied
+def test_15c_starter_capped_label_denied():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 192.00}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert result["final_tier"] == "STARTER"
+    assert fs["quality_label_allowed"] is False
+    # Governor conflict present → weakest critical reading wins
+    assert fs["quality_label_risk"] == "CRITICAL"
+
+
+# 15C-7: premium_dimension_count is always the audit-safe X/5 string
+def test_15c_premium_dimension_count_format():
+    import re as _re
+    for sig_fn in (_snipe_signal, _starter_signal, _near_entry_signal):
+        result = validate(sig_fn(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+        count = result["final_signal"]["premium_dimension_count"]
+        assert _re.fullmatch(r"[0-5]/5", count), f"bad count format: {count!r}"
+
+
+# 15C-8: contract changes nothing on the decision path
+def test_15c_contract_is_audit_only():
+    kf = {"current_price": 182.50}
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["score"] == 90
+    assert result["capital_action"] == "full_quality_allowed"
+    assert result["final_discord_channel"] == "#snipe-signals"
+    assert result["safe_for_alert"] is True
+    assert "quality" not in str(result["applied_vetoes"]).lower()
+    assert not result["downgrades"]
+
+
+# 15C-9: decision-path functions never read quality label fields
+def test_15c_decision_path_does_not_read_quality_fields():
+    import inspect
+    from src import tiering
+    for fn_name in ("_determine_final_tier", "_entry_gate_failures",
+                    "_snipe_gate_failures", "_starter_gate_failures",
+                    "_near_entry_gate_failures",
+                    "_detect_active_auction_conflict",
+                    "_apply_active_auction_conflict_governor",
+                    "_detect_daily_authority_conflict",
+                    "_apply_daily_authority_governor",
+                    "_detect_daily_execution_reality_conflict",
+                    "_apply_daily_execution_reality_governor"):
+        src = inspect.getsource(getattr(tiering, fn_name))
+        assert "quality_label" not in src, f"{fn_name} reads quality label fields"
+        assert "premium_dimension" not in src, f"{fn_name} reads premium dimensions"
+
+
+# 15C-10: dimension grader is conservative — unknown fields grade UNKNOWN
+def test_15c_dimension_grader_default_safe():
+    n_premium, grades = _grade_quality_dimensions({})
+    assert n_premium == 0
+    for dim, grade in grades.items():
+        assert grade in ("UNKNOWN", "INVALID"), (
+            f"empty signal must not grade {dim} as {grade}"
+        )
+
+
+# 15C-11: SNIPE_IT with weak R:R is denied with a recorded reason
+def test_15c_snipe_weak_rr_denied():
+    # rr=None passes gates but fails the premium-language floor
+    result = validate(_snipe_signal(risk_reward=None),
+                      _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert result["final_tier"] == "SNIPE_IT"
+    assert fs["quality_label_allowed"] is False
+    assert fs["quality_label_risk"] == "MODERATE"
+    assert any("risk:reward" in r for r in fs["quality_language_cap_reasons"])
+    assert "Execution-valid" in fs["permitted_quality_language"]
+
+
+# 15C-12: no forbidden indicators in the contract functions
+def test_15c_no_forbidden_indicators_in_contract():
+    import inspect
+    import re as _re
+    for fn in (_build_quality_label_contract, _grade_quality_dimensions):
+        src = inspect.getsource(fn).lower()
+        for word in ("rsi", "macd", "bollinger", "stochastic"):
+            assert not _re.search(rf"\b{word}\b", src), (
+                f"forbidden indicator {word!r} in {fn.__name__}"
+            )

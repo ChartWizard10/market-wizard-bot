@@ -564,8 +564,10 @@ class TestFormatAlertRegressionSnipeIt:
     def test_snipe_it_conditions_met_present(self):
         assert "SNIPE_IT conditions met." in self._render()
 
-    def test_full_quality_present(self):
-        assert "FULL QUALITY" in self._render()
+    def test_execution_valid_sizing_present(self):
+        # Phase 15C: "FULL QUALITY" prestige label retired from SNIPE_IT sizing.
+        assert "Execution-valid" in self._render()
+        assert "FULL QUALITY" not in self._render()
 
     def test_clean_reason_unchanged(self):
         clean = "Clean BOS with confirmed retest and hold; overhead clear."

@@ -86,6 +86,9 @@ def _tiering_result(final_tier: str, **signal_overrides) -> dict:
     }
     sig["capital_action"] = cap_map.get(final_tier, "no_trade")
     sig["discord_channel"] = chan_map.get(final_tier, "none")
+    # Phase 15C: mirror tiering's quality label contract — premium language is
+    # explicitly allowed only on clean SNIPE_IT.
+    sig.setdefault("quality_label_allowed", final_tier == "SNIPE_IT")
     return {
         "final_tier": final_tier,
         "score": sig["score"],
@@ -409,8 +412,9 @@ class TestAPlusEliteLabel:
     def test_elite_label_in_label_phrases_dict(self):
         assert "A_PLUS_ELITE" in _QUALITY_LABEL_PHRASES
 
-    def test_elite_phrase_prefix_is_elite_candidate(self):
-        assert _QUALITY_LABEL_PHRASES["A_PLUS_ELITE"] == "Elite candidate"
+    def test_elite_phrase_prefix_is_high_quality_executable(self):
+        # Phase 15C: prestige label retired.
+        assert _QUALITY_LABEL_PHRASES["A_PLUS_ELITE"] == "High-quality executable"
 
 
 # ===========================================================================
@@ -422,46 +426,52 @@ class TestBuildQualityPhrase:
     """Dynamic phrase output for top-three labels."""
 
     def _elite_signal(self) -> dict:
-        return _base_signal(sma_value_alignment="supportive")  # all 5 premium, rr=4.5
+        # quality_label_allowed=True mirrors tiering's clean-SNIPE_IT contract.
+        return _base_signal(sma_value_alignment="supportive", quality_label_allowed=True)
 
     def _candidate_signal(self) -> dict:
         # 4 premium (healthy+rr=3.5 → standard), 0 discounts
-        return _base_signal(risk_reward=3.5)
+        return _base_signal(risk_reward=3.5, quality_label_allowed=True)
 
     def _starter_signal(self) -> dict:
         # both confirmed but 1 discount (fragile risk)
-        return _base_signal(risk_realism_state="fragile")
+        return _base_signal(risk_realism_state="fragile", quality_label_allowed=True)
 
-    def test_elite_phrase_starts_with_elite(self):
+    def test_elite_phrase_starts_with_high_quality(self):
+        # Phase 15C: "Elite candidate" retired.
         phrase = _build_quality_phrase("A_PLUS_ELITE", self._elite_signal())
-        assert phrase.startswith("Elite candidate")
+        assert phrase.startswith("High-quality executable")
 
-    def test_elite_phrase_mentions_five_dimensions(self):
+    def test_elite_phrase_uses_audit_safe_count(self):
+        # Phase 15C: "all five … institutional-grade" retired; only the
+        # audit-safe X/5 form may render.
         phrase = _build_quality_phrase("A_PLUS_ELITE", self._elite_signal())
-        assert "five" in phrase.lower()
+        assert "premium dimensions: 5/5" in phrase
+        assert "all five" not in phrase.lower()
+        assert "institutional" not in phrase.lower()
 
-    def test_candidate_phrase_starts_with_a_plus(self):
+    def test_candidate_phrase_starts_with_complete_sequence(self):
         phrase = _build_quality_phrase("A_PLUS_CANDIDATE", self._candidate_signal())
-        assert phrase.startswith("A+ candidate")
+        assert phrase.startswith("Complete sequence")
 
     def test_candidate_phrase_includes_dimension_count(self):
         """Phrase should contain the actual premium count."""
         phrase = _build_quality_phrase("A_PLUS_CANDIDATE", self._candidate_signal())
-        # 4 of 5 dimensions premium for this signal
-        assert "4 of 5" in phrase
+        # 4 of 5 dimensions premium for this signal — audit-safe X/5 form
+        assert "premium dimensions: 4/5" in phrase
 
     def test_candidate_phrase_contains_confirmed(self):
         phrase = _build_quality_phrase("A_PLUS_CANDIDATE", self._candidate_signal())
         assert "confirmed" in phrase
 
-    def test_starter_phrase_starts_with_clean_starter(self):
+    def test_starter_phrase_starts_with_confirmed_sequence(self):
         phrase = _build_quality_phrase("CLEAN_STARTER", self._starter_signal())
-        assert phrase.startswith("Clean starter")
+        assert phrase.startswith("Confirmed sequence")
 
     def test_starter_phrase_includes_premium_count(self):
         phrase = _build_quality_phrase("CLEAN_STARTER", self._starter_signal())
-        # fragile risk = 1 discount → 4 premium dims (freshness, seq, zone, path premium)
-        assert "of 5" in phrase
+        # fragile risk = 1 discount → 4 premium dims — audit-safe X/5 form
+        assert "premium dimensions: 4/5" in phrase
 
     def test_starter_phrase_contains_retest_and_hold(self):
         phrase = _build_quality_phrase("CLEAN_STARTER", self._starter_signal())
@@ -495,31 +505,36 @@ class TestBuildQualityPhrase:
 class TestFormatAlertPhase13_8BIntegration:
     """Elite label and dynamic phrases appear correctly in formatted alerts."""
 
-    def test_elite_phrase_in_snipe_it_alert(self):
-        """All-premium signal produces 'Elite candidate' in the ACTION section."""
-        result = format_alert(_tiering_result("SNIPE_IT"))  # rr=4.5 base → elite
-        assert "Elite candidate" in result
+    def test_high_quality_phrase_in_snipe_it_alert(self):
+        """All-premium signal produces the Phase 15C high-quality phrase."""
+        result = format_alert(_tiering_result("SNIPE_IT"))  # rr=4.5 base → elite label
+        assert "High-quality executable" in result
+        assert "Elite candidate" not in result
 
-    def test_elite_phrase_in_starter_alert(self):
+    def test_starter_alert_renders_tactical_phrase_not_elite(self):
+        # Phase 15C: STARTER may never carry the premium label.
         result = format_alert(_tiering_result("STARTER"))
-        assert "Elite candidate" in result
+        assert "Strong tactical setup" in result
+        assert "Elite candidate" not in result
+        assert "High-quality executable" not in result
 
     def test_candidate_phrase_when_one_dim_standard(self):
-        """One standard dimension drops to A+ candidate."""
+        """One standard dimension drops to the complete-sequence phrase."""
         result = format_alert(_tiering_result("SNIPE_IT", trend_state="mature_continuation"))
-        assert "A+ candidate" in result
+        assert "Complete sequence" in result
         assert "Elite candidate" not in result
+        assert "A+ candidate" not in result
 
     def test_candidate_phrase_contains_dimension_count(self):
         result = format_alert(_tiering_result("SNIPE_IT", trend_state="mature_continuation"))
-        # mature_continuation → standard → 4 premium
-        assert "4 of 5" in result
+        # mature_continuation → standard → 4 premium — audit-safe X/5 form
+        assert "premium dimensions: 4/5" in result
 
     def test_starter_phrase_when_one_discount(self):
         result = format_alert(
             _tiering_result("SNIPE_IT", risk_realism_state="fragile")
         )
-        assert "Clean starter" in result
+        assert "Confirmed sequence" in result
 
     def test_starter_phrase_not_elite(self):
         result = format_alert(
@@ -531,7 +546,7 @@ class TestFormatAlertPhase13_8BIntegration:
     def test_elite_phrase_in_action_section(self):
         result = format_alert(_tiering_result("SNIPE_IT"))
         action_pos = result.find("\nACTION\n")
-        elite_pos  = result.find("Elite candidate")
+        elite_pos  = result.find("High-quality executable")
         fresh_pos  = result.find("\nFRESHNESS\n")
         assert action_pos != -1
         assert elite_pos  != -1
@@ -544,7 +559,7 @@ class TestFormatAlertPhase13_8BIntegration:
 
     def test_elite_phrase_not_duplicated(self):
         result = format_alert(_tiering_result("SNIPE_IT"))
-        assert result.count("Elite candidate") == 1
+        assert result.count("High-quality executable") == 1
 
 
 # ===========================================================================
@@ -565,7 +580,7 @@ class TestAPlusEliteNoSideEffects:
 
     def test_elite_does_not_change_capital_action_snipe(self):
         result = format_alert(_tiering_result("SNIPE_IT"))
-        assert "FULL QUALITY" in result
+        assert "Execution-valid" in result        # Phase 15C sizing language
         assert "SNIPE_IT conditions met." in result
 
     def test_elite_does_not_change_capital_action_starter(self):
@@ -576,7 +591,7 @@ class TestAPlusEliteNoSideEffects:
         result = format_alert(
             _tiering_result("SNIPE_IT", trend_state="mature_continuation")
         )
-        assert "FULL QUALITY" in result
+        assert "Execution-valid" in result        # Phase 15C sizing language
 
     def test_elite_label_does_not_affect_tiering_result_dict(self):
         """The tiering_result dict is not mutated by quality evaluation."""
@@ -638,26 +653,32 @@ class TestDiscriminationGapFixed:
         label_b = _evaluate_setup_quality(self._setup_b(), "SNIPE_IT")
         assert label_a != label_b
 
-    def test_setup_a_phrase_says_elite(self):
-        phrase = _build_quality_phrase("A_PLUS_ELITE", self._setup_a())
-        assert "Elite" in phrase
+    def test_setup_a_phrase_says_high_quality(self):
+        # Phase 15C: premium phrase requires the explicit contract flag.
+        sig = self._setup_a()
+        sig["quality_label_allowed"] = True
+        phrase = _build_quality_phrase("A_PLUS_ELITE", sig)
+        assert "High-quality executable" in phrase
+        assert "Elite" not in phrase
 
-    def test_setup_b_phrase_says_clean_starter(self):
+    def test_setup_b_phrase_says_confirmed_sequence(self):
         phrase = _build_quality_phrase("CLEAN_STARTER", self._setup_b())
-        assert "Clean starter" in phrase
+        assert "Confirmed sequence" in phrase
 
-    def test_format_alert_setup_a_shows_elite(self):
+    def test_format_alert_setup_a_shows_high_quality(self):
         tr = _tiering_result("SNIPE_IT")
         tr["final_signal"].update(self._setup_a())
         result = format_alert(tr)
-        assert "Elite candidate" in result
+        assert "High-quality executable" in result
+        assert "Elite candidate" not in result
 
-    def test_format_alert_setup_b_shows_clean_starter(self):
+    def test_format_alert_setup_b_shows_confirmed_sequence(self):
         tr = _tiering_result("SNIPE_IT")
         tr["final_signal"].update(self._setup_b())
         result = format_alert(tr)
-        assert "Clean starter" in result
+        assert "Confirmed sequence" in result
         assert "Elite candidate" not in result
+        assert "High-quality executable" not in result
 
     def test_setup_b_dimensions_have_discounts(self):
         """Setup B has at least two discount dimensions."""

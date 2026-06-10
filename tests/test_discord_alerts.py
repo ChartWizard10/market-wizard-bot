@@ -2619,9 +2619,11 @@ def test_14f1_starter_still_says_starter_size_only():
     assert "STARTER SIZE ONLY" in text
 
 
-def test_14f1_snipe_it_still_says_full_quality_capital_authorized():
+def test_14f1_snipe_it_says_execution_valid_sizing():
+    # Phase 15C: "FULL QUALITY — capital authorized" prestige sizing retired.
     text = format_alert(_tiering_result())
-    assert "FULL QUALITY — capital authorized after live-chart verification." in text
+    assert "Execution-valid — completed proof chain present after live-chart verification." in text
+    assert "FULL QUALITY" not in text
 
 
 def test_14f1_wait_still_never_sendable():
@@ -2932,3 +2934,238 @@ def test_15b_conflict_does_not_make_wait_sendable():
     tr["final_discord_channel"] = "none"
     sendable, _reason = _sendable(tr, None)
     assert sendable is False
+
+
+# ===========================================================================
+# Phase 15C — Quality Label Inflation Control (renderer firewall + block)
+# ===========================================================================
+
+_15C_DIRTY_PROSE = (
+    "Elite candidate — all five quality dimensions institutional-grade. "
+    "A+ premium prime setup, full quality, capital authorized, "
+    "all conditions satisfied. Perfect guaranteed monster, can't miss, "
+    "obvious winner."
+)
+
+
+def _15c_validate(tier_signal_overrides=None, kf=None):
+    """Full validate() path so quality contract fields are real."""
+    from src.tiering import validate
+    signal = {
+        "ticker": "AAPL", "tier": "SNIPE_IT", "score": 90,
+        "setup_family": "continuation", "structure_event": "MSS",
+        "trend_state": "fresh_expansion", "sma_value_alignment": "supportive",
+        "zone_type": "FVG", "trigger_level": 182.50,
+        "retest_status": "confirmed", "hold_status": "confirmed",
+        "invalidation_condition": "Daily close below FVG base",
+        "invalidation_level": 178.20,
+        "targets": [{"label": "T1", "level": 195.00, "reason": "Prior swing high"}],
+        "risk_reward": 3.5, "overhead_status": "clear",
+        "forced_participation": "none", "missing_conditions": [],
+        "upgrade_trigger": "none",
+        "next_action": "Monitor live hold and expansion.",
+        "discord_channel": "#snipe-signals", "capital_action": "full_quality_allowed",
+        "reason": "Clean MSS with confirmed FVG retest and hold.",
+    }
+    signal.update(tier_signal_overrides or {})
+    cfg = {"tiers": {"snipe_it": {"min_score": 85, "min_rr": 3.0},
+                     "starter": {"min_score": 75, "min_rr": 3.0},
+                     "near_entry": {"min_score": 60}}}
+    return validate(signal, {"veto_flags": [], "key_features": dict(kf or {"current_price": 182.50})}, cfg)
+
+
+# 15C-A: NEAR_ENTRY can never render prestige words
+def test_15c_near_entry_blocks_all_prestige_words():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY", capital_action="wait_no_capital",
+        reason=_15C_DIRTY_PROSE, sanitized_reason=None,
+        missing_conditions=["retest_confirmed"], upgrade_trigger="Confirmed retest.",
+    )
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr).lower()
+    for word in ("elite", "institutional", "premium", "a+", "full quality",
+                 "capital authorized", "all conditions satisfied",
+                 "all five", "all 5", "perfect", "guaranteed", "monster",
+                 "can't miss", "obvious winner"):
+        assert word not in text, f"prestige word {word!r} leaked into NEAR_ENTRY alert"
+
+
+# 15C-B: STARTER can never render full-quality / all-5 / institutional language
+def test_15c_starter_blocks_inflation_words():
+    tr = _tiering_result(
+        tier="STARTER", capital_action="starter_only",
+        reason=_15C_DIRTY_PROSE + " Full-size allowed at full quality.",
+        sanitized_reason=None,
+    )
+    tr["capital_action"] = "starter_only"
+    tr["final_discord_channel"] = "#starter-signals"
+    text = format_alert(tr).lower()
+    for word in ("full quality", "institutional", "all 5", "all five",
+                 "all dimensions premium", "full-size allowed", "elite",
+                 "capital authorized"):
+        assert word not in text, f"inflation word {word!r} leaked into STARTER alert"
+    assert "starter size only" in text
+
+
+# 15C-C: clean SNIPE_IT via full validate path renders allowed quality language
+def test_15c_clean_snipe_it_renders_allowed_language():
+    res = _15c_validate()
+    assert res["final_tier"] == "SNIPE_IT"
+    assert res["final_signal"]["quality_label_allowed"] is True
+    text = format_alert(res)
+    assert "Execution-valid — completed proof chain present" in text
+    # Not over-sanitized: quality read present, no control block
+    assert "Quality read:" in text
+    assert "QUALITY LANGUAGE CONTROL" not in text
+    assert "FULL QUALITY" not in text
+
+
+# 15C-D/E/F: governor-capped setups cannot keep premium language
+def test_15c_15b_capped_alert_blocks_premium_language():
+    res = _15c_validate({"reason": _15C_DIRTY_PROSE}, kf={"current_price": 196.00})
+    assert res["final_tier"] == "NEAR_ENTRY"          # 15B cap (at target)
+    text = format_alert(res).lower()
+    for word in ("elite", "institutional", "premium", "full quality",
+                 "capital authorized"):
+        assert word not in text, f"{word!r} survived a governor cap"
+
+
+def test_15c_15a_capped_alert_blocks_premium_language():
+    res = _15c_validate(
+        {"reason": _15C_DIRTY_PROSE},
+        kf={"current_price": 182.50, "weekly_trend_state": "declining",
+            "weekly_sma_alignment": "supportive", "market_structure_state": "EXPANSION"},
+    )
+    assert res["final_tier"] == "NEAR_ENTRY"          # 15A hard veto cap
+    text = format_alert(res).lower()
+    assert "elite" not in text
+    assert "institutional" not in text
+    assert "premium" not in text
+
+
+def test_15c_14f_capped_alert_blocks_premium_language():
+    kf = {
+        "current_price": 182.50,
+        "four_hour_market_state": "TRANSITION", "four_hour_sma_alignment": "mixed",
+        "four_hour_reclaim_status": "below_value",
+        "four_hour_structure_note": "lower_high_pressure",
+        "four_hour_data_status": "current",
+        "one_hour_trigger_family": "none", "one_hour_state": "repair",
+        "one_hour_retest_quality": "weak", "one_hour_acceptance_state": "pending",
+        "one_hour_consequence_state": "neutral", "one_hour_no_chase_status": "acceptable",
+        "one_hour_data_status": "available",
+    }
+    res = _15c_validate({"reason": _15C_DIRTY_PROSE}, kf=kf)
+    assert res["final_tier"] == "NEAR_ENTRY"          # 14F cap (6 points)
+    text = format_alert(res).lower()
+    assert "elite" not in text
+    assert "institutional" not in text
+
+
+# 15C-G: "All 5 Dimensions Premium" never appears on any tier
+def test_15c_all_five_dimensions_premium_never_renders():
+    for tier, cap, chan in (("SNIPE_IT", "full_quality_allowed", "#snipe-signals"),
+                            ("STARTER", "starter_only", "#starter-signals"),
+                            ("NEAR_ENTRY", "wait_no_capital", "#near-entry-watch")):
+        tr = _tiering_result(
+            tier=tier, capital_action=cap,
+            reason="Elite — all 5 dimensions premium, all five quality dimensions institutional-grade.",
+            sanitized_reason=None,
+        )
+        tr["capital_action"] = cap
+        tr["final_discord_channel"] = chan
+        text = format_alert(tr).lower()
+        assert "all 5 dimensions premium" not in text, tier
+        assert "all five quality dimensions" not in text, tier
+        assert "institutional-grade" not in text, tier
+
+
+# 15C-H: dimension count renders only in the audit-safe X/5 form
+def test_15c_count_renders_only_as_audit_safe_form():
+    res = _15c_validate()
+    text = format_alert(res)
+    assert "premium dimensions:" in text          # allowed SNIPE_IT shows count
+    import re as _re
+    m = _re.search(r"premium dimensions:\s*([0-5]/5)", text)
+    assert m, "count must render as X/5"
+    assert "of 5 dimensions premium" not in text  # legacy form retired
+
+
+# 15C-I: rendering does not mutate final_signal
+def test_15c_rendering_does_not_mutate_final_signal():
+    import copy
+    res = _15c_validate()
+    before = copy.deepcopy(res["final_signal"])
+    _ = format_alert(res)
+    assert res["final_signal"] == before
+
+
+# 15C-J: make_dedup_key output unchanged before/after rendering
+def test_15c_dedup_key_unchanged_by_rendering():
+    from src.state_store import make_dedup_key
+    res = _15c_validate()
+    sig = res["final_signal"]
+    key_before = make_dedup_key("AAPL", res["final_tier"],
+                                sig["trigger_level"], sig["invalidation_level"])
+    _ = format_alert(res)
+    key_after = make_dedup_key("AAPL", res["final_tier"],
+                               sig["trigger_level"], sig["invalidation_level"])
+    assert key_before == key_after
+
+
+# 15C: QUALITY LANGUAGE CONTROL block renders only when denied
+def test_15c_control_block_renders_when_denied():
+    res = _15c_validate({"tier": "STARTER", "score": 78})
+    assert res["final_tier"] == "STARTER"
+    assert res["final_signal"]["quality_label_denied"] is True
+    text = format_alert(res)
+    assert "QUALITY LANGUAGE CONTROL" in text
+    assert "Restricted label denied." in text
+    assert "Permitted language:" in text
+    assert "Starter-valid" in text
+
+
+def test_15c_control_block_absent_when_allowed_or_legacy():
+    # Allowed (clean SNIPE via validate)
+    text = format_alert(_15c_validate())
+    assert "QUALITY LANGUAGE CONTROL" not in text
+    # Legacy record (fields absent entirely)
+    text = format_alert(_tiering_result())
+    assert "QUALITY LANGUAGE CONTROL" not in text
+
+
+# 15C: governor-capped NEAR_ENTRY still passes the NE language firewall
+def test_15c_capped_near_entry_passes_ne_firewall():
+    res = _15c_validate(
+        {"reason": _15C_DIRTY_PROSE,
+         "next_action": "Enter at current price with stop below 178.20"},
+        kf={"current_price": 196.00},
+    )
+    assert res["final_tier"] == "NEAR_ENTRY"
+    text = format_alert(res)
+    _assert_no_forbidden_ne_language(text)
+    assert "QUALITY LANGUAGE CONTROL" in text
+    assert "Watch-only valid" in text
+
+
+# 15C-N: no forbidden indicators in the guard source
+def test_15c_no_forbidden_indicators_in_guard():
+    import inspect
+    import re as _re
+    from src.discord_alerts import _apply_quality_language_guard
+    src = inspect.getsource(_apply_quality_language_guard).lower()
+    for word in ("rsi", "macd", "bollinger", "stochastic"):
+        assert not _re.search(rf"\b{word}\b", src)
+
+
+# 15C-O: untouched modules never reference quality label fields
+def test_15c_untouched_modules_have_no_quality_fields():
+    import inspect
+    from src import prefilter, claude_client, campaign_store, score_calibration
+    from src import outcome_tracker, market_data, indicators
+    for mod in (prefilter, claude_client, campaign_store, score_calibration,
+                outcome_tracker, market_data, indicators):
+        src = inspect.getsource(mod)
+        assert "quality_label" not in src, mod.__name__
+        assert "premium_dimension_count" not in src, mod.__name__

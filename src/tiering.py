@@ -1901,6 +1901,223 @@ def _apply_daily_execution_reality_governor(
 
 
 # ---------------------------------------------------------------------------
+# Phase 15C — Quality Label Contract (language governor, audit-only)
+# ---------------------------------------------------------------------------
+# Doctrine: verdict before prestige; evidence before adjective; weakest
+# critical reading wins; capital permission controls language permission.
+# These fields govern PUBLIC LANGUAGE only. They never change tier, score,
+# capital_action, discord_channel, routing, dedup, or campaign identity.
+# The renderer consumes them to decide whether premium quality adjectives
+# may appear; tiering remains the sole tier authority.
+
+_QUALITY_RR_PREMIUM_FLOOR = 3.0
+
+
+def _grade_quality_dimensions(final_signal: dict) -> tuple[int, dict[str, str]]:
+    """Grade five conservative quality dimensions from existing fields only.
+
+    Dimensions: A) HTF/daily permission, B) daily structure, C) location/value,
+    D) trigger/execution, E) risk/path/freshness. Each grades PREMIUM,
+    ACCEPTABLE, COMPROMISED, INVALID, or UNKNOWN. Returns (n_premium, grades).
+    Absent fields grade UNKNOWN — never PREMIUM and never punished further.
+    """
+    def _norm(field: str) -> str:
+        return str(final_signal.get(field) or "").lower().strip()
+
+    grades: dict[str, str] = {}
+
+    # ---- A) HTF / Daily Permission ----
+    wts = _norm("weekly_trend_state")
+    wsa = _norm("weekly_sma_alignment")
+    if final_signal.get("daily_authority_conflict") or wts in ("distributing", "declining") or wsa == "hostile":
+        grades["htf_daily_permission"] = "COMPROMISED"
+    elif wts == "advancing" and wsa == "supportive":
+        grades["htf_daily_permission"] = "PREMIUM"
+    elif not wts and not wsa:
+        grades["htf_daily_permission"] = "UNKNOWN"
+    else:
+        grades["htf_daily_permission"] = "ACCEPTABLE"
+
+    # ---- B) Daily Structure ----
+    mss = _norm("market_structure_state")
+    sev = _norm("structure_event")
+    if sev in ("", "none"):
+        grades["daily_structure"] = "INVALID"
+    elif mss in ("repair", "transition", "failure"):
+        grades["daily_structure"] = "COMPROMISED"
+    elif mss in ("expansion", "orderly_continuation"):
+        grades["daily_structure"] = "PREMIUM"
+    elif not mss or mss == "unknown":
+        grades["daily_structure"] = "UNKNOWN"
+    else:                                       # compression, anything else
+        grades["daily_structure"] = "ACCEPTABLE"
+
+    # ---- C) Location / Value ----
+    sva = _norm("sma_value_alignment")
+    ovh = _norm("overhead_status")
+    if sva == "hostile" or ovh == "blocked":
+        grades["location_value"] = "COMPROMISED"
+    elif sva == "supportive" and ovh == "clear":
+        grades["location_value"] = "PREMIUM"
+    elif sva in ("", "unavailable") and ovh in ("", "unknown"):
+        grades["location_value"] = "UNKNOWN"
+    else:
+        grades["location_value"] = "ACCEPTABLE"
+
+    # ---- D) Trigger / Execution ----
+    retest = _norm("retest_status")
+    hold = _norm("hold_status")
+    acceptance = _norm("entry_acceptance")
+    if retest == "failed" or hold == "failed" or acceptance == "invalidated":
+        grades["trigger_execution"] = "INVALID"
+    elif (
+        final_signal.get("active_auction_conflict")
+        or final_signal.get("daily_execution_reality_conflict")
+        or acceptance == "damaging"
+        or retest in ("missing", "partial")
+    ):
+        grades["trigger_execution"] = "COMPROMISED"
+    elif retest == "confirmed" and hold == "confirmed" and acceptance == "accepted":
+        grades["trigger_execution"] = "PREMIUM"
+    elif retest == "confirmed" and hold == "confirmed":
+        grades["trigger_execution"] = "ACCEPTABLE"   # acceptance unknown/unproven
+    else:
+        grades["trigger_execution"] = "UNKNOWN"
+
+    # ---- E) Risk / Path / Freshness ----
+    risk_state = _norm("risk_realism_state")
+    drift = _norm("drift_status")
+    rr = final_signal.get("risk_reward")
+    try:
+        rr_f = float(rr) if rr is not None else None
+    except (TypeError, ValueError):
+        rr_f = None
+    if risk_state in ("invalid",) or drift == "stale":
+        grades["risk_path_freshness"] = "INVALID"
+    elif risk_state == "fragile":
+        grades["risk_path_freshness"] = "COMPROMISED"
+    elif risk_state == "healthy" and rr_f is not None and rr_f >= _QUALITY_RR_PREMIUM_FLOOR:
+        grades["risk_path_freshness"] = "PREMIUM"
+    elif risk_state in ("", "unknown") and rr_f is None:
+        grades["risk_path_freshness"] = "UNKNOWN"
+    else:
+        grades["risk_path_freshness"] = "ACCEPTABLE"
+
+    n_premium = sum(1 for g in grades.values() if g == "PREMIUM")
+    return n_premium, grades
+
+
+def _build_quality_label_contract(
+    final_tier: str,
+    final_signal: dict,
+    applied_vetoes: list,
+    downgrades: list,
+) -> dict:
+    """Build the Phase 15C quality label contract for final_signal.
+
+    Returns a dict with quality_label_allowed, quality_label_denied,
+    quality_label_risk (LOW|MODERATE|HIGH|CRITICAL), premium_dimension_count
+    ("X/5"), quality_language_cap_reasons, and permitted_quality_language.
+    Audit/display-only — the caller writes these to final_signal and nothing
+    on the decision path ever reads them back.
+    """
+    n_premium, _grades = _grade_quality_dimensions(final_signal)
+    reasons: list[str] = []
+
+    def _norm(field: str) -> str:
+        return str(final_signal.get(field) or "").lower().strip()
+
+    governor_conflict = bool(
+        final_signal.get("active_auction_conflict")
+        or final_signal.get("daily_authority_conflict")
+        or final_signal.get("daily_execution_reality_conflict")
+    )
+    acceptance = _norm("entry_acceptance")
+
+    if final_tier == "SNIPE_IT":
+        if downgrades:
+            reasons.append("tier was downgraded during validation")
+        if applied_vetoes:
+            reasons.append(f"active vetoes: {', '.join(str(v) for v in applied_vetoes[:3])}")
+        if governor_conflict:
+            reasons.append("an active governor cap is present")
+        if _norm("retest_status") != "confirmed":
+            reasons.append("retest not confirmed")
+        if _norm("hold_status") != "confirmed":
+            reasons.append("hold not confirmed")
+        if final_signal.get("invalidation_level") is None:
+            reasons.append("invalidation level missing")
+        rr = final_signal.get("risk_reward")
+        try:
+            rr_ok = rr is not None and float(rr) >= _QUALITY_RR_PREMIUM_FLOOR
+        except (TypeError, ValueError):
+            rr_ok = False
+        if not rr_ok:
+            reasons.append("risk:reward not proven at premium floor")
+        if _norm("drift_status") == "stale":
+            reasons.append("freshness is stale")
+        if _norm("overhead_status") == "blocked":
+            reasons.append("overhead is blocking")
+        if acceptance in ("damaging", "invalidated", "unproven"):
+            reasons.append(f"entry acceptance is {acceptance}")
+        allowed = not reasons
+    elif final_tier == "STARTER":
+        reasons.append(
+            "final tier is STARTER; full-quality language requires SNIPE_IT "
+            "with no active caps"
+        )
+        allowed = False
+    elif final_tier == "NEAR_ENTRY":
+        reasons.append(
+            "final tier is NEAR_ENTRY; watch-only language only"
+        )
+        allowed = False
+    else:                                       # WAIT
+        reasons.append("final tier is WAIT; no public language")
+        allowed = False
+
+    # Risk: weakest critical reading wins.
+    if (
+        final_tier in ("NEAR_ENTRY", "WAIT")
+        or governor_conflict
+        or acceptance in ("damaging", "invalidated")
+    ):
+        risk = "CRITICAL"
+    elif final_tier == "STARTER" or downgrades:
+        risk = "HIGH"
+    elif not allowed:
+        risk = "MODERATE"
+    else:
+        risk = "LOW"
+
+    if allowed:
+        permitted = "High-quality executable; no active quality caps."
+    elif final_tier == "SNIPE_IT":
+        permitted = (
+            "Execution-valid — completed proof chain present; "
+            "restricted label withheld."
+        )
+    elif final_tier == "STARTER":
+        permitted = (
+            "Starter-valid tactical setup; full authorization requires "
+            "upgrade proof."
+        )
+    elif final_tier == "NEAR_ENTRY":
+        permitted = "Watch-only valid — structure exists, but proof is incomplete."
+    else:
+        permitted = "No public language."
+
+    return {
+        "quality_label_allowed": allowed,
+        "quality_label_denied": not allowed,
+        "quality_label_risk": risk,
+        "premium_dimension_count": f"{n_premium}/5",
+        "quality_language_cap_reasons": reasons,
+        "permitted_quality_language": permitted,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -2184,6 +2401,19 @@ def validate(
     final_signal["current_price_to_invalidation_pct"] = _rr_fields["current_price_to_invalidation_pct"]
     final_signal["risk_realism_state"] = _rr_state
     final_signal["risk_realism_note"] = _rr_note
+
+    # Phase 15C: Quality Label Contract — language governance only. Computed
+    # last so the ledger sees every governor verdict, entry acceptance, risk
+    # realism, and freshness field. Never read by any decision-path function.
+    _qlc = _build_quality_label_contract(
+        final_tier, final_signal, applied_vetoes, downgrades
+    )
+    final_signal["quality_label_allowed"] = _qlc["quality_label_allowed"]
+    final_signal["quality_label_denied"] = _qlc["quality_label_denied"]
+    final_signal["quality_label_risk"] = _qlc["quality_label_risk"]
+    final_signal["premium_dimension_count"] = _qlc["premium_dimension_count"]
+    final_signal["quality_language_cap_reasons"] = _qlc["quality_language_cap_reasons"]
+    final_signal["permitted_quality_language"] = _qlc["permitted_quality_language"]
 
     safe_for_alert = final_tier != "WAIT"
 
