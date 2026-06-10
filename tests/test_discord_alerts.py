@@ -2799,3 +2799,136 @@ def test_15a_both_governors_show_both_blocks():
     text = format_alert(tr)
     assert "ACTIVE AUCTION CONFLICT" in text
     assert "DAILY AUTHORITY CONFLICT" in text
+
+
+# ===========================================================================
+# Phase 15B — Daily Execution Reality display block
+# ===========================================================================
+
+_15B_NOTE = (
+    "Capital reduced/withheld. Trend and structure may be constructive, "
+    "but the daily execution state is not clean enough for full "
+    "authorization."
+)
+
+
+def _15b_starter_capped_result(**extra) -> dict:
+    """SNIPE_IT capped to STARTER by the Daily Execution Reality Governor."""
+    tr = _tiering_result(
+        tier="STARTER",
+        capital_action="starter_only",
+        daily_execution_reality_conflict=True,
+        daily_execution_reality_points=3,
+        daily_execution_reality_reasons=["extended_from_trigger=5.2% (+3)"],
+        daily_execution_reality_note=_15B_NOTE,
+        **extra,
+    )
+    tr["capital_action"] = "starter_only"
+    tr["final_discord_channel"] = "#starter-signals"
+    return tr
+
+
+# 15B-D1: conflict renders the DAILY EXECUTION REALITY block with reasons
+def test_15b_renders_execution_reality_block():
+    text = format_alert(_15b_starter_capped_result())
+    assert "DAILY EXECUTION REALITY" in text
+    assert "not clean enough for full authorization" in text
+    assert "Reasons:" in text
+    assert "extended_from_trigger=5.2%" in text
+
+
+# 15B-D2: no conflict → block absent
+def test_15b_no_conflict_no_block():
+    tr = _tiering_result(
+        daily_execution_reality_conflict=False,
+        daily_execution_reality_points=0,
+        daily_execution_reality_reasons=[],
+        daily_execution_reality_note=None,
+    )
+    text = format_alert(tr)
+    assert "DAILY EXECUTION REALITY" not in text
+
+
+# 15B-D3: fields absent entirely → block absent
+def test_15b_absent_fields_no_block():
+    text = format_alert(_tiering_result())
+    assert "DAILY EXECUTION REALITY" not in text
+
+
+# 15B-D4: capped STARTER keeps STARTER SIZE ONLY language, no full-quality leak
+def test_15b_capped_starter_keeps_starter_language():
+    text = format_alert(_15b_starter_capped_result())
+    assert "STARTER SIZE ONLY" in text
+    assert "FULL QUALITY" not in text
+    assert "capital authorized after live-chart verification" not in text
+
+
+# 15B-D5: governor-capped NEAR_ENTRY through the full validate() path renders
+# watch-only with no forbidden execution phrases (firewall passthrough)
+def test_15b_governor_capped_near_entry_renders_watch_only():
+    from src.tiering import validate
+    signal = {
+        "ticker": "AAPL", "tier": "SNIPE_IT", "score": 90,
+        "setup_family": "continuation", "structure_event": "MSS",
+        "trend_state": "fresh_expansion", "sma_value_alignment": "supportive",
+        "zone_type": "FVG", "trigger_level": 182.50,
+        "retest_status": "confirmed", "hold_status": "confirmed",
+        "invalidation_condition": "Daily close below FVG base",
+        "invalidation_level": 178.20,
+        "targets": [{"label": "T1", "level": 195.00, "reason": "Prior swing high"}],
+        "risk_reward": 3.5, "overhead_status": "clear",
+        "forced_participation": "none", "missing_conditions": [],
+        "upgrade_trigger": "none",
+        "next_action": "Enter at current price with stop below 178.20",
+        "discord_channel": "#snipe-signals", "capital_action": "full_quality_allowed",
+        "reason": "Clean MSS with confirmed FVG retest and hold.",
+    }
+    # Price already at/beyond T1 — 15B caps SNIPE_IT → NEAR_ENTRY (+5)
+    kf = {"current_price": 196.00}
+    cfg = {"tiers": {"snipe_it": {"min_score": 85, "min_rr": 3.0},
+                     "starter": {"min_score": 75, "min_rr": 3.0},
+                     "near_entry": {"min_score": 60}}}
+    res = validate(signal, {"veto_flags": [], "key_features": kf}, cfg)
+    assert res["final_tier"] == "NEAR_ENTRY"
+    text = format_alert(res)
+    _assert_no_forbidden_ne_language(text)
+    assert "DAILY EXECUTION REALITY" in text
+
+
+# 15B-D6: all three governor blocks can coexist on one alert
+def test_15b_all_three_governor_blocks_coexist():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        capital_action="wait_no_capital",
+        active_auction_conflict=True,
+        active_auction_conflict_points=6,
+        active_auction_conflict_reasons=["one_hour_acceptance_state=pending (+1)"],
+        active_auction_conflict_note=_14F_NEAR_ENTRY_NOTE,
+        daily_authority_conflict=True,
+        daily_authority_points=5,
+        daily_authority_reasons=["weekly_trend_state=declining (+5)"],
+        daily_authority_note=_15A_NE_NOTE,
+        daily_permission_cap="STARTER→NEAR_ENTRY",
+        daily_execution_reality_conflict=True,
+        daily_execution_reality_points=5,
+        daily_execution_reality_reasons=["price_at_or_beyond_t1 (+5)"],
+        daily_execution_reality_note=_15B_NOTE,
+    )
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "ACTIVE AUCTION CONFLICT" in text
+    assert "DAILY AUTHORITY CONFLICT" in text
+    assert "DAILY EXECUTION REALITY" in text
+
+
+# 15B-D7: WAIT with conflict fields is still never sendable
+def test_15b_conflict_does_not_make_wait_sendable():
+    tr = _tiering_result(
+        tier="WAIT", safe=False,
+        daily_execution_reality_conflict=True,
+        daily_execution_reality_note=_15B_NOTE,
+    )
+    tr["final_discord_channel"] = "none"
+    sendable, _reason = _sendable(tr, None)
+    assert sendable is False

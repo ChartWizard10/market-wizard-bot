@@ -1556,3 +1556,69 @@ def test_record_alert_daily_authority_note_not_persisted():
     assert "daily_permission_cap" not in rec, (
         "daily_permission_cap is display-only and must not be persisted"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 15B — Daily Execution Reality Governor audit record in alert_history
+# ---------------------------------------------------------------------------
+
+_15B_HISTORY_FIELDS = (
+    "daily_execution_reality_conflict",
+    "daily_execution_reality_points",
+    "daily_execution_reality_reasons",
+)
+
+
+def test_record_alert_stores_daily_execution_reality_fields():
+    tr = _tiering(
+        final_tier="STARTER",
+        channel="#starter-signals",
+        daily_execution_reality_conflict=True,
+        daily_execution_reality_points=3,
+        daily_execution_reality_reasons=["extended_from_trigger=5.2% (+3)"],
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["daily_execution_reality_conflict"] is True
+    assert rec["daily_execution_reality_points"] == 3
+    assert rec["daily_execution_reality_reasons"] == ["extended_from_trigger=5.2% (+3)"]
+
+
+def test_record_alert_daily_execution_reality_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    for field in _15B_HISTORY_FIELDS:
+        assert field in rec, f"15B field missing from history record: {field!r}"
+        assert rec[field] is None
+
+
+def test_record_alert_daily_execution_reality_note_not_persisted():
+    tr = _tiering(
+        daily_execution_reality_conflict=True,
+        daily_execution_reality_points=5,
+        daily_execution_reality_reasons=["price_at_or_beyond_t1 (+5)"],
+        daily_execution_reality_note="Capital reduced/withheld.",
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert "daily_execution_reality_note" not in rec, (
+        "daily_execution_reality_note is display-only and must not be persisted"
+    )
+
+
+def test_record_alert_daily_execution_reality_does_not_affect_dedup_key():
+    tr_plain = _tiering(trigger=182.50, invalidation=178.20)
+    tr_conflict = _tiering(
+        trigger=182.50, invalidation=178.20,
+        daily_execution_reality_conflict=True,
+        daily_execution_reality_points=5,
+        daily_execution_reality_reasons=["price_at_or_beyond_t1 (+5)"],
+    )
+    s1 = record_alert("AAPL", tr_plain, _empty(), _cfg())
+    s2 = record_alert("AAPL", tr_conflict, _empty(), _cfg())
+    rec1 = s1["tickers"]["AAPL"]["alert_history"][0]
+    rec2 = s2["tickers"]["AAPL"]["alert_history"][0]
+    assert rec1["dedup_key"] == rec2["dedup_key"], (
+        "daily_execution_reality audit fields must not influence the dedup_key"
+    )

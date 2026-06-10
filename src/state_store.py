@@ -414,6 +414,12 @@ def record_alert(
         "daily_authority_points":   final_signal.get("daily_authority_points"),
         "daily_authority_reasons":  final_signal.get("daily_authority_reasons"),
 
+        # ---- Phase 15B: Daily Execution Reality Governor audit record ----
+        # daily_execution_reality_note is display-only and is not persisted.
+        "daily_execution_reality_conflict": final_signal.get("daily_execution_reality_conflict"),
+        "daily_execution_reality_points":   final_signal.get("daily_execution_reality_points"),
+        "daily_execution_reality_reasons":  final_signal.get("daily_execution_reality_reasons"),
+
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),
         "trend_state":                       final_signal.get("trend_state"),

@@ -3964,3 +3964,319 @@ def test_15a_no_forbidden_indicators_in_governor():
             assert not _re.search(rf"\b{word}\b", src), (
                 f"forbidden indicator {word!r} in {fn.__name__}"
             )
+
+
+# ===========================================================================
+# Phase 15B — Daily Execution Reality Governor
+# ===========================================================================
+# Doctrine: trend authorises interest, structure authorises attention, auction
+# authorises timing — but DAILY EXECUTION must authorise capital quality.
+# Acts on SNIPE_IT and STARTER only, after 14F and 15A. Cap-only:
+# SNIPE_IT 3-4→STARTER, 5+→NEAR_ENTRY; STARTER 5+→NEAR_ENTRY.
+#
+# The base _snipe_signal: trigger=182.50, T1=195.00, invalidation=178.20,
+# retest/hold confirmed, R:R 3.5, overhead clear. With kf current_price equal
+# to the trigger, entry_acceptance classifies "accepted" and extension is 0%.
+
+from src.tiering import (
+    _detect_daily_execution_reality_conflict,
+    _apply_daily_execution_reality_governor,
+)
+
+
+# 15B-1: clean SNIPE_IT at the trigger remains SNIPE_IT
+def test_15b_clean_snipe_it_remains_snipe_it():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["capital_action"] == "full_quality_allowed"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is False
+    assert fs["daily_execution_reality_points"] == 0
+    assert fs["daily_execution_reality_note"] is None
+    assert "daily_execution_reality_conflict" not in result["applied_vetoes"]
+    assert not any("daily_execution_reality" in d for d in result["downgrades"])
+
+
+# 15B-2: mild extension (2-5% above trigger = +1) does not cap
+def test_15b_mild_extension_does_not_cap():
+    # 187.00 vs 182.50 trigger = +2.47% — mild
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 187.00}), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is False
+    assert fs["daily_execution_reality_points"] == 1
+    assert any("mildly_extended" in r for r in fs["daily_execution_reality_reasons"])
+
+
+# 15B-3: moderate extension (>=5% above trigger = +3) caps SNIPE_IT → STARTER
+def test_15b_moderate_extension_caps_snipe_to_starter():
+    # 192.00 vs 182.50 trigger = +5.21% — material extension, entry not clean
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 192.00}), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["capital_action"] == "starter_only"
+    assert result["final_discord_channel"] == "#starter-signals"
+    assert result["safe_for_alert"] is True
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is True
+    assert fs["daily_execution_reality_points"] == 3
+    assert any("extended_from_trigger" in r for r in fs["daily_execution_reality_reasons"])
+    assert fs["daily_execution_reality_note"]
+
+
+# 15B-4: price at/beyond T1 (+5) caps SNIPE_IT → NEAR_ENTRY
+def test_15b_price_at_target_caps_snipe_to_near_entry():
+    # 196.00 >= T1 195.00 — the move already happened; no clean swing entry left
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 196.00}), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == CAPITAL_MAP["NEAR_ENTRY"]
+    assert result["safe_for_alert"] is True
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is True
+    assert fs["daily_execution_reality_points"] == 5
+    assert any("price_at_or_beyond_t1" in r for r in fs["daily_execution_reality_reasons"])
+
+
+# 15B-5a: detector — missing/partial retest scores +3 (defensive branch; the
+# SNIPE/STARTER gates already require confirmed retest, so through validate()
+# this matters only if gate requirements ever loosen)
+def test_15b_detector_missing_retest_scores_3():
+    for status in ("missing", "partial"):
+        sig = _snipe_signal(retest_status=status)
+        points, reasons = _detect_daily_execution_reality_conflict(sig)
+        assert points == 3
+        assert any(f"retest_status={status}" in r for r in reasons)
+
+
+# 15B-5b: confirmed retest with only marginal BRT quality (+1) combined with
+# material extension (+3) caps SNIPE_IT → STARTER through validate()
+def test_15b_marginal_retest_quality_plus_extension_caps_to_starter():
+    kf = {"current_price": 192.00, "retest_quality": "unclear"}
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is True
+    assert fs["daily_execution_reality_points"] == 4
+    assert any("retest_quality=unclear" in r for r in fs["daily_execution_reality_reasons"])
+
+
+# 15B-6: detector — failed retest or failed hold scores +5 (defensive branch)
+def test_15b_detector_failed_retest_or_hold_scores_5():
+    for overrides in ({"retest_status": "failed"}, {"hold_status": "failed"}):
+        sig = _snipe_signal(**overrides)
+        points, reasons = _detect_daily_execution_reality_conflict(sig)
+        assert points == 5
+        assert any("failed (+5)" in r for r in reasons)
+
+
+# 15B-7a: fake R:R — ceiling below T1 with high displayed R:R (+5) → NEAR_ENTRY
+def test_15b_fake_rr_reward_blocked_caps_to_near_entry():
+    kf = {
+        "current_price": 182.50,
+        "overhead_status": "moderate",   # Phase 0A overrides into working_signal
+        "overhead_level": 190.00,        # ceiling sits below T1 at 195.00
+    }
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)  # rr=3.5
+    assert result["final_tier"] == "NEAR_ENTRY"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is True
+    assert fs["daily_execution_reality_points"] == 5
+    assert any("reward_blocked_before_t1" in r for r in fs["daily_execution_reality_reasons"])
+
+
+# 15B-7b: ceiling below T1 without high displayed R:R (+3) → STARTER
+def test_15b_overhead_before_t1_without_high_rr_caps_to_starter():
+    kf = {
+        "current_price": 182.50,
+        "overhead_status": "moderate",
+        "overhead_level": 190.00,
+    }
+    result = validate(
+        _snipe_signal(risk_reward=None), _pf_sovereign(kf), _BASE_CONFIG
+    )
+    assert result["final_tier"] == "STARTER"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is True
+    assert fs["daily_execution_reality_points"] == 3
+    assert any("overhead_before_t1" in r for r in fs["daily_execution_reality_reasons"])
+
+
+# 15B-7c: minor path friction (+1, moderate overhead near but not below T1)
+def test_15b_minor_overhead_friction_does_not_cap():
+    kf = {
+        "current_price": 182.50,
+        "overhead_status": "moderate",
+        "overhead_level": 200.00,         # above T1 — path to T1 is clear
+        "overhead_distance_pct": 4.0,     # but close enough for friction
+    }
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is False
+    assert fs["daily_execution_reality_points"] == 1
+    assert any("overhead_path_friction" in r for r in fs["daily_execution_reality_reasons"])
+
+
+# 15B-8: dryup volume on a confirmed retest adds +1 but never caps alone
+def test_15b_dryup_volume_adds_point_but_does_not_overcap():
+    kf = {"current_price": 182.50, "volume_behavior": "dryup"}
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is False
+    assert fs["daily_execution_reality_points"] == 1
+    assert any("volume_dryup_on_retest" in r for r in fs["daily_execution_reality_reasons"])
+
+
+# 15B-8b: detector — dryup on a breakout claim without confirmed hold scores +2
+def test_15b_detector_dryup_breakout_without_hold_scores():
+    sig = _snipe_signal(
+        structure_event="BOS", hold_status="partial", volume_behavior="dryup"
+    )
+    points, reasons = _detect_daily_execution_reality_conflict(sig)
+    # hold=partial also makes retest section score 0 (retest still confirmed)
+    assert any("volume_dryup_on_breakout_claim_without_hold" in r for r in reasons)
+
+
+# 15B-9a: STARTER is not capped at 3-4 points
+def test_15b_starter_not_capped_below_5_points():
+    # material extension = +3 only
+    result = validate(_starter_signal(), _pf_sovereign({"current_price": 192.00}), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is False
+    assert fs["daily_execution_reality_points"] == 3
+
+
+# 15B-9b: STARTER at 5+ points caps to NEAR_ENTRY
+def test_15b_starter_capped_to_near_entry_at_5_points():
+    # price at/beyond T1 = +5
+    result = validate(_starter_signal(), _pf_sovereign({"current_price": 196.00}), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == CAPITAL_MAP["NEAR_ENTRY"]
+    assert result["safe_for_alert"] is True
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is True
+    assert fs["daily_execution_reality_points"] == 5
+
+
+# 15B-10: NEAR_ENTRY input is never touched
+def test_15b_near_entry_untouched():
+    result = validate(_near_entry_signal(), _pf_sovereign({"current_price": 196.00}), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is False
+    assert fs["daily_execution_reality_points"] == 0
+
+
+# 15B-11: WAIT remains WAIT and never posts
+def test_15b_wait_remains_wait_never_posts():
+    result = validate(_wait_signal(), _pf_sovereign({"current_price": 196.00}), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["safe_for_alert"] is False
+    assert result["final_discord_channel"] == "none"
+    assert result["capital_action"] == "no_trade"
+    assert result["final_signal"]["daily_execution_reality_conflict"] is False
+
+
+# 15B-12: governor never upgrades — direct call on every tier with zero points
+def test_15b_governor_never_upgrades():
+    clean = _snipe_signal()
+    for tier in TIERS:
+        new_tier, audit = _apply_daily_execution_reality_governor(
+            tier, clean, 182.50, "accepted", {}
+        )
+        assert new_tier == tier
+        assert audit["daily_execution_reality_conflict"] is False
+
+
+# 15B-13: audit fields always exist on final_signal (fired and inert paths)
+def test_15b_audit_fields_always_on_final_signal():
+    for kf in ({"current_price": 182.50}, {"current_price": 196.00}, {}):
+        result = validate(_snipe_signal(), _pf_sovereign(dict(kf)), _BASE_CONFIG)
+        fs = result["final_signal"]
+        assert isinstance(fs["daily_execution_reality_conflict"], bool)
+        assert isinstance(fs["daily_execution_reality_points"], int)
+        assert isinstance(fs["daily_execution_reality_reasons"], list)
+        assert "daily_execution_reality_note" in fs
+
+
+# 15B-14: default-safe — no current price, no kf fields scores zero
+def test_15b_default_safe_no_data():
+    # No current_price → extension unscored and acceptance "unknown" (never punishes)
+    result = validate(_snipe_signal(), _pf_sovereign({}), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    fs = result["final_signal"]
+    assert fs["daily_execution_reality_conflict"] is False
+    assert fs["daily_execution_reality_points"] == 0
+
+
+# 15B-15: detector — acceptance damaging/invalidated scores +5, unproven +3,
+# unknown/accepted score zero
+def test_15b_detector_acceptance_scoring():
+    sig = _snipe_signal()
+    for acc, expected in (
+        ("damaging", 5), ("invalidated", 5), ("unproven", 3),
+        ("accepted", 0), ("unknown", 0), (None, 0),
+    ):
+        points, _ = _detect_daily_execution_reality_conflict(sig, None, acc)
+        assert points == expected, f"acceptance={acc!r}: {points} != {expected}"
+
+
+# 15B-16: governor runs after 15A — a 15A STARTER cap cascades to NEAR_ENTRY
+# when execution reality independently scores 5+
+def test_15b_cascades_after_15a_cap():
+    kf = {
+        "current_price": 196.00,                 # 15B: at/beyond T1 = +5
+        "weekly_trend_state": "distributing",    # 15A: +3 → SNIPE_IT→STARTER
+        "weekly_sma_alignment": "supportive",
+        "market_structure_state": "EXPANSION",
+    }
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is True          # 15A fired (→STARTER)
+    assert fs["daily_execution_reality_conflict"] is True  # 15B fired (→NEAR_ENTRY)
+
+
+# 15B-17: audit trail — veto label and downgrade reason recorded
+def test_15b_audit_trail_recorded():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 196.00}), _BASE_CONFIG)
+    assert "daily_execution_reality_conflict" in result["applied_vetoes"]
+    assert any("daily_execution_reality_conflict" in d for d in result["downgrades"])
+    assert any("SNIPE_IT→NEAR_ENTRY" in d for d in result["downgrades"])
+
+
+# 15B-18: decision-path modules untouched — campaign_store, claude_client,
+# score_calibration, outcome_tracker, prefilter never read 15B fields
+def test_15b_other_modules_untouched():
+    import inspect
+    from src import campaign_store, claude_client, score_calibration, outcome_tracker, prefilter
+    for mod in (campaign_store, claude_client, score_calibration, outcome_tracker, prefilter):
+        src = inspect.getsource(mod)
+        assert "daily_execution_reality" not in src, (
+            f"{mod.__name__} must not reference daily_execution_reality fields"
+        )
+
+
+# 15B-19: dedup/check_alert never read 15B fields
+def test_15b_dedup_and_check_alert_untouched():
+    import inspect
+    from src import state_store
+    for fn_name in ("make_dedup_key", "check_alert"):
+        src = inspect.getsource(getattr(state_store, fn_name))
+        assert "daily_execution_reality" not in src, (
+            f"state_store.{fn_name} must not read daily_execution_reality fields"
+        )
+
+
+# 15B-20: governor source introduces no forbidden indicators
+def test_15b_no_forbidden_indicators_in_governor():
+    import inspect
+    import re as _re
+    for fn in (_detect_daily_execution_reality_conflict,
+               _apply_daily_execution_reality_governor):
+        src = inspect.getsource(fn).lower()
+        for word in ("rsi", "macd", "bollinger", "stochastic"):
+            assert not _re.search(rf"\b{word}\b", src), (
+                f"forbidden indicator {word!r} in {fn.__name__}"
+            )

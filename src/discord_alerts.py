@@ -2028,6 +2028,26 @@ def format_alert(
             f"  {_dag_note}",
         ]
 
+    # Phase 15B: Daily Execution Reality notice — rendered only when the
+    # governor in tiering.py already capped the tier. Display-only; the
+    # decision was made upstream and is not re-made here.
+    if signal.get("daily_execution_reality_conflict"):
+        _der_note_raw = signal.get("daily_execution_reality_note")
+        _der_note = _sanitize(str(_der_note_raw)) if _der_note_raw else (
+            "Capital reduced/withheld. Trend and structure may be "
+            "constructive, but the daily execution state is not clean "
+            "enough for full authorization."
+        )
+        lines += [
+            "──────────────────────────────",
+            "⚠️  DAILY EXECUTION REALITY",
+            f"  {_der_note}",
+        ]
+        _der_reasons = signal.get("daily_execution_reality_reasons")
+        if isinstance(_der_reasons, list) and _der_reasons:
+            _der_joined = _sanitize("; ".join(str(r) for r in _der_reasons[:3]))
+            lines.append(f"  Reasons: {_der_joined}")
+
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
         "──────────────────────────────",

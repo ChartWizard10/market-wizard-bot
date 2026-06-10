@@ -1641,6 +1641,266 @@ def _apply_daily_authority_governor(
 
 
 # ---------------------------------------------------------------------------
+# Phase 15B — Daily Execution Reality Governor
+# ---------------------------------------------------------------------------
+# Execution-quality governor. Doctrine: trend authorises interest, structure
+# authorises attention, auction authorises timing — but DAILY EXECUTION must
+# authorise capital quality. A setup can be bullish, structurally valid, and
+# trend-supported yet still be a poor daily execution: price extended past the
+# entry, already at the first objective, acceptance unproven on the daily,
+# retest only marginal, or reward blocked before T1 while displayed R:R stays
+# high (fake trade math).
+#
+# Scope limits (hard laws):
+#   * Acts on SNIPE_IT and STARTER only. NEAR_ENTRY and WAIT are never touched.
+#   * Cap-only: SNIPE_IT→STARTER (3-4 pts), SNIPE_IT→NEAR_ENTRY (5+ pts),
+#     STARTER→NEAR_ENTRY (5+ pts). Never upgrades, never produces WAIT.
+#   * Runs AFTER Phase 14F and Phase 15A, so final_tier may already be capped.
+#   * Distinct from 15A: 15A governs higher-TF permission/authority blockage;
+#     15B governs whether the displayed trade math is executable TODAY.
+#     Overhead only scores here when the ceiling specifically compromises the
+#     reward path to T1 — 15A's "blocked" authority scoring is not duplicated.
+#   * Uses only existing scanner-computed fields. entry_acceptance comes from
+#     the existing _classify_current_acceptance() result; overhead_level and
+#     overhead_distance_pct are read from key_features. Missing fields and
+#     acceptance "unknown" score zero — default-safe.
+#   * Note: the SNIPE_IT/STARTER gate cascade already requires
+#     retest_status=confirmed and hold_status=confirmed, so the failed/missing
+#     retest branches below are defensive — they matter if gate requirements
+#     ever loosen. The live retest branch is retest_quality (BRT organ), which
+#     no gate reads.
+
+# Point thresholds: 0-2 no action; 3-4 cap SNIPE_IT→STARTER;
+# 5+ cap SNIPE_IT→NEAR_ENTRY and STARTER→NEAR_ENTRY.
+_DER_CAP_TO_STARTER_POINTS = 3
+_DER_CAP_TO_NEAR_ENTRY_POINTS = 5
+
+# Extension thresholds: percent above trigger_level at scan time.
+_DER_MATERIAL_EXTENSION_PCT = 5.0
+_DER_MILD_EXTENSION_PCT = 2.0
+
+# Displayed R:R at/above this while reward is ceiling-blocked before T1 is
+# fake trade math (matches the SNIPE_IT min_rr doctrine floor).
+_DER_DISPLAYED_RR_FLOOR = 3.0
+
+# Overhead within this percent with "moderate" status is minor path friction.
+_DER_MINOR_FRICTION_OVERHEAD_PCT = 5.0
+
+
+def _first_target_level(signal: dict) -> float | None:
+    """Extract the first target level from the signal's targets list."""
+    targets = signal.get("targets")
+    if not isinstance(targets, list) or not targets:
+        return None
+    first = targets[0]
+    if not isinstance(first, dict):
+        return None
+    level = first.get("level")
+    if level is None:
+        return None
+    try:
+        return float(level)
+    except (TypeError, ValueError):
+        return None
+
+
+def _detect_daily_execution_reality_conflict(
+    signal: dict,
+    current_price: float | None = None,
+    entry_acceptance: str | None = None,
+    key_features: dict | None = None,
+) -> tuple[int, list[str]]:
+    """Score daily execution-quality defects against a claimed entry-ready setup.
+
+    Deterministic point model. Returns (points, reasons).
+    A) extension/no-chase: at/beyond T1 +5, materially extended +3, mild +1.
+    B) acceptance: damaging/invalidated +5, unproven +3 (unknown scores zero).
+    C) retest: failed retest/hold +5, missing/partial +3, confirmed-but-marginal
+       quality (overlap/unclear) +1.
+    D) reward realism: ceiling below T1 with high displayed R:R +5, ceiling
+       below T1 otherwise +3, minor overhead friction +1.
+    E) volume: dryup on a breakout claim without confirmed hold +2, dryup on a
+       confirmed retest without expansion confirmation +1.
+    Stage-analysis scoring (F) is deliberately absent: no stage fields exist
+    in the payload yet and none are fabricated here.
+    """
+    points = 0
+    reasons: list[str] = []
+    kf = key_features or {}
+
+    def _norm(field: str) -> str:
+        return str(signal.get(field) or "").lower().strip()
+
+    trigger = signal.get("trigger_level")
+    t1 = _first_target_level(signal)
+    retest = _norm("retest_status")
+    hold = _norm("hold_status")
+
+    # ---- A) Daily extension / no-chase reality ----
+    if current_price is not None:
+        try:
+            cp = float(current_price)
+        except (TypeError, ValueError):
+            cp = None
+        if cp is not None:
+            if t1 is not None and cp >= t1:
+                points += 5
+                reasons.append(
+                    f"price_at_or_beyond_t1 (price={cp:.2f}, t1={t1:.2f}) (+5)"
+                )
+            elif trigger is not None:
+                try:
+                    trig = float(trigger)
+                    if trig > 0:
+                        ext_pct = (cp - trig) / trig * 100
+                        if ext_pct >= _DER_MATERIAL_EXTENSION_PCT:
+                            points += 3
+                            reasons.append(
+                                f"extended_from_trigger={ext_pct:.1f}% (+3)"
+                            )
+                        elif ext_pct >= _DER_MILD_EXTENSION_PCT:
+                            points += 1
+                            reasons.append(
+                                f"mildly_extended_from_trigger={ext_pct:.1f}% (+1)"
+                            )
+                except (TypeError, ValueError):
+                    pass
+
+    # ---- B) Daily acceptance reality ----
+    # "unknown" means no current price data and must never punish.
+    acceptance = str(entry_acceptance or "").lower().strip()
+    if acceptance in ("damaging", "invalidated"):
+        points += 5
+        reasons.append(f"entry_acceptance={acceptance} (+5)")
+    elif acceptance == "unproven":
+        points += 3
+        reasons.append("entry_acceptance=unproven (+3)")
+
+    # ---- C) Retest quality reality ----
+    if retest == "failed" or hold == "failed":
+        points += 5
+        reasons.append(f"retest_status={retest}/hold_status={hold} failed (+5)")
+    elif retest in ("missing", "partial"):
+        points += 3
+        reasons.append(f"retest_status={retest} (+3)")
+    elif retest == "confirmed" and _norm("retest_quality") in ("overlap", "unclear"):
+        points += 1
+        reasons.append(f"retest_quality={_norm('retest_quality')} (+1)")
+
+    # ---- D) Reward realism / fake R:R ----
+    # Scores only when the ceiling specifically compromises the path to T1;
+    # plain overhead_status=blocked authority is Phase 15A's domain (and a
+    # hard entry-gate failure anyway).
+    ovh_status = _norm("overhead_status")
+    ovh_level = kf.get("overhead_level")
+    ovh_dist = kf.get("overhead_distance_pct")
+    try:
+        ovh_level_f = float(ovh_level) if ovh_level is not None else None
+    except (TypeError, ValueError):
+        ovh_level_f = None
+    rr = signal.get("risk_reward")
+    try:
+        rr_f = float(rr) if rr is not None else None
+    except (TypeError, ValueError):
+        rr_f = None
+
+    if (
+        ovh_level_f is not None
+        and t1 is not None
+        and ovh_level_f < t1
+        and ovh_status in ("moderate", "blocked")
+    ):
+        if rr_f is not None and rr_f >= _DER_DISPLAYED_RR_FLOOR:
+            points += 5
+            reasons.append(
+                f"reward_blocked_before_t1 (overhead={ovh_level_f:.2f} < "
+                f"t1={t1:.2f}, displayed_rr={rr_f:.1f}) (+5)"
+            )
+        else:
+            points += 3
+            reasons.append(
+                f"overhead_before_t1 (overhead={ovh_level_f:.2f} < t1={t1:.2f}) (+3)"
+            )
+    elif ovh_status == "moderate" and ovh_dist is not None:
+        try:
+            if float(ovh_dist) <= _DER_MINOR_FRICTION_OVERHEAD_PCT:
+                points += 1
+                reasons.append(
+                    f"overhead_path_friction (distance={float(ovh_dist):.1f}%) (+1)"
+                )
+        except (TypeError, ValueError):
+            pass
+
+    # ---- E) Daily volume execution reality ----
+    # Dryup is not automatically bad (it can be absorption). It scores only
+    # when a continuation claim needs expansion confirmation that is absent.
+    # The payload has no weak/contradictory volume label — only
+    # expansion/dryup/neutral/unknown — so those spec branches map to dryup.
+    if _norm("volume_behavior") == "dryup":
+        if _norm("structure_event") in ("bos", "mss") and hold != "confirmed":
+            points += 2
+            reasons.append("volume_dryup_on_breakout_claim_without_hold (+2)")
+        elif retest == "confirmed":
+            points += 1
+            reasons.append("volume_dryup_on_retest_no_expansion_confirmation (+1)")
+
+    return points, reasons
+
+
+def _apply_daily_execution_reality_governor(
+    final_tier: str,
+    signal: dict,
+    current_price: float | None = None,
+    entry_acceptance: str | None = None,
+    key_features: dict | None = None,
+) -> tuple[str, dict]:
+    """Cap SNIPE_IT or STARTER when the daily execution state is not clean.
+
+    Returns (possibly capped tier, audit dict). The audit dict always contains
+    daily_execution_reality_conflict (bool), daily_execution_reality_points
+    (int), daily_execution_reality_reasons (list[str]), and
+    daily_execution_reality_note (str | None — set only when the cap fires).
+    Non-actionable tiers (NEAR_ENTRY, WAIT) are returned unchanged with an
+    inert audit dict. Never upgrades, never returns WAIT.
+    """
+    audit: dict = {
+        "daily_execution_reality_conflict": False,
+        "daily_execution_reality_points": 0,
+        "daily_execution_reality_reasons": [],
+        "daily_execution_reality_note": None,
+    }
+    if final_tier not in {"SNIPE_IT", "STARTER"}:
+        return final_tier, audit
+
+    points, reasons = _detect_daily_execution_reality_conflict(
+        signal, current_price, entry_acceptance, key_features
+    )
+    audit["daily_execution_reality_points"] = points
+    audit["daily_execution_reality_reasons"] = reasons
+
+    new_tier = final_tier
+    if final_tier == "SNIPE_IT":
+        if points >= _DER_CAP_TO_NEAR_ENTRY_POINTS:
+            new_tier = "NEAR_ENTRY"
+        elif points >= _DER_CAP_TO_STARTER_POINTS:
+            new_tier = "STARTER"
+    elif final_tier == "STARTER":
+        if points >= _DER_CAP_TO_NEAR_ENTRY_POINTS:
+            new_tier = "NEAR_ENTRY"
+
+    if new_tier == final_tier:
+        return final_tier, audit
+
+    audit["daily_execution_reality_conflict"] = True
+    audit["daily_execution_reality_note"] = (
+        "Capital reduced/withheld. Trend and structure may be constructive, "
+        "but the daily execution state is not clean enough for full "
+        "authorization."
+    )
+    return new_tier, audit
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1802,6 +2062,29 @@ def validate(
         if "daily_authority_conflict" not in applied_vetoes:
             applied_vetoes.append("daily_authority_conflict")
 
+    # Entry acceptance — computed once here, consumed by the Phase 15B governor
+    # and stored on final_signal below (deterministic; working_signal is not
+    # mutated by any governor, so the value is identical at both points).
+    _entry_acceptance = _classify_current_acceptance(working_signal, key_features)
+
+    # Phase 15B: Daily Execution Reality Governor — runs on SNIPE_IT and
+    # STARTER after 14F and 15A. Caps capital quality when the daily chart is
+    # not offering a clean executable entry (extension, lost acceptance,
+    # marginal retest, ceiling-blocked reward, unconfirmed volume). Cap-only:
+    # never upgrades, never produces WAIT, missing fields score zero.
+    _der_pre_tier = final_tier
+    final_tier, _der_audit = _apply_daily_execution_reality_governor(
+        final_tier, working_signal, current_price, _entry_acceptance, key_features
+    )
+    if _der_audit["daily_execution_reality_conflict"]:
+        downgrades.append(
+            f"{_der_pre_tier}→{final_tier}: daily_execution_reality_conflict"
+            f" (points={_der_audit['daily_execution_reality_points']};"
+            f" {'; '.join(_der_audit['daily_execution_reality_reasons'])})"
+        )
+        if "daily_execution_reality_conflict" not in applied_vetoes:
+            applied_vetoes.append("daily_execution_reality_conflict")
+
     # Build corrected final_signal with deterministic routing applied.
     # Use working_signal so 12B-backfilled missing_conditions are visible.
     final_signal = dict(working_signal)
@@ -1809,7 +2092,7 @@ def validate(
     final_signal["discord_channel"] = CHANNEL_MAP[final_tier]
     final_signal["capital_action"] = CAPITAL_MAP[final_tier]
     # Entry acceptance stored for entry grade display layer (informational only; no gate effects).
-    final_signal["entry_acceptance"] = _classify_current_acceptance(working_signal, key_features)
+    final_signal["entry_acceptance"] = _entry_acceptance
 
     # Phase 14F: Active Auction Conflict audit evidence — always present so the
     # observation ledger can backtest governor behavior. The decision itself was
@@ -1826,6 +2109,13 @@ def validate(
     final_signal["daily_authority_reasons"] = _dag_audit["daily_authority_reasons"]
     final_signal["daily_authority_note"] = _dag_audit["daily_authority_note"]
     final_signal["daily_permission_cap"] = _dag_audit["daily_permission_cap"]
+
+    # Phase 15B: Daily Execution Reality Governor audit evidence — always
+    # present for the observation ledger. Decision was already applied above.
+    final_signal["daily_execution_reality_conflict"] = _der_audit["daily_execution_reality_conflict"]
+    final_signal["daily_execution_reality_points"] = _der_audit["daily_execution_reality_points"]
+    final_signal["daily_execution_reality_reasons"] = _der_audit["daily_execution_reality_reasons"]
+    final_signal["daily_execution_reality_note"] = _der_audit["daily_execution_reality_note"]
 
     # Phase 12A: sanitize Claude prose so alerts cannot display tier-contradicting language
     final_signal["sanitized_reason"] = _sanitize_reason_for_tier(
