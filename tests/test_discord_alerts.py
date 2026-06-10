@@ -3169,3 +3169,168 @@ def test_15c_untouched_modules_have_no_quality_fields():
         src = inspect.getsource(mod)
         assert "quality_label" not in src, mod.__name__
         assert "premium_dimension_count" not in src, mod.__name__
+
+
+# ===========================================================================
+# Phase 15C.1 — Evidence Transparency Doctrine (display governance only)
+# ===========================================================================
+# Doctrine: if a dimension count is shown, the trader must also see which
+# dimensions passed. QUALITY EVIDENCE block; trajectory verbosity reduction;
+# overhead distance supplement; A+ entry grade SNIPE_IT gate.
+# No scoring, tier, routing, or governor changes.
+
+_15C1_GRADES = {
+    "daily_structure":      "PREMIUM",
+    "trigger_execution":    "PREMIUM",
+    "risk_path_freshness":  "ACCEPTABLE",
+    "location_value":       "UNKNOWN",
+    "htf_daily_permission": "COMPROMISED",
+}
+
+
+# 15C.1-A: QUALITY EVIDENCE block appears in alert when quality_dimension_grades present
+def test_15c1_quality_evidence_block_appears():
+    tr = _tiering_result(quality_dimension_grades=_15C1_GRADES)
+    text = format_alert(tr)
+    assert "QUALITY EVIDENCE" in text
+
+
+# 15C.1-B: QUALITY EVIDENCE block shows correct ✓/~/✗ symbols per grade
+def test_15c1_quality_evidence_symbols():
+    tr = _tiering_result(quality_dimension_grades=_15C1_GRADES)
+    text = format_alert(tr)
+    # PREMIUM → ✓
+    assert "✓ Structure" in text
+    assert "✓ Execution" in text
+    # ACCEPTABLE/UNKNOWN → ~
+    assert "~ Risk/Freshness" in text
+    assert "~ Location/Value" in text
+    # COMPROMISED → ✗
+    assert "✗ Higher-Timeframe Alignment" in text
+
+
+# 15C.1-C: QUALITY EVIDENCE block appears for STARTER tier
+def test_15c1_quality_evidence_block_on_starter():
+    tr = _tiering_result(
+        tier="STARTER",
+        capital_action="starter_only",
+        quality_dimension_grades=_15C1_GRADES,
+    )
+    tr["final_discord_channel"] = "#starter-signals"
+    text = format_alert(tr)
+    assert "QUALITY EVIDENCE" in text
+    assert "✓ Structure" in text
+
+
+# 15C.1-D: QUALITY EVIDENCE block absent for WAIT tier
+def test_15c1_quality_evidence_block_absent_for_wait():
+    tr = _tiering_result(
+        tier="WAIT", safe=False,
+        quality_dimension_grades=_15C1_GRADES,
+    )
+    tr["final_discord_channel"] = "none"
+    text = format_alert(tr)
+    assert "QUALITY EVIDENCE" not in text
+
+
+# 15C.1-E: QUALITY EVIDENCE block absent when quality_dimension_grades not in signal
+def test_15c1_quality_evidence_block_absent_without_grades():
+    tr = _tiering_result()   # no quality_dimension_grades key
+    assert "quality_dimension_grades" not in tr["final_signal"]
+    text = format_alert(tr)
+    assert "QUALITY EVIDENCE" not in text
+
+
+# 15C.1-F: QUALITY EVIDENCE block renders via full validate() path (real grades)
+def test_15c1_quality_evidence_via_validate():
+    res = _15c_validate()
+    assert res["final_tier"] == "SNIPE_IT"
+    text = format_alert(res)
+    assert "QUALITY EVIDENCE" in text
+    # At least one dimension line present
+    assert any(sym in text for sym in ("✓", "~", "✗"))
+
+
+# 15C.1-G: trajectory text for REPEATED_NO_CHANGE is now "Unchanged"
+def test_15c1_trajectory_repeated_no_change_text():
+    import src.trajectory as traj
+    result = traj._make("REPEATED_NO_CHANGE", "Unchanged")
+    # The trajectory module's default path must produce "Unchanged"
+    from src.trajectory import compute
+    prev = {
+        "last_alerted_tier": "SNIPE_IT",
+        "alert_history": [{
+            "tier": "SNIPE_IT",
+            "score": 88,
+            "retest_status": "confirmed",
+            "hold_status": "confirmed",
+            "risk_realism_state": "healthy",
+        }],
+    }
+    curr = {
+        "final_tier": "SNIPE_IT",
+        "score": 89,
+        "final_signal": {
+            "retest_status": "confirmed",
+            "hold_status": "confirmed",
+            "risk_realism_state": "healthy",
+        },
+    }
+    out = compute(curr, prev)
+    assert out["label"] == "REPEATED_NO_CHANGE"
+    assert out["text"] == "Unchanged"
+
+
+# 15C.1-H: trajectory "Unchanged" renders in alert body
+def test_15c1_trajectory_unchanged_in_alert():
+    tr = _tiering_result()
+    tr["trajectory"] = {"label": "REPEATED_NO_CHANGE", "text": "Unchanged"}
+    text = format_alert(tr)
+    assert "Trajectory:   Unchanged" in text
+
+
+# 15C.1-I: overhead distance supplement renders when overhead is non-clear + dist present
+def test_15c1_overhead_distance_supplement_renders():
+    tr = _tiering_result(
+        overhead_status="moderate",
+        overhead_distance_pct=4.2,
+    )
+    text = format_alert(tr)
+    assert "dist: 4.2%" in text
+
+
+# 15C.1-J: overhead distance supplement absent when overhead is clear
+def test_15c1_overhead_distance_absent_when_clear():
+    tr = _tiering_result(
+        overhead_status="clear",
+        overhead_distance_pct=15.0,
+    )
+    text = format_alert(tr)
+    assert "dist:" not in text
+
+
+# 15C.1-K: A+ entry grade label no longer contains "sniper-grade"
+def test_15c1_a_plus_label_no_sniper_grade():
+    from src.discord_alerts import _ENTRY_GRADE_LABELS
+    assert "sniper-grade" not in _ENTRY_GRADE_LABELS["A_PLUS"]
+    assert "A+" in _ENTRY_GRADE_LABELS["A_PLUS"]
+
+
+# 15C.1-L: A+ entry grade requires SNIPE_IT tier; STARTER caps at A
+def test_15c1_a_plus_requires_snipe_it_tier():
+    from src.discord_alerts import _classify_entry_grade, _ENTRY_GRADE_LABELS
+    grade_signal = {
+        "retest_status": "confirmed",
+        "hold_status": "confirmed",
+        "entry_acceptance": "accepted",
+        "risk_realism_state": "healthy",
+        "overhead_status": "clear",
+        "risk_reward": 4.5,
+        "price_distance_to_trigger_pct": 0.2,
+    }
+    # SNIPE_IT gets A+
+    assert _classify_entry_grade(grade_signal, "SNIPE_IT") == _ENTRY_GRADE_LABELS["A_PLUS"]
+    # STARTER cannot get A+; should fall through to A or B
+    starter_grade = _classify_entry_grade(grade_signal, "STARTER")
+    assert starter_grade != _ENTRY_GRADE_LABELS["A_PLUS"]
+    assert "A+" not in starter_grade

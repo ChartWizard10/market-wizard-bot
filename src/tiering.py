@@ -2114,6 +2114,7 @@ def _build_quality_label_contract(
         "premium_dimension_count": f"{n_premium}/5",
         "quality_language_cap_reasons": reasons,
         "permitted_quality_language": permitted,
+        "quality_dimension_grades": _grades,
     }
 
 
@@ -2414,6 +2415,9 @@ def validate(
     final_signal["premium_dimension_count"] = _qlc["premium_dimension_count"]
     final_signal["quality_language_cap_reasons"] = _qlc["quality_language_cap_reasons"]
     final_signal["permitted_quality_language"] = _qlc["permitted_quality_language"]
+    # Phase 15C.1: dimension grades for evidence transparency block. Display-only;
+    # never read by any decision-path function.
+    final_signal["quality_dimension_grades"] = _qlc["quality_dimension_grades"]
 
     safe_for_alert = final_tier != "WAIT"
 

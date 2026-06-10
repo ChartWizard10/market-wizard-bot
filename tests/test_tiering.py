@@ -4435,3 +4435,73 @@ def test_15c_no_forbidden_indicators_in_contract():
             assert not _re.search(rf"\b{word}\b", src), (
                 f"forbidden indicator {word!r} in {fn.__name__}"
             )
+
+
+# ===========================================================================
+# Phase 15C.1 — Evidence Transparency Doctrine (display governance only)
+# ===========================================================================
+# Doctrine: dimension counts must be accompanied by which dimensions passed.
+# quality_dimension_grades is on final_signal for every tier. Display-only —
+# never read by any decision-path function. No scoring/tier/routing changes.
+
+
+# 15C.1-1: quality_dimension_grades present on final_signal for every tier
+def test_15c1_dimension_grades_present_all_tiers():
+    for sig_fn in (_snipe_signal, _starter_signal, _near_entry_signal, _wait_signal):
+        result = validate(sig_fn(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+        fs = result["final_signal"]
+        assert "quality_dimension_grades" in fs, (
+            f"quality_dimension_grades missing for {sig_fn.__name__}"
+        )
+        grades = fs["quality_dimension_grades"]
+        assert isinstance(grades, dict), "quality_dimension_grades must be a dict"
+
+
+# 15C.1-2: quality_dimension_grades has all five expected dimension keys
+def test_15c1_dimension_grades_five_keys():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    grades = result["final_signal"]["quality_dimension_grades"]
+    expected_keys = {
+        "htf_daily_permission", "daily_structure", "location_value",
+        "trigger_execution", "risk_path_freshness",
+    }
+    assert set(grades.keys()) == expected_keys
+
+
+# 15C.1-3: each grade value is one of the five canonical strings
+def test_15c1_dimension_grades_valid_values():
+    valid = {"PREMIUM", "ACCEPTABLE", "COMPROMISED", "INVALID", "UNKNOWN"}
+    for sig_fn in (_snipe_signal, _starter_signal, _near_entry_signal):
+        result = validate(sig_fn(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+        grades = result["final_signal"]["quality_dimension_grades"]
+        for key, val in grades.items():
+            assert val in valid, f"{key}={val!r} not a valid grade"
+
+
+# 15C.1-4: dimension grades never affect final_tier (audit-only)
+def test_15c1_dimension_grades_do_not_affect_tier():
+    # Changing overhead_status from clear → moderate degrades location_value grade
+    # (PREMIUM → ACCEPTABLE) without triggering any governor. Both remain SNIPE_IT.
+    r1 = validate(_snipe_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    r2 = validate(
+        _snipe_signal(overhead_status="moderate"),   # degrades location_value grade
+        _pf_sovereign({"current_price": 182.50}),
+        _BASE_CONFIG,
+    )
+    assert r1["final_tier"] == r2["final_tier"] == "SNIPE_IT", (
+        "quality_dimension_grades must not affect tier"
+    )
+    g1 = r1["final_signal"]["quality_dimension_grades"]["location_value"]
+    g2 = r2["final_signal"]["quality_dimension_grades"]["location_value"]
+    assert g1 != g2, "overhead change should produce different location_value grades"
+
+
+# 15C.1-5: quality_dimension_grades is the same source as premium_dimension_count
+def test_15c1_dimension_count_consistent_with_grades():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    grades = fs["quality_dimension_grades"]
+    n_premium_from_grades = sum(1 for g in grades.values() if g == "PREMIUM")
+    count_str = fs["premium_dimension_count"]   # e.g. "3/5"
+    n_from_count = int(count_str.split("/")[0])
+    assert n_premium_from_grades == n_from_count

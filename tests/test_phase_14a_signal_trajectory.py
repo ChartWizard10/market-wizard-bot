@@ -607,3 +607,25 @@ class TestDiscordRender:
         }
         output = format_alert(tr)
         assert "Trajectory:" not in output
+
+
+# ---------------------------------------------------------------------------
+# Phase 15C.1: Trajectory verbosity — REPEATED_NO_CHANGE now renders "Unchanged"
+# ---------------------------------------------------------------------------
+
+class TestRepeatedNoChangeVerbosity:
+    def test_repeated_no_change_text_is_unchanged(self):
+        prev = _make_prev_history_entry(tier="SNIPE_IT", score=88)
+        state = _ticker_state_with_history(prev)
+        curr = _make_tiering_result("SNIPE_IT", score=89)   # small delta, repeated
+        result = traj.compute(curr, state)
+        assert result["label"] == "REPEATED_NO_CHANGE"
+        assert result["text"] == "Unchanged"
+
+    def test_repeated_no_change_text_not_verbose(self):
+        prev = _make_prev_history_entry(tier="SNIPE_IT", score=88)
+        state = _ticker_state_with_history(prev)
+        curr = _make_tiering_result("SNIPE_IT", score=88)
+        result = traj.compute(curr, state)
+        assert "no material change" not in result["text"].lower()
+        assert "Repeated" not in result["text"]

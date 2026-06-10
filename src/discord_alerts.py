@@ -1510,7 +1510,7 @@ def _evaluate_setup_quality(signal: dict, final_tier: str) -> str:
 # ---------------------------------------------------------------------------
 
 _ENTRY_GRADE_LABELS: dict[str, str] = {
-    "A_PLUS":     "A+ — sniper-grade location; precision criteria met.",
+    "A_PLUS":     "A+ — precision entry: all execution criteria confirmed.",
     "A_GRADE":    "A — executable; confirmation criteria met.",
     "B_DEFAULT":  "B — confirmed; entry precision imperfect.",
     "B_UNPROVEN": "B — zone defense unconfirmed.",
@@ -1579,7 +1579,8 @@ def _classify_entry_grade(signal: dict, final_tier: str) -> str:
         return _ENTRY_GRADE_LABELS["B_WATCH"]
 
     if (
-        acceptance == "accepted"
+        final_tier == "SNIPE_IT"
+        and acceptance == "accepted"
         and risk_state == "healthy"
         and rr is not None and rr >= 4.0
         and overhead == "clear"
@@ -1894,6 +1895,14 @@ def format_alert(
     # Phase 13.7B: context-aware overhead label
     raw_blocker_str = str(signal.get("near_entry_blocker_note") or "")
     overhead_label = _render_overhead_label(overhead_status, final_tier, raw_blocker_str)
+    # Phase 15C.1: supplement with distance-to-ceiling when available and non-clear.
+    _ovh_dist_pct = signal.get("overhead_distance_pct")
+    _ovh_s = (overhead_status or "").lower().strip()
+    if _ovh_dist_pct is not None and _ovh_s not in ("clear", "", "unknown", "—"):
+        try:
+            overhead_label = f"{overhead_label}  (dist: {float(_ovh_dist_pct):.1f}%)"
+        except (TypeError, ValueError):
+            pass
 
     # Phase 1E: insert Market State between Trend and Zone only when present.
     if market_structure_state:
@@ -2078,6 +2087,29 @@ def format_alert(
         lines.append(f"  Trajectory:   {_trajectory_text}")
     if _calibration_display:
         lines.append(f"  Score realism: {_calibration_display}")
+
+    # Phase 15C.1: Quality Evidence block — compact per-dimension transparency.
+    # Shows which of the five evidence dimensions passed, so traders see the
+    # evidence profile without reading paragraphs. Display-only.
+    _qdg = signal.get("quality_dimension_grades")
+    if _qdg and isinstance(_qdg, dict) and final_tier != "WAIT":
+        _QEV_DIMS = [
+            ("daily_structure",      "Structure"),
+            ("trigger_execution",    "Execution"),
+            ("risk_path_freshness",  "Risk/Freshness"),
+            ("location_value",       "Location/Value"),
+            ("htf_daily_permission", "Higher-Timeframe Alignment"),
+        ]
+        lines += ["──────────────────────────────", "QUALITY EVIDENCE"]
+        for _dim_key, _dim_label in _QEV_DIMS:
+            _grade = _qdg.get(_dim_key, "UNKNOWN")
+            if _grade == "PREMIUM":
+                _sym = "✓"
+            elif _grade in ("COMPROMISED", "INVALID"):
+                _sym = "✗"
+            else:
+                _sym = "~"
+            lines.append(f"  {_sym} {_dim_label}")
 
     # Phase 14F: Active Auction Conflict notice — rendered only when the
     # governor in tiering.py already capped the tier. This block displays a

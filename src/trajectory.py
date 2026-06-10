@@ -171,7 +171,7 @@ def _compute(tiering_result: dict, ticker_state: dict | None) -> dict:
         return _make("DETERIORATING", f"Deteriorating — {', '.join(parts)}.")
 
     # ---- Default ------------------------------------------------------------
-    return _make("REPEATED_NO_CHANGE", "Repeated — no material change from last alert.")
+    return _make("REPEATED_NO_CHANGE", "Unchanged")
 
 
 # ---------------------------------------------------------------------------
