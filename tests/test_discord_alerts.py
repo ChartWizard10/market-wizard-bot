@@ -2536,3 +2536,136 @@ def test_14f_conflict_block_display_does_not_change_decision_fields():
     before = (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"])
     _ = format_alert(tr)
     assert (tr["final_tier"], tr["capital_action"], tr["final_discord_channel"]) == before
+
+
+# ===========================================================================
+# Phase 14F.1 — NEAR_ENTRY language firewall (watch-only authority in text)
+# ===========================================================================
+
+# Phrases that must never appear in a rendered NEAR_ENTRY alert body.
+_14F1_FORBIDDEN_NE = (
+    "enter at", "enter near", "enter on", "entry at", "buy at", "take at",
+    "take the trade", "current price with stop", "capital authorized",
+    "full quality", "full-size", "starter size", "starter conditions met",
+    "snipe_it conditions met",
+)
+
+
+def _assert_no_forbidden_ne_language(text: str):
+    low = text.lower()
+    for phrase in _14F1_FORBIDDEN_NE:
+        assert phrase not in low, f"forbidden NEAR_ENTRY phrase {phrase!r} in body:\n{text}"
+
+
+def test_14f1_natural_near_entry_execution_language_sanitized():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        capital_action="wait_no_capital",
+        next_action="Enter at current price with stop below 178.20",
+        reason="Buy at the retest and take the trade full-size; starter size also fine.",
+        upgrade_trigger="Entry at 182.50 once reclaimed",
+    )
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    _assert_no_forbidden_ne_language(text)
+    assert "no capital" in text.lower() or "watch" in text.lower()
+
+
+def test_14f1_governor_capped_near_entry_renders_watch_only():
+    from src.tiering import validate
+    signal = {
+        "ticker": "ARM", "tier": "SNIPE_IT", "score": 88,
+        "setup_family": "continuation", "structure_event": "BOS",
+        "trend_state": "fresh_expansion", "sma_value_alignment": "supportive",
+        "zone_type": "OB", "trigger_level": 182.50,
+        "retest_status": "confirmed", "hold_status": "confirmed",
+        "invalidation_condition": "Daily close below OB base",
+        "invalidation_level": 178.20,
+        "targets": [{"label": "T1", "level": 195.00, "reason": "Prior swing high"}],
+        "risk_reward": 3.5, "overhead_status": "clear",
+        "forced_participation": "none", "missing_conditions": [],
+        "upgrade_trigger": "none",
+        "next_action": "Enter at current price with stop below 178.20",
+        "discord_channel": "#snipe-signals", "capital_action": "full_quality_allowed",
+        "reason": "Clean BOS with confirmed OB retest and hold.",
+    }
+    kf = {
+        "four_hour_market_state": "TRANSITION", "four_hour_sma_alignment": "mixed",
+        "four_hour_reclaim_status": "below_value",
+        "four_hour_structure_note": "lower_high_pressure",
+        "four_hour_data_status": "current",
+        "one_hour_trigger_family": "none", "one_hour_state": "repair",
+        "one_hour_retest_quality": "weak", "one_hour_acceptance_state": "pending",
+        "one_hour_consequence_state": "neutral", "one_hour_no_chase_status": "acceptable",
+        "one_hour_data_status": "available",
+    }
+    cfg = {"tiers": {"snipe_it": {"min_score": 85, "min_rr": 3.0},
+                     "starter": {"min_score": 75, "min_rr": 3.0},
+                     "near_entry": {"min_score": 60}}}
+    res = validate(signal, {"veto_flags": [], "key_features": kf}, cfg)
+    assert res["final_tier"] == "NEAR_ENTRY"
+    text = format_alert(res)
+    _assert_no_forbidden_ne_language(text)
+    assert "ACTIVE AUCTION CONFLICT" in text
+    assert "Monitor for reclaim, acceptance, and hold" in text
+
+
+def test_14f1_starter_still_says_starter_size_only():
+    tr = _tiering_result(tier="STARTER", capital_action="starter_only")
+    tr["capital_action"] = "starter_only"
+    tr["final_discord_channel"] = "#starter-signals"
+    text = format_alert(tr)
+    assert "STARTER SIZE ONLY" in text
+
+
+def test_14f1_snipe_it_still_says_full_quality_capital_authorized():
+    text = format_alert(_tiering_result())
+    assert "FULL QUALITY — capital authorized after live-chart verification." in text
+
+
+def test_14f1_wait_still_never_sendable():
+    tr = _tiering_result(
+        tier="WAIT", safe=False,
+        next_action="Enter at current price with stop below 178.20",
+    )
+    tr["final_discord_channel"] = "none"
+    sendable, _reason = _sendable(tr, None)
+    assert sendable is False
+
+
+def test_14f1_firewall_does_not_mutate_structural_fields_or_dedup_key():
+    from src.state_store import make_dedup_key
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        capital_action="wait_no_capital",
+        next_action="Enter at current price with stop below 178.20",
+    )
+    sig = tr["final_signal"]
+    key_before = make_dedup_key("AAPL", tr["final_tier"],
+                                sig["trigger_level"], sig["invalidation_level"])
+    structural_before = (sig["trigger_level"], sig["invalidation_level"],
+                         list(sig["targets"]), sig["score"], sig["tier"])
+    _ = format_alert(tr)
+    key_after = make_dedup_key("AAPL", tr["final_tier"],
+                               sig["trigger_level"], sig["invalidation_level"])
+    structural_after = (sig["trigger_level"], sig["invalidation_level"],
+                        list(sig["targets"]), sig["score"], sig["tier"])
+    assert key_before == key_after
+    assert structural_before == structural_after
+    # The raw stored text fields are not rewritten by rendering.
+    assert sig["next_action"] == "Enter at current price with stop below 178.20"
+
+
+def test_14f1_decision_path_does_not_read_sanitized_text():
+    import inspect
+    from src import tiering
+    for fn_name in ("_determine_final_tier", "_entry_gate_failures",
+                    "_snipe_gate_failures", "_starter_gate_failures",
+                    "_near_entry_gate_failures",
+                    "_detect_active_auction_conflict",
+                    "_apply_active_auction_conflict_governor"):
+        src = inspect.getsource(getattr(tiering, fn_name))
+        assert "sanitized" not in src, (
+            f"decision-path function {fn_name} reads sanitized display text"
+        )

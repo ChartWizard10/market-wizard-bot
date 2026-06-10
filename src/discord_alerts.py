@@ -843,6 +843,27 @@ _NE_CAPITAL_ACTION_FIREWALL: list[tuple[str, str]] = [
      "wait for confirmation; no capital until blocker resolves"),
     (r"\benter\s+on\b",
      "wait for confirmation"),
+    # Phase 14F.1: NEAR_ENTRY language firewall — execution commands and
+    # capital-tier language can never imply action in a watch-only alert.
+    # Execution-command patterns consume to end of line: an entry instruction
+    # is an action clause, and watch-only language must fully replace it
+    # rather than leave a truncated half-command behind.
+    (r"\benter\s+(?:at|near)\b[^\n]*",
+     "Monitor for reclaim, acceptance, and hold. No capital until blocker resolves."),
+    (r"\bentry\s+(?:at|near)\b[^\n]*",
+     "watch level only; no capital until blocker resolves."),
+    (r"\bbuy\s+at\b[^\n]*",
+     "Monitor for reclaim, acceptance, and hold. No capital until blocker resolves."),
+    (r"\btake\s+the\s+trade\b",
+     "continue watching"),
+    (r"\btake\s+at\b[^\n]*",
+     "Monitor for reclaim, acceptance, and hold. No capital until blocker resolves."),
+    (r"\bcurrent\s+price\s+with\s+stop\b[^\n]*",
+     "Watch only. Capital remains withheld until the trigger is reclaimed and accepted."),
+    (r"\bfull[-\s]+sized?\b",
+     "no-capital"),
+    (r"\bstarter\s+siz(?:e[ds]?|ing)\b",
+     "no capital"),
     (r"\bentry\s+valid\b",
      "setup remains on watch"),
     # Capital / position management
