@@ -2003,6 +2003,31 @@ def format_alert(
             f"  {_aac_note}",
         ]
 
+    # Phase 15A: Daily Authority Governor notice — rendered only when the
+    # governor in tiering.py already capped the tier. Display-only; the
+    # decision was made upstream and is not re-made here.
+    if signal.get("daily_authority_conflict"):
+        _dag_note_raw = signal.get("daily_authority_note")
+        _dag_cap = signal.get("daily_permission_cap") or ""
+        if "NEAR_ENTRY" in _dag_cap:
+            _dag_header = "⚠️  DAILY AUTHORITY CONFLICT"
+            _dag_default = (
+                "Capital withheld. Lower-timeframe structure may be improving, "
+                "but the daily chart has not granted swing permission yet."
+            )
+        else:
+            _dag_header = "⚠️  DAILY AUTHORITY CAP"
+            _dag_default = (
+                "Starter only. Daily context is constructive enough to monitor, "
+                "but one or more authority layers are incomplete."
+            )
+        _dag_note = _sanitize(str(_dag_note_raw)) if _dag_note_raw else _dag_default
+        lines += [
+            "──────────────────────────────",
+            _dag_header,
+            f"  {_dag_note}",
+        ]
+
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
         "──────────────────────────────",

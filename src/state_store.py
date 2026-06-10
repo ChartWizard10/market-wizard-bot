@@ -406,6 +406,14 @@ def record_alert(
         "active_auction_conflict_points":  final_signal.get("active_auction_conflict_points"),
         "active_auction_conflict_reasons": final_signal.get("active_auction_conflict_reasons"),
 
+        # ---- Phase 15A: Daily Authority Governor audit record ----
+        # Records whether the governor capped the tier and why, for the
+        # observation ledger. daily_authority_note and daily_permission_cap
+        # are display-only and are not persisted.
+        "daily_authority_conflict": final_signal.get("daily_authority_conflict"),
+        "daily_authority_points":   final_signal.get("daily_authority_points"),
+        "daily_authority_reasons":  final_signal.get("daily_authority_reasons"),
+
         "setup_family":                      final_signal.get("setup_family"),
         "structure_event":                   final_signal.get("structure_event"),
         "trend_state":                       final_signal.get("trend_state"),

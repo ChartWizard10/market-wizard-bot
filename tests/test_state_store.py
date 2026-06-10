@@ -1503,3 +1503,56 @@ def test_record_alert_active_auction_conflict_does_not_affect_dedup_key():
     assert rec1["dedup_key"] == rec2["dedup_key"], (
         "active_auction_conflict audit fields must not influence the dedup_key"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 15A — Daily Authority Governor audit record in alert_history
+# ---------------------------------------------------------------------------
+
+_15A_HISTORY_FIELDS = (
+    "daily_authority_conflict",
+    "daily_authority_points",
+    "daily_authority_reasons",
+)
+
+
+def test_record_alert_stores_daily_authority_conflict_fields():
+    tr = _tiering(
+        final_tier="NEAR_ENTRY",
+        channel="#near-entry-watch",
+        daily_authority_conflict=True,
+        daily_authority_points=5,
+        daily_authority_reasons=["weekly_trend_state=declining (+5)"],
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert rec["daily_authority_conflict"] is True
+    assert rec["daily_authority_points"] == 5
+    assert rec["daily_authority_reasons"] == ["weekly_trend_state=declining (+5)"]
+
+
+def test_record_alert_daily_authority_conflict_none_when_absent():
+    tr = _tiering()
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    for field in _15A_HISTORY_FIELDS:
+        assert field in rec, f"15A field missing from history record: {field!r}"
+        assert rec[field] is None
+
+
+def test_record_alert_daily_authority_note_not_persisted():
+    tr = _tiering(
+        daily_authority_conflict=True,
+        daily_authority_points=5,
+        daily_authority_reasons=["weekly_trend_state=declining (+5)"],
+        daily_authority_note="Capital withheld. Daily chart has not granted swing permission.",
+        daily_permission_cap="SNIPE_IT→NEAR_ENTRY",
+    )
+    state = record_alert("AAPL", tr, _empty(), _cfg())
+    rec = state["tickers"]["AAPL"]["alert_history"][0]
+    assert "daily_authority_note" not in rec, (
+        "daily_authority_note is display-only and must not be persisted"
+    )
+    assert "daily_permission_cap" not in rec, (
+        "daily_permission_cap is display-only and must not be persisted"
+    )

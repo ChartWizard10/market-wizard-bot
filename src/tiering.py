@@ -1466,6 +1466,181 @@ def _apply_active_auction_conflict_governor(
 
 
 # ---------------------------------------------------------------------------
+# Phase 15A — Daily Authority Governor
+# ---------------------------------------------------------------------------
+# Swing-permission governor. Doctrine: Weekly authorises → Daily permits →
+# 4H locates → 1H proves. This layer enforces the Daily permit step: a setup
+# cannot carry full-quality (SNIPE_IT) or starter (STARTER) capital if the
+# daily chart has not granted swing permission.
+#
+# Scope limits (hard laws):
+#   * Acts on SNIPE_IT and STARTER only. NEAR_ENTRY and WAIT are never touched.
+#   * Cap-only: SNIPE_IT→STARTER, SNIPE_IT→NEAR_ENTRY, STARTER→NEAR_ENTRY.
+#     It never upgrades anything and never produces WAIT.
+#   * Runs AFTER Phase 14F, so final_tier may already be STARTER/NEAR_ENTRY.
+#   * Uses only existing passthrough fields (weekly_trend_state,
+#     market_structure_state, sma_value_alignment, weekly_sma_alignment,
+#     overhead_status, volume_behavior, structure_event, retest_status).
+#     No new data fetches, no new indicators, no new config keys.
+#   * Missing or unknown field values score zero — default-safe.
+
+# Point thresholds:
+#   SNIPE_IT: 0-2 no cap; 3-4 → STARTER; 5+ → NEAR_ENTRY
+#   STARTER:  0-4 no cap; 5+ → NEAR_ENTRY
+_DAG_SNIPE_CAP_TO_STARTER = 3
+_DAG_SNIPE_CAP_TO_NEAR_ENTRY = 5
+_DAG_STARTER_CAP_TO_NEAR_ENTRY = 5
+
+
+def _detect_daily_authority_conflict(signal: dict) -> tuple[int, list[str]]:
+    """Score daily/weekly authority defects against a claimed entry-ready setup.
+
+    Deterministic point model. Returns (points, reasons). Hard-veto conditions
+    score +5, moderate authority gaps +3, soft cautions +1. All field reads are
+    via signal.get() so missing fields return None → normalised to "" → zero.
+    Conditions on the same field are mutually exclusive by construction.
+    """
+    points = 0
+    reasons: list[str] = []
+
+    def _norm(field: str) -> str:
+        return str(signal.get(field) or "").lower().strip()
+
+    wts = _norm("weekly_trend_state")       # advancing|basing|distributing|declining|unknown
+    mss = _norm("market_structure_state")   # expansion|orderly_continuation|compression|repair|transition|failure|unknown
+    sva = _norm("sma_value_alignment")      # supportive|mixed|hostile|unavailable
+    wsa = _norm("weekly_sma_alignment")     # supportive|mixed|hostile|unavailable
+    ovh = _norm("overhead_status")          # clear|moderate|blocked|unknown
+    vol = _norm("volume_behavior")          # expansion|dryup|neutral|unknown
+    sev = _norm("structure_event")          # bos|mss|reclaim|choch|none
+    rst = _norm("retest_status")            # confirmed|partial|missing|failed
+
+    # ---- Hard veto conditions (+5 each) ----
+    if wts == "declining":
+        points += 5
+        reasons.append("weekly_trend_state=declining (+5)")
+
+    if mss == "failure" and sev not in {"reclaim", "bos", "mss", "choch"}:
+        points += 5
+        reasons.append(f"market_structure_state=failure+no_reclaim [structure_event={sev}] (+5)")
+
+    if sva == "hostile" and wsa == "hostile":
+        points += 5
+        reasons.append("sma_value_alignment=hostile+weekly_sma_alignment=hostile (+5)")
+
+    # ---- Moderate authority gaps (+3 each) ----
+    if wts == "distributing":
+        points += 3
+        reasons.append("weekly_trend_state=distributing (+3)")
+
+    if mss in {"repair", "transition"}:
+        points += 3
+        reasons.append(f"market_structure_state={mss} (+3)")
+
+    # Daily hostile but weekly not yet confirmed: partial MA breakdown
+    if sva == "hostile" and wsa != "hostile":
+        points += 3
+        reasons.append(f"sma_value_alignment=hostile [weekly_sma_alignment={wsa}] (+3)")
+
+    if ovh == "blocked":
+        points += 3
+        reasons.append("overhead_status=blocked (+3)")
+
+    # ---- Soft cautions (+1 each) ----
+    # sva=="mixed" is mutually exclusive with the hostile conditions above
+    if sva == "mixed":
+        points += 1
+        reasons.append("sma_value_alignment=mixed (+1)")
+
+    # wsa=="mixed" is mutually exclusive with the hostile hard-veto above
+    if wsa == "mixed":
+        points += 1
+        reasons.append("weekly_sma_alignment=mixed (+1)")
+
+    if vol == "dryup":
+        points += 1
+        reasons.append("volume_behavior=dryup (+1)")
+
+    if rst in {"partial", "missing"}:
+        points += 1
+        reasons.append(f"retest_status={rst} (+1)")
+
+    # basing + no breakout evidence: Stage 1 base without permission to act
+    if wts == "basing" and sev not in {"bos", "mss", "choch"}:
+        points += 1
+        reasons.append(f"weekly_trend_state=basing+no_breakout_evidence [structure_event={sev}] (+1)")
+
+    return points, reasons
+
+
+def _build_dag_note(capped_tier: str, reasons: list[str]) -> str:
+    """Build operator-facing note for the Daily Authority Governor cap."""
+    top = reasons[:3]
+    if capped_tier == "NEAR_ENTRY":
+        return (
+            "Capital withheld. Lower-timeframe structure may be improving, "
+            "but the daily chart has not granted swing permission yet. "
+            f"Required proof: {'; '.join(top)}"
+        )
+    return (
+        "Starter only. Daily context is constructive enough to monitor, "
+        "but one or more authority layers are incomplete. "
+        f"Missing proof: {'; '.join(top)}"
+    )
+
+
+def _apply_daily_authority_governor(
+    final_tier: str,
+    signal: dict,
+) -> tuple[str, dict]:
+    """Cap SNIPE_IT or STARTER when daily authority layers are incomplete.
+
+    Returns (possibly capped tier, audit dict). The audit dict always contains
+    daily_authority_conflict (bool), daily_authority_points (int),
+    daily_authority_reasons (list[str]), daily_authority_note (str | None),
+    and daily_permission_cap (str | None). Non-actionable tiers (NEAR_ENTRY,
+    WAIT) are returned unchanged with an inert audit dict. Never upgrades,
+    never returns WAIT.
+    """
+    audit: dict = {
+        "daily_authority_conflict": False,
+        "daily_authority_points": 0,
+        "daily_authority_reasons": [],
+        "daily_authority_note": None,
+        "daily_permission_cap": None,
+    }
+    if final_tier not in {"SNIPE_IT", "STARTER"}:
+        return final_tier, audit
+
+    points, reasons = _detect_daily_authority_conflict(signal)
+    audit["daily_authority_points"] = points
+    audit["daily_authority_reasons"] = reasons
+
+    new_tier = final_tier
+    cap = None
+
+    if final_tier == "SNIPE_IT":
+        if points >= _DAG_SNIPE_CAP_TO_NEAR_ENTRY:
+            new_tier = "NEAR_ENTRY"
+            cap = "SNIPE_IT→NEAR_ENTRY"
+        elif points >= _DAG_SNIPE_CAP_TO_STARTER:
+            new_tier = "STARTER"
+            cap = "SNIPE_IT→STARTER"
+    elif final_tier == "STARTER":
+        if points >= _DAG_STARTER_CAP_TO_NEAR_ENTRY:
+            new_tier = "NEAR_ENTRY"
+            cap = "STARTER→NEAR_ENTRY"
+
+    if new_tier == final_tier:
+        return final_tier, audit
+
+    audit["daily_authority_conflict"] = True
+    audit["daily_permission_cap"] = cap
+    audit["daily_authority_note"] = _build_dag_note(new_tier, reasons)
+    return new_tier, audit
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -1610,6 +1785,23 @@ def validate(
     if _aac_audit["active_auction_conflict"] and "active_auction_conflict" not in applied_vetoes:
         applied_vetoes.append("active_auction_conflict")
 
+    # Phase 15A: Daily Authority Governor — runs on SNIPE_IT and STARTER after
+    # Phase 14F. Caps full-quality or starter capital when the daily chart has
+    # not granted swing permission. Cap-only: never upgrades, never produces
+    # WAIT, and missing daily fields score zero (default-safe).
+    _dag_pre_tier = final_tier
+    final_tier, _dag_audit = _apply_daily_authority_governor(
+        final_tier, working_signal
+    )
+    if _dag_audit["daily_authority_conflict"]:
+        downgrades.append(
+            f"{_dag_pre_tier}→{final_tier}: daily_authority_conflict"
+            f" (points={_dag_audit['daily_authority_points']};"
+            f" {'; '.join(_dag_audit['daily_authority_reasons'])})"
+        )
+        if "daily_authority_conflict" not in applied_vetoes:
+            applied_vetoes.append("daily_authority_conflict")
+
     # Build corrected final_signal with deterministic routing applied.
     # Use working_signal so 12B-backfilled missing_conditions are visible.
     final_signal = dict(working_signal)
@@ -1626,6 +1818,14 @@ def validate(
     final_signal["active_auction_conflict_points"] = _aac_audit["active_auction_conflict_points"]
     final_signal["active_auction_conflict_reasons"] = _aac_audit["active_auction_conflict_reasons"]
     final_signal["active_auction_conflict_note"] = _aac_audit["active_auction_conflict_note"]
+
+    # Phase 15A: Daily Authority Governor audit evidence — always present for
+    # the observation ledger. Decision was already applied to final_tier above.
+    final_signal["daily_authority_conflict"] = _dag_audit["daily_authority_conflict"]
+    final_signal["daily_authority_points"] = _dag_audit["daily_authority_points"]
+    final_signal["daily_authority_reasons"] = _dag_audit["daily_authority_reasons"]
+    final_signal["daily_authority_note"] = _dag_audit["daily_authority_note"]
+    final_signal["daily_permission_cap"] = _dag_audit["daily_permission_cap"]
 
     # Phase 12A: sanitize Claude prose so alerts cannot display tier-contradicting language
     final_signal["sanitized_reason"] = _sanitize_reason_for_tier(

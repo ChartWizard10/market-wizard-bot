@@ -2955,12 +2955,15 @@ def test_mktstate_none_value_preserved():
     assert result["final_signal"]["market_structure_state"] is None
 
 
-# 1D-4: all valid state labels pass through without any decision change
-def test_mktstate_all_states_do_not_change_tier():
+# 1D-4 (amended by Phase 15A): states that do NOT score in the Daily Authority
+# Governor leave all decision fields unchanged. REPAIR and TRANSITION now score
+# +3 via the Phase 15A governor (capping SNIPE_IT → STARTER) and are exercised
+# separately in the Phase 15A test section below.
+def test_mktstate_non_scoring_states_do_not_change_tier():
     signal = _snipe_signal()
     res_base = validate(signal, _pf_sovereign({}), _BASE_CONFIG)
     for state in ("EXPANSION", "ORDERLY_CONTINUATION", "COMPRESSION",
-                  "REPAIR", "TRANSITION", "FAILURE", "UNKNOWN"):
+                  "FAILURE", "UNKNOWN"):
         kf = _kf_with_mktstate(state)
         res = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
         for key in ("final_tier", "score", "capital_action",
@@ -2971,7 +2974,10 @@ def test_mktstate_all_states_do_not_change_tier():
             )
 
 
-# 1D-5: FAILURE/COMPRESSION state does NOT downgrade a valid SNIPE_IT
+# 1D-5 (amended by Phase 15A): FAILURE with a confirmed structural event
+# (structure_event="MSS" from _snipe_signal) and COMPRESSION/UNKNOWN do NOT
+# downgrade SNIPE_IT — the Phase 15A hard-veto condition for FAILURE requires
+# structure_event NOT in {bos, mss, choch, reclaim}, which is false here.
 def test_mktstate_adverse_state_does_not_downgrade_snipe_it():
     signal = _snipe_signal()
     for bad_state in ("FAILURE", "COMPRESSION", "UNKNOWN"):
@@ -3041,11 +3047,15 @@ def _kf_with_weekly(extra: dict | None = None, **weekly_overrides) -> dict:
     return kf
 
 
+# Phase 15A amends this list: ("hostile", "declining", "countertrend_context") removed
+# because weekly_trend_state=declining now scores +5 in the Phase 15A Daily Authority
+# Governor (SNIPE_IT → NEAR_ENTRY cap). Declining weekly behavior is covered by
+# test_15a_declining_weekly_hard_veto_caps_snipe_to_near_entry and
+# test_weekly_hostile_declining_caps_snipe_via_15a_governor below.
 _WEEKLY_STATES = [
     ("supportive", "advancing", "full_alignment"),
     ("mixed", "basing", "partial_alignment"),
     ("mixed", "basing", "repair_alignment"),
-    ("hostile", "declining", "countertrend_context"),
     ("unavailable", "unknown", "unknown"),
 ]
 
@@ -3109,18 +3119,25 @@ def test_weekly_favorable_does_not_change_snipe_it():
     assert result["safe_for_alert"] is True
 
 
-# 14A: hostile/countertrend weekly does not downgrade a valid SNIPE_IT
-def test_weekly_hostile_does_not_downgrade_snipe_it():
+# 14A (superseded by Phase 15A): declining weekly + hostile SMA now caps a
+# SNIPE_IT → NEAR_ENTRY via the Phase 15A Daily Authority Governor.
+# weekly_trend_state=declining scores +5 (hard veto) regardless of sma alignment.
+# The weekly evidence engine remains evidence-only; the cap is applied solely
+# by the governor, which is the single sanctioned authority reader.
+def test_weekly_hostile_declining_caps_snipe_via_15a_governor():
     signal = _snipe_signal()
     kf = _kf_with_weekly(
         weekly_sma_alignment="hostile", weekly_trend_state="declining",
         weekly_alignment_context="countertrend_context",
     )
     result = validate(signal, _pf_sovereign(kf), _BASE_CONFIG)
-    assert result["final_tier"] == "SNIPE_IT", (
-        "hostile weekly context must NOT veto or downgrade a valid daily SNIPE_IT"
+    assert result["final_tier"] == "NEAR_ENTRY", (
+        "declining weekly stage (hard veto +5) must cap SNIPE_IT → NEAR_ENTRY "
+        "via the Phase 15A Daily Authority Governor"
     )
     assert result["safe_for_alert"] is True
+    assert result["final_signal"]["daily_authority_conflict"] is True
+    assert result["final_signal"]["daily_authority_points"] == 5
 
 
 # 14A-24: weekly fields never appear as veto labels
@@ -3680,6 +3697,268 @@ def test_14f_no_forbidden_indicators_in_governor():
         _apply_active_auction_conflict_governor,
     )
     for fn in (_detect_active_auction_conflict, _apply_active_auction_conflict_governor):
+        src = inspect.getsource(fn).lower()
+        for word in ("rsi", "macd", "bollinger", "stochastic"):
+            assert not _re.search(rf"\b{word}\b", src), (
+                f"forbidden indicator {word!r} in {fn.__name__}"
+            )
+
+
+# ===========================================================================
+# Phase 15A — Daily Authority Governor
+# ===========================================================================
+# Doctrine: Weekly authorises → Daily permits → 4H locates → 1H proves.
+# Enforces the Daily permit step. Acts on SNIPE_IT and STARTER only.
+# Cap-only: SNIPE_IT→STARTER (3-4 pts), SNIPE_IT/STARTER→NEAR_ENTRY (5+ pts).
+# Runs AFTER Phase 14F. Uses only existing passthrough fields; default-safe.
+
+# Clean daily/weekly key_features — no authority defects.
+_DAG_KF_CLEAN = {
+    "weekly_trend_state":     "advancing",
+    "weekly_sma_alignment":   "supportive",
+    "market_structure_state": "EXPANSION",
+}
+
+
+def _kf_with_daily(extra: dict | None = None, **overrides) -> dict:
+    """Build key_features carrying daily/weekly authority fields."""
+    kf = dict(_DAG_KF_CLEAN)
+    kf.update(overrides)
+    if extra:
+        kf.update(extra)
+    return kf
+
+
+# 15A-1: NEAR_ENTRY input is returned unchanged — governor is a no-op
+def test_15a_no_action_when_tier_near_entry():
+    kf = _kf_with_daily(weekly_trend_state="declining")  # +5 if acted on
+    result = validate(_near_entry_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["final_signal"]["daily_authority_conflict"] is False
+    assert result["final_signal"]["daily_authority_points"] == 0
+    assert result["final_signal"]["daily_permission_cap"] is None
+    assert "daily_authority_conflict" not in result["applied_vetoes"]
+
+
+# 15A-2: WAIT input is returned unchanged
+def test_15a_no_action_when_tier_wait():
+    kf = _kf_with_daily(weekly_trend_state="declining")
+    result = validate(_wait_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "WAIT"
+    assert result["final_signal"]["daily_authority_conflict"] is False
+    assert result["safe_for_alert"] is False
+
+
+# 15A-3: clean SNIPE_IT with no authority defects is uncapped
+def test_15a_clean_snipe_it_no_cap():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_daily()), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    assert result["capital_action"] == "full_quality_allowed"
+    assert result["final_signal"]["daily_authority_conflict"] is False
+    assert result["final_signal"]["daily_authority_points"] == 0
+    assert result["final_signal"]["daily_permission_cap"] is None
+    assert "daily_authority_conflict" not in result["applied_vetoes"]
+    assert not any("daily_authority" in d for d in result["downgrades"])
+
+
+# 15A-4: declining weekly = hard veto (+5) → SNIPE_IT capped to NEAR_ENTRY
+def test_15a_declining_weekly_hard_veto_caps_snipe_to_near_entry():
+    kf = _kf_with_daily(weekly_trend_state="declining")
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == CAPITAL_MAP["NEAR_ENTRY"]
+    assert result["final_discord_channel"] == CHANNEL_MAP["NEAR_ENTRY"]
+    assert result["safe_for_alert"] is True
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is True
+    assert fs["daily_authority_points"] == 5
+    assert fs["daily_permission_cap"] == "SNIPE_IT→NEAR_ENTRY"
+    assert fs["daily_authority_note"]
+    assert any("weekly_trend_state=declining" in r for r in fs["daily_authority_reasons"])
+
+
+# 15A-5: distributing weekly (+3) → SNIPE_IT capped to STARTER
+def test_15a_distributing_weekly_caps_snipe_to_starter():
+    kf = _kf_with_daily(weekly_trend_state="distributing")
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    assert result["capital_action"] == "starter_only"
+    assert result["final_discord_channel"] == "#starter-signals"
+    assert result["safe_for_alert"] is True
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is True
+    assert fs["daily_authority_points"] == 3
+    assert fs["daily_permission_cap"] == "SNIPE_IT→STARTER"
+
+
+# 15A-6: daily structure REPAIR (+3) → SNIPE_IT capped to STARTER
+def test_15a_repair_structure_caps_snipe_to_starter():
+    kf = _kf_with_daily(market_structure_state="REPAIR")
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is True
+    assert fs["daily_authority_points"] == 3
+    assert any("market_structure_state=repair" in r for r in fs["daily_authority_reasons"])
+
+
+# 15A-7: daily structure TRANSITION (+3) → SNIPE_IT capped to STARTER
+def test_15a_transition_structure_caps_snipe_to_starter():
+    kf = _kf_with_daily(market_structure_state="TRANSITION")
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is True
+    assert fs["daily_authority_points"] == 3
+
+
+# 15A-8: 5 combined points → SNIPE_IT capped to NEAR_ENTRY
+# distributing(+3) + weekly_sma_alignment=mixed(+1) + volume_behavior=dryup(+1) = 5
+def test_15a_5_points_caps_snipe_to_near_entry():
+    kf = _kf_with_daily(
+        weekly_trend_state="distributing",
+        weekly_sma_alignment="mixed",
+        volume_behavior="dryup",
+    )
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is True
+    assert fs["daily_authority_points"] == 5
+    assert fs["daily_permission_cap"] == "SNIPE_IT→NEAR_ENTRY"
+
+
+# 15A-9: 2 soft points does not cap SNIPE_IT
+def test_15a_two_soft_points_does_not_cap_snipe_it():
+    kf = _kf_with_daily(
+        weekly_sma_alignment="mixed",  # +1
+        volume_behavior="dryup",       # +1
+    )
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "SNIPE_IT"
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is False
+    assert fs["daily_authority_points"] == 2
+
+
+# 15A-10: STARTER is not capped below its 5-point threshold (distributing = 3 pts)
+def test_15a_starter_no_cap_below_threshold():
+    kf = _kf_with_daily(weekly_trend_state="distributing")  # 3 pts
+    result = validate(_starter_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "STARTER"
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is False
+    assert fs["daily_authority_points"] == 3
+
+
+# 15A-11: STARTER at 5+ points caps to NEAR_ENTRY
+# distributing(+3) + market_structure_state=REPAIR(+3) = 6 pts
+def test_15a_starter_capped_to_near_entry():
+    kf = _kf_with_daily(
+        weekly_trend_state="distributing",
+        market_structure_state="REPAIR",
+    )
+    result = validate(_starter_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == CAPITAL_MAP["NEAR_ENTRY"]
+    assert result["safe_for_alert"] is True
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is True
+    assert fs["daily_authority_points"] == 6
+    assert fs["daily_permission_cap"] == "STARTER→NEAR_ENTRY"
+
+
+# 15A-12: all audit fields populated when governor fires
+def test_15a_audit_fields_populated_when_conflict():
+    kf = _kf_with_daily(weekly_trend_state="declining")
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is True
+    assert isinstance(fs["daily_authority_points"], int) and fs["daily_authority_points"] > 0
+    assert isinstance(fs["daily_authority_reasons"], list) and fs["daily_authority_reasons"]
+    assert isinstance(fs["daily_authority_note"], str) and fs["daily_authority_note"]
+    assert fs["daily_permission_cap"] == "SNIPE_IT→NEAR_ENTRY"
+    assert "daily_authority_conflict" in result["applied_vetoes"]
+    assert any("daily_authority_conflict" in d for d in result["downgrades"])
+
+
+# 15A-13: audit fields present and inert when governor does not fire
+def test_15a_audit_fields_inert_when_no_conflict():
+    result = validate(_snipe_signal(), _pf_sovereign(_kf_with_daily()), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is False
+    assert fs["daily_authority_points"] == 0
+    assert fs["daily_authority_reasons"] == []
+    assert fs["daily_authority_note"] is None
+    assert fs["daily_permission_cap"] is None
+
+
+# 15A-14: missing daily/weekly fields score zero — default-safe
+def test_15a_default_safe_missing_fields():
+    result = validate(_snipe_signal(), _pf_sovereign({"current_price": 182.50}), _BASE_CONFIG)
+    fs = result["final_signal"]
+    assert fs["daily_authority_conflict"] is False
+    assert fs["daily_authority_points"] == 0
+    assert "daily_authority_conflict" not in result["applied_vetoes"]
+
+
+# ---- Regression tests ----
+
+# 15A-R1: Phase 14F caps SNIPE_IT → NEAR_ENTRY; Phase 15A sees NEAR_ENTRY and skips
+def test_15a_14f_to_near_entry_then_15a_skips():
+    kf = _kf_with_1h(_ARM_LIKE_CONFLICT)  # 14F: 6 pts → NEAR_ENTRY
+    kf["weekly_trend_state"] = "declining"  # +5 — only fires if 15A ran on NEAR_ENTRY
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["final_signal"]["active_auction_conflict"] is True    # 14F fired
+    assert result["final_signal"]["daily_authority_conflict"] is False  # 15A skipped (saw NE)
+
+
+# 15A-R2: Phase 14F caps SNIPE_IT → STARTER; Phase 15A then cascades STARTER → NEAR_ENTRY
+def test_15a_14f_to_starter_then_15a_cascades():
+    kf = _kf_with_1h(_MODERATE_CONFLICT)  # 14F: 3 pts → STARTER cap
+    kf["weekly_trend_state"] = "distributing"    # +3 for 15A
+    kf["market_structure_state"] = "REPAIR"       # +3 for 15A → 6 pts total → NEAR_ENTRY
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["final_signal"]["active_auction_conflict"] is True   # 14F fired
+    assert result["final_signal"]["daily_authority_conflict"] is True  # 15A fired
+    assert result["final_signal"]["daily_authority_points"] == 6
+
+
+# 15A-R3: governor never produces WAIT — safe_for_alert stays True at max points
+def test_15a_never_produces_wait():
+    kf = _kf_with_daily(
+        weekly_trend_state="declining",     # +5
+        market_structure_state="REPAIR",    # +3
+        weekly_sma_alignment="mixed",       # +1
+        volume_behavior="dryup",            # +1
+    )
+    result = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["safe_for_alert"] is True
+
+
+# 15A-R4: governor never upgrades a tier
+def test_15a_never_upgrades():
+    kf = _kf_with_daily()
+    result_snipe = validate(_snipe_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    result_ne = validate(_near_entry_signal(), _pf_sovereign(kf), _BASE_CONFIG)
+    assert result_snipe["final_tier"] == "SNIPE_IT"
+    assert result_ne["final_tier"] == "NEAR_ENTRY"
+    assert result_snipe["final_signal"]["daily_authority_conflict"] is False
+    assert result_ne["final_signal"]["daily_authority_conflict"] is False
+
+
+# 15A-R5: governor source introduces no forbidden indicators
+def test_15a_no_forbidden_indicators_in_governor():
+    import inspect
+    import re as _re
+    from src.tiering import (
+        _detect_daily_authority_conflict,
+        _apply_daily_authority_governor,
+    )
+    for fn in (_detect_daily_authority_conflict, _apply_daily_authority_governor):
         src = inspect.getsource(fn).lower()
         for word in ("rsi", "macd", "bollinger", "stochastic"):
             assert not _re.search(rf"\b{word}\b", src), (

@@ -2669,3 +2669,133 @@ def test_14f1_decision_path_does_not_read_sanitized_text():
         assert "sanitized" not in src, (
             f"decision-path function {fn_name} reads sanitized display text"
         )
+
+
+# ===========================================================================
+# Phase 15A — Daily Authority Governor display block
+# ===========================================================================
+
+_15A_NE_NOTE = (
+    "Capital withheld. Lower-timeframe structure may be improving, "
+    "but the daily chart has not granted swing permission yet. "
+    "Required proof: weekly_trend_state=declining (+5)"
+)
+_15A_STARTER_NOTE = (
+    "Starter only. Daily context is constructive enough to monitor, "
+    "but one or more authority layers are incomplete. "
+    "Missing proof: weekly_trend_state=distributing (+3)"
+)
+
+
+def _15a_ne_capped_result(**extra) -> dict:
+    """SNIPE_IT capped to NEAR_ENTRY by the Daily Authority Governor."""
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        capital_action="wait_no_capital",
+        daily_authority_conflict=True,
+        daily_authority_points=5,
+        daily_authority_reasons=["weekly_trend_state=declining (+5)"],
+        daily_authority_note=_15A_NE_NOTE,
+        daily_permission_cap="SNIPE_IT→NEAR_ENTRY",
+        active_auction_conflict=False,
+        active_auction_conflict_points=0,
+        active_auction_conflict_reasons=[],
+        active_auction_conflict_note=None,
+        **extra,
+    )
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    return tr
+
+
+def _15a_starter_capped_result(**extra) -> dict:
+    """SNIPE_IT capped to STARTER by the Daily Authority Governor."""
+    tr = _tiering_result(
+        tier="STARTER",
+        capital_action="starter_only",
+        daily_authority_conflict=True,
+        daily_authority_points=3,
+        daily_authority_reasons=["weekly_trend_state=distributing (+3)"],
+        daily_authority_note=_15A_STARTER_NOTE,
+        daily_permission_cap="SNIPE_IT→STARTER",
+        active_auction_conflict=False,
+        active_auction_conflict_points=0,
+        active_auction_conflict_reasons=[],
+        active_auction_conflict_note=None,
+        **extra,
+    )
+    tr["capital_action"] = "starter_only"
+    tr["final_discord_channel"] = "#starter-signals"
+    return tr
+
+
+# 15A-D1: NEAR_ENTRY cap shows "DAILY AUTHORITY CONFLICT" header
+def test_15a_near_entry_cap_shows_authority_conflict_header():
+    text = format_alert(_15a_ne_capped_result())
+    assert "DAILY AUTHORITY CONFLICT" in text
+    assert "Capital withheld." in text
+    assert "daily chart has not granted swing permission" in text
+
+
+# 15A-D2: STARTER cap shows "DAILY AUTHORITY CAP" header
+def test_15a_starter_cap_shows_authority_cap_header():
+    text = format_alert(_15a_starter_capped_result())
+    assert "DAILY AUTHORITY CAP" in text
+    assert "Starter only." in text
+    assert "one or more authority layers are incomplete" in text
+
+
+# 15A-D3: no conflict → neither block appears
+def test_15a_no_conflict_no_block_shown():
+    tr = _tiering_result(
+        daily_authority_conflict=False,
+        daily_authority_points=0,
+        daily_authority_reasons=[],
+        daily_authority_note=None,
+        daily_permission_cap=None,
+    )
+    text = format_alert(tr)
+    assert "DAILY AUTHORITY" not in text
+
+
+# 15A-D4: no daily_authority_conflict field → block absent (field-absent safety)
+def test_15a_absent_fields_no_block():
+    tr = _tiering_result()  # no daily_authority_* fields at all
+    text = format_alert(tr)
+    assert "DAILY AUTHORITY" not in text
+
+
+# 15A-D5: note content rendered in the block
+def test_15a_note_content_rendered():
+    text = format_alert(_15a_ne_capped_result())
+    assert "Required proof:" in text
+    assert "weekly_trend_state=declining" in text
+
+
+# 15A-D6: NEAR_ENTRY capped by DAG still has NE capital firewall applied
+def test_15a_ne_capped_by_dag_still_has_ne_capital_firewall():
+    tr = _15a_ne_capped_result(next_action="Enter at current price with stop below 178.20")
+    text = format_alert(tr)
+    _assert_no_forbidden_ne_language(text)
+
+
+# 15A-D7: when both 14F and 15A fire, both blocks appear
+def test_15a_both_governors_show_both_blocks():
+    tr = _tiering_result(
+        tier="NEAR_ENTRY",
+        capital_action="wait_no_capital",
+        active_auction_conflict=True,
+        active_auction_conflict_points=6,
+        active_auction_conflict_reasons=["one_hour_acceptance_state=pending (+1)"],
+        active_auction_conflict_note=_14F_NEAR_ENTRY_NOTE,
+        daily_authority_conflict=True,
+        daily_authority_points=5,
+        daily_authority_reasons=["weekly_trend_state=declining (+5)"],
+        daily_authority_note=_15A_NE_NOTE,
+        daily_permission_cap="STARTER→NEAR_ENTRY",
+    )
+    tr["capital_action"] = "wait_no_capital"
+    tr["final_discord_channel"] = "#near-entry-watch"
+    text = format_alert(tr)
+    assert "ACTIVE AUCTION CONFLICT" in text
+    assert "DAILY AUTHORITY CONFLICT" in text
