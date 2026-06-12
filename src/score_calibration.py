@@ -70,6 +70,25 @@ _TRAJECTORY_ADJ = {
 _ELITE_STRUCTURES = {"bos", "mss", "choch"}
 _NORMAL_STRUCTURES = {"reclaim", "accepted_break", "failed_breakdown_reclaim"}
 
+# Phase 14C.1: trade location → adjustment, by tier family. Location context is
+# attached by the scheduler (tiering_result["trade_location"]); when absent or
+# unknown every adjustment is zero and the elite gate is unaffected — fully
+# default-safe for legacy records and tickers without zone data.
+_LOCATION_ADJ_SNIPE = {
+    "lower_zone_defense":  -2,
+    "mid_zone_acceptance":  0,
+    "upper_zone_expansion": 0,    # +1 handled conditionally (clear path, risk ok)
+    "above_zone_extension": -2,
+    "below_zone_failure":  -8,
+}
+_LOCATION_ADJ_STARTER = {
+    "lower_zone_defense":  -1,
+    "mid_zone_acceptance":  0,
+    "upper_zone_expansion": 0,
+    "above_zone_extension": -1,
+    "below_zone_failure":  -8,
+}
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -147,15 +166,24 @@ def _calibrate(tiering_result: dict, _config: dict) -> dict:
     if quality_delta != 0:
         reasons.append((f"structure_quality", quality_delta))
 
+    # ---- E. Trade location realism (Phase 14C.1) --------------------------
+    location = tiering_result.get("trade_location") or {}
+    location_delta = _location_adj(
+        final_tier, location, risk_state, overhead, traj_label
+    )
+    if location_delta != 0:
+        loc_state = str(location.get("location_state", "unknown"))
+        reasons.append((f"location={loc_state}", location_delta))
+
     # ---- Sum + bound ------------------------------------------------------
-    raw_delta     = risk_delta + path_delta + traj_delta + quality_delta
+    raw_delta     = risk_delta + path_delta + traj_delta + quality_delta + location_delta
     bounded_delta = max(_TOTAL_DELTA_FLOOR, min(_TOTAL_DELTA_CEIL, raw_delta))
     calibrated    = raw_score + bounded_delta
 
     # ---- Elite cap (no 90+ unless cleanliness preconditions met) ----------
     elite_cap_applied = False
     if calibrated >= _ELITE_SCORE_FLOOR and not _qualifies_for_elite(
-        risk_state, overhead, retest, hold, traj_label, final_tier
+        risk_state, overhead, retest, hold, traj_label, final_tier, location
     ):
         calibrated = _ELITE_CAP
         elite_cap_applied = True
@@ -211,6 +239,39 @@ def _structure_quality_adj(
 
 
 # ---------------------------------------------------------------------------
+# Trade location adjustment (Phase 14C.1)
+# ---------------------------------------------------------------------------
+
+def _location_adj(
+    final_tier: str,
+    location: dict,
+    risk_state: str,
+    overhead: str,
+    traj_label: str,
+) -> int:
+    """Location realism delta. Unknown/absent location always scores zero.
+
+    NEAR_ENTRY receives no location penalty — that tier is permitted to be
+    incomplete, and its weaknesses are already priced by structure/trajectory.
+    """
+    state = str(location.get("location_state") or "unknown")
+    if state == "unknown" or final_tier not in ("SNIPE_IT", "STARTER"):
+        return 0
+
+    if final_tier == "SNIPE_IT":
+        delta = _LOCATION_ADJ_SNIPE.get(state, 0)
+        # Repeated alert still stuck in lower-zone defense: extra honesty tax.
+        if state == "lower_zone_defense" and traj_label == "REPEATED_NO_CHANGE":
+            delta -= 1
+        # Upper-zone expansion earns +1 only with a clear path and intact risk.
+        if state == "upper_zone_expansion" and overhead == "clear" and risk_state != "fragile":
+            delta += 1
+        return delta
+
+    return _LOCATION_ADJ_STARTER.get(state, 0)
+
+
+# ---------------------------------------------------------------------------
 # Elite cap precondition
 # ---------------------------------------------------------------------------
 
@@ -221,6 +282,7 @@ def _qualifies_for_elite(
     hold: str,
     traj_label: str,
     final_tier: str,
+    location: dict | None = None,
 ) -> bool:
     if final_tier != "SNIPE_IT":
         return False
@@ -235,6 +297,20 @@ def _qualifies_for_elite(
         return False
     if traj_label in ("DETERIORATING", "DOWNGRADING", "QUALITY_COMPRESSED"):
         return False
+    # Phase 14C.1: no elite while price is still below the zone's confirmation
+    # midpoint. Unknown/absent location does not block (default-safe).
+    if location:
+        loc_state = str(location.get("location_state") or "unknown")
+        if loc_state in ("lower_zone_defense", "below_zone_failure"):
+            return False
+        sp = location.get("scan_price")
+        zm = location.get("zone_mid")
+        if sp is not None and zm is not None:
+            try:
+                if float(sp) < float(zm):
+                    return False
+            except (TypeError, ValueError):
+                pass
     return True
 
 
@@ -316,6 +392,15 @@ def _humanize_reason(name: str, delta: int, band: str) -> str:
         if delta > 0:
             return "structure event is elite"
         return "structure / confirmation is weak"
+    if name.startswith("location="):
+        state = name.split("=", 1)[1]
+        return {
+            "lower_zone_defense":  "still lower-zone defense; confirmation above zone mid pending",
+            "mid_zone_acceptance": "mid-zone acceptance",
+            "upper_zone_expansion": "clean upper-zone expansion",
+            "above_zone_extension": "extended above zone — chase risk",
+            "below_zone_failure":  "price below zone — failure risk",
+        }.get(state, f"location={state}")
     return name
 
 
