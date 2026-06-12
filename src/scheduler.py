@@ -29,6 +29,7 @@ from src import campaign_store
 from src import score_calibration
 from src import state_store
 from src import tiering
+from src import trade_location
 from src import trajectory as trajectory_mod
 from src.claude_client import async_claude_scan, claude_call
 
@@ -354,6 +355,17 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
             tiering_result["trajectory"] = {"label": "UNKNOWN", "text": ""}
+
+        # Step 6.55: Trade location realism (Phase 14C.1 — audit/display only;
+        # never affects tier, capital, routing, suppression, or dedup). Must run
+        # before calibration, which reads tiering_result["trade_location"].
+        try:
+            tiering_result["trade_location"] = trade_location.build_trade_location_context(
+                enriched_map.get(ticker, {}), tiering_result
+            )
+        except Exception as exc:
+            log.warning("TRADE_LOCATION_ERROR: %s: %s", ticker, exc)
+            tiering_result["trade_location"] = None
 
         # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
         # capital_action, discord_channel, safe_for_alert, suppression, or dedup)

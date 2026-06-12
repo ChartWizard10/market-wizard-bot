@@ -433,6 +433,16 @@ def _apply_quality_language_guard(final_tier: str, signal: dict, body: str) -> s
 
 
 # ---------------------------------------------------------------------------
+# Phase 14C.1: directional language correction. "Dip toward" is only honest
+# when the level is BELOW the current price; for a level above price the prose
+# must use reclaim/push language. Applied in format_alert when the trade
+# location context proves the confirmation level sits above scan price.
+# ---------------------------------------------------------------------------
+
+_DIP_TOWARD_RE = re.compile(r"\bdips?\s+toward(?:s)?\b", re.IGNORECASE)
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.7E: NEAR_ENTRY-only upgrade-language seal + dangling tail cleaner.
 # ---------------------------------------------------------------------------
 
@@ -2070,6 +2080,39 @@ def format_alert(
     _calibration         = tiering_result.get("calibration") or {}
     _calibration_display = str(_calibration.get("display_text", "")).strip()
 
+    # Phase 14C.1: trade location context (display-only — never affects tier,
+    # capital, routing, suppression, or dedup).
+    _tl_ctx = tiering_result.get("trade_location") or {}
+    _tl_state = str(_tl_ctx.get("location_state") or "unknown")
+    _tl_display = str(_tl_ctx.get("display_text", "")).strip()
+    _tl_conf = _tl_ctx.get("confirmation_level")
+    _tl_scan = _tl_ctx.get("scan_price")
+
+    # Directional language correction: a confirmation level above scan price is
+    # something to reclaim, not "dip toward". Display-only prose fix.
+    try:
+        _tl_conf_above = (
+            _tl_conf is not None and _tl_scan is not None
+            and float(_tl_conf) > float(_tl_scan)
+        )
+    except (TypeError, ValueError):
+        _tl_conf_above = False
+    if _tl_conf_above:
+        next_action = _DIP_TOWARD_RE.sub("push toward", next_action)
+        reason      = _DIP_TOWARD_RE.sub("push toward", reason)
+
+    # Quality read acknowledgment: executable-tier quality language may not
+    # ignore active lower-zone defense.
+    if _tl_state == "lower_zone_defense" and final_tier in ("SNIPE_IT", "STARTER"):
+        try:
+            _tl_conf_str = f"{float(_tl_conf):.2f}" if _tl_conf is not None else "zone mid"
+        except (TypeError, ValueError):
+            _tl_conf_str = "zone mid"
+        quality_phrase = (
+            f"{quality_phrase} Zone defense active — "
+            f"confirmation above {_tl_conf_str} still required."
+        )
+
     lines += [
         "──────────────────────────────",
         "ACTION",
@@ -2087,6 +2130,8 @@ def format_alert(
         lines.append(f"  Trajectory:   {_trajectory_text}")
     if _calibration_display:
         lines.append(f"  Score realism: {_calibration_display}")
+    if _tl_display and _tl_state != "unknown":
+        lines.append(f"  Location: {_tl_display}")
 
     # Phase 15C.1: Quality Evidence block — compact per-dimension transparency.
     # Shows which of the five evidence dimensions passed, so traders see the
