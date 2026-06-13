@@ -337,6 +337,13 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
         result = _finalize_near_entry_body_text(result)
     result = _sanitize_diagnostic_labels(result)
     result = _humanize_bare_gate_keys(result)
+    # Phase 14C.2: STARTER prestige-language guard — must run before the boolean
+    # firewall so any introduced phrase is also sanitized.
+    if final_tier == "STARTER":
+        result = _apply_starter_quality_guard(result)
+    # Phase 14C.2: final-body boolean/debug firewall — last line of defence
+    # against any "field=True/False" fragment surfacing in any section.
+    result = _sanitize_boolean_debug_fragments(result)
     if final_tier == "NEAR_ENTRY":
         result = _apply_near_entry_capital_firewall(result)
     return result
@@ -753,6 +760,127 @@ def _humanize_bare_gate_keys(text: str) -> str:
         return _GATE_KEY_MAP.get(m.group(1).lower(), m.group(1))
 
     return _GATE_KEY_WORD_RE.sub(_replace, text)
+
+
+# ---------------------------------------------------------------------------
+# Phase 14C.2: boolean / debug-fragment sanitizer.
+#
+# Internal scanner booleans (price_in_zone=True, price_at_ob=True,
+# price_at_fvg=True) and any residual "field=True/False" fragment must never
+# reach Discord — the alert is an execution contract, not a debug dump. The
+# bare-gate-key humanizer can also expand a key and leave a dangling "=True"
+# tail (e.g. "...returned to the zone=True"); this pass repairs both the raw and
+# the half-humanized forms.
+# ---------------------------------------------------------------------------
+
+_BOOL_ZONE_PHRASE = (
+    r"(?:price\s+has\s+(?:not\s+)?returned\s+to\s+the\s+(?:active\s+)?zone"
+    r"|price[_ ](?:in|at)[_ ][a-z_]+"
+    r"|in[_ ]zone|at[_ ](?:ob|fvg))"
+)
+_BOOL_ZONE_TRUE_RE  = re.compile(_BOOL_ZONE_PHRASE + r"\s*=\s*true\b",  re.IGNORECASE)
+_BOOL_ZONE_FALSE_RE = re.compile(_BOOL_ZONE_PHRASE + r"\s*=\s*false\b", re.IGNORECASE)
+_BOOL_GENERIC_RE    = re.compile(r"\s*\b[\w.\-/]+\s*=\s*(?:true|false)\b", re.IGNORECASE)
+_BOOL_SPACE_BEFORE_PUNCT_RE = re.compile(r" ([.,;])")
+
+
+def _sanitize_boolean_debug_fragments(text: str) -> str:
+    """Strip/rewrite internal boolean/debug fragments so no '=True'/'=False'
+    leaks into the alert body. Zone-presence booleans become human zone prose;
+    any other field=bool fragment is removed. Safe to run on the full body —
+    it never collapses intentional column-alignment whitespace.
+    """
+    if not text:
+        return text
+    result = _BOOL_ZONE_TRUE_RE.sub(
+        "Price has returned to the active zone and is attempting to hold", text
+    )
+    result = _BOOL_ZONE_FALSE_RE.sub(
+        "Price has not yet returned to the active zone", result
+    )
+    result = _BOOL_GENERIC_RE.sub("", result)
+    result = _BOOL_SPACE_BEFORE_PUNCT_RE.sub(r"\1", result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 14C.2: trail-stop language safety.
+#
+# "Trail stop" is profit-protection language and is honest only when the stop
+# tightens risk (moves toward entry/profit). A "trail stop" placed BELOW the
+# current invalidation widens risk and is really a deep-failure reference — it
+# must be relabelled so the alert never disguises added risk as protection.
+# ---------------------------------------------------------------------------
+
+_TRAIL_STOP_LEVEL_RE = re.compile(
+    r"\btrail(?:ing)?\s+stop\b"
+    r"(?:\s+(?:below|under|at|near|to)\s*\$?(\d+(?:\.\d+)?))?",
+    re.IGNORECASE,
+)
+_TRAIL_STOP_WORD_RE = re.compile(r"\btrail(?:ing)?\s+stop\b", re.IGNORECASE)
+
+
+def _sanitize_trail_stop_language(text: str, inval_level) -> str:
+    """Relabel a 'trail stop' that sits below the invalidation as a deep-failure
+    reference. Trail wording survives only when it tightens risk.
+    """
+    if not text:
+        return text
+    try:
+        inval = float(inval_level) if inval_level is not None else None
+    except (TypeError, ValueError):
+        inval = None
+    if inval is None:
+        return text
+
+    def _repl(m: re.Match) -> str:
+        whole   = m.group(0)
+        lvl_str = m.group(1)
+        if lvl_str is None:
+            return whole
+        try:
+            lvl = float(lvl_str)
+        except ValueError:
+            return whole
+        if lvl < inval:
+            return _TRAIL_STOP_WORD_RE.sub("deep failure reference", whole)
+        return whole
+
+    return _TRAIL_STOP_LEVEL_RE.sub(_repl, text)
+
+
+# ---------------------------------------------------------------------------
+# Phase 14C.2: STARTER quality language guard.
+#
+# STARTER alerts must not carry prestige/elite language that implies full-size
+# authorization. The "High-quality STARTER" tier label is sanctioned and
+# exempt; generic "high-quality" prose claims are cooled to "strong tactical".
+# Display-only — does not affect tier, capital_action, or routing.
+# ---------------------------------------------------------------------------
+
+_QLG_STARTER: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\ball\s+conditions\s+(?:are\s+)?(?:satisfied|met)\b", re.IGNORECASE),
+     "starter conditions met"),
+    (re.compile(r"\ball\s+(?:5|five)\b", re.IGNORECASE), "several"),
+    # Phase 14C.2: the sanctioned "High-quality STARTER" tier label is exempt
+    # (it already names the tier and states the capital limit); cool every other
+    # bare "high-quality" prestige claim.
+    (re.compile(r"\bhigh[-\s]quality\b(?!\s+starter)", re.IGNORECASE), "strong tactical"),
+    # Affirmative full-size grants only — denial language ("full-size
+    # authorization not granted", "full-size capital withheld") must survive.
+    (re.compile(r"\bfull[-\s]siz(?:e|ed)\s+(?:allowed|authorized|authorization\s+granted"
+                r"|position|entry)\b", re.IGNORECASE), "starter size only"),
+]
+
+
+def _apply_starter_quality_guard(body: str) -> str:
+    """Cool prestige/elite language in STARTER alert bodies (display-only).
+
+    The 'High-quality STARTER' tier label is sanctioned and survives unchanged.
+    """
+    for pat, repl in _QLG_STARTER:
+        body = pat.sub(repl, body)
+    return body
 
 
 def _parse_missing_conditions(raw) -> list[str]:
@@ -1334,6 +1462,15 @@ def _build_quality_phrase(label: str, signal: dict, final_tier: str = "") -> str
             )
             return f"Near-ready — confirmed sequence and hold, {premium_note}; pending blocker resolution."
 
+    if final_tier == "STARTER" and label in ("A_PLUS_ELITE", "A_PLUS_CANDIDATE", "CLEAN_STARTER"):
+        # Phase 14C.2: STARTER quality heat control. A STARTER is never an elite
+        # full-size grant; the label names the tier and states the capital limit
+        # plainly so prestige language can never outrun the tier contract.
+        return (
+            "High-quality STARTER — structure and hold confirmed; "
+            "full-size confirmation not granted."
+        )
+
     if label == "A_PLUS_ELITE":
         return "Elite candidate — all five quality dimensions institutional-grade."
     if label == "A_PLUS_CANDIDATE":
@@ -1516,6 +1653,17 @@ def format_alert(
     reason      = _humanize_bare_gate_keys(reason)
     next_action = _humanize_bare_gate_keys(next_action)
 
+    # Phase 14C.2: boolean/debug-fragment firewall (all tiers). Runs after the
+    # gate-key humanizer so it also repairs the "...zone=True" half-humanized
+    # leak. Display-only — no decision field is read or written.
+    reason      = _sanitize_boolean_debug_fragments(reason)
+    next_action = _sanitize_boolean_debug_fragments(next_action)
+
+    # Phase 14C.2: trail-stop safety (all tiers). A trail stop below the
+    # invalidation widens risk and is relabelled a deep-failure reference.
+    reason      = _sanitize_trail_stop_language(reason, signal.get("invalidation_level"))
+    next_action = _sanitize_trail_stop_language(next_action, signal.get("invalidation_level"))
+
     # Phase 13.7E: field-level upgrade-language neutralization for NEAR_ENTRY.
     # Applied before rendering so structural label prefixes are not consumed by
     # the sentence-level regex.
@@ -1585,6 +1733,12 @@ def format_alert(
     raw_blocker_str = str(signal.get("near_entry_blocker_note") or "")
     overhead_label = _render_overhead_label(overhead_status, final_tier, raw_blocker_str)
 
+    # Phase 14C.2: zone boundaries needed for the deep-failure EXECUTION line
+    # (extracted early so the line can be appended immediately after Overhead).
+    _tl_ctx_pre   = tiering_result.get("trade_location") or {}
+    _tl_zone_low  = _tl_ctx_pre.get("zone_low")
+    _tl_zone_type = str(_tl_ctx_pre.get("zone_type") or "").upper()
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{badge} | {ticker} | Score: {score}",
@@ -1599,6 +1753,21 @@ def format_alert(
         f"  R:R:          {rr_str}",
         f"  Overhead:     {overhead_label}",
     ]
+
+    # Phase 14C.2: invalidation clarity. When the structural zone floor sits
+    # below the risk invalidation, name the deep zone-failure level on its own
+    # line so the risk stop and the deep-failure level are never conflated.
+    try:
+        _inval_f = float(inval_level) if inval_level is not None else None
+        _zlow_f  = float(_tl_zone_low) if _tl_zone_low is not None else None
+    except (TypeError, ValueError):
+        _inval_f = _zlow_f = None
+    if (
+        _inval_f is not None and _zlow_f is not None
+        and round(_zlow_f, 2) < round(_inval_f, 2)
+    ):
+        _zlabel = _tl_zone_type if _tl_zone_type in ("FVG", "OB") else "zone"
+        lines.append(f"  Deep {_zlabel} failure: {_fmt_level(_zlow_f)}  (below risk invalidation)")
 
     # Phase 12D: RISK REALISM block — only emit lines for non-None values so
     # alerts never display "None". State and note are always displayed when
@@ -1683,16 +1852,15 @@ def format_alert(
     _calibration         = tiering_result.get("calibration") or {}
     _calibration_display = str(_calibration.get("display_text", "")).strip()
 
-    # Phase 14C.1: trade location context (display-only — never affects tier,
-    # capital, routing, suppression, or dedup).
-    _tl_ctx = tiering_result.get("trade_location") or {}
-    _tl_state = str(_tl_ctx.get("location_state") or "unknown")
+    # Phase 14C.1/14C.2: trade-location context (display-only — never affects
+    # tier, capital, routing, suppression, or dedup). _tl_zone_low and
+    # _tl_zone_type are already set above for the deep-failure EXECUTION line.
+    _tl_ctx     = tiering_result.get("trade_location") or {}
+    _tl_state   = str(_tl_ctx.get("location_state") or "unknown")
     _tl_display = str(_tl_ctx.get("display_text", "")).strip()
-    _tl_conf = _tl_ctx.get("confirmation_level")
-    _tl_scan = _tl_ctx.get("scan_price")
+    _tl_conf    = _tl_ctx.get("confirmation_level")
+    _tl_scan    = _tl_ctx.get("scan_price")
 
-    # Directional language correction: a confirmation level above scan price is
-    # something to reclaim, not "dip toward". Display-only prose fix.
     try:
         _tl_conf_above = (
             _tl_conf is not None and _tl_scan is not None
@@ -1700,21 +1868,56 @@ def format_alert(
         )
     except (TypeError, ValueError):
         _tl_conf_above = False
+
+    # Directional language correction: a confirmation level above scan price is
+    # something to reclaim, not "dip toward". Display-only prose fix.
     if _tl_conf_above:
         next_action = _DIP_TOWARD_RE.sub("push toward", next_action)
         reason      = _DIP_TOWARD_RE.sub("push toward", reason)
 
+    # Phase 14C.2: repeated-signal realism. A repeated thesis or a cooldown-
+    # expired re-alert must not read as a fresh new opportunity. Display-only.
+    _traj_label   = str(_trajectory.get("label", "")).strip().upper()
+    _dedup_reason = str((dedup_decision or {}).get("reason", "")).strip().lower()
+    _is_repeated  = (
+        _traj_label == "REPEATED_NO_CHANGE"
+        or "cooldown_expired" in _dedup_reason
+        or "repeat" in _dedup_reason
+    )
+
+    # Phase 14C.1: location-aware confirmation string.
+    try:
+        _tl_conf_str = f"{float(_tl_conf):.2f}" if _tl_conf is not None else "zone mid"
+    except (TypeError, ValueError):
+        _tl_conf_str = "zone mid"
+
     # Quality read acknowledgment: executable-tier quality language may not
     # ignore active lower-zone defense.
     if _tl_state == "lower_zone_defense" and final_tier in ("SNIPE_IT", "STARTER"):
-        try:
-            _tl_conf_str = f"{float(_tl_conf):.2f}" if _tl_conf is not None else "zone mid"
-        except (TypeError, ValueError):
-            _tl_conf_str = "zone mid"
         quality_phrase = (
             f"{quality_phrase} Zone defense active — "
             f"confirmation above {_tl_conf_str} still required."
         )
+
+    # Phase 14C.2: location-proof consistency. In mid-zone acceptance with the
+    # next-proof level still above price, executable quality language may not
+    # imply add/full aggression before that level is reclaimed.
+    _proof_note = ""
+    if (
+        _tl_state == "mid_zone_acceptance"
+        and _tl_conf_above
+        and final_tier in ("SNIPE_IT", "STARTER")
+    ):
+        if final_tier == "SNIPE_IT":
+            _proof_note = (
+                f"Structure valid; fresh/add aggression waits for "
+                f"acceptance above {_tl_conf_str}."
+            )
+        else:
+            _proof_note = (
+                f"Starter valid while holding zone; add waits for "
+                f"acceptance above {_tl_conf_str}."
+            )
 
     lines += [
         "──────────────────────────────",
@@ -1722,6 +1925,24 @@ def format_alert(
         f"  {action_headline}",
         f"  {sizing_line}",
         f"  Quality read: {quality_phrase}",
+    ]
+    # Phase 14C.2: repeated-signal realism line — keeps tier intact, prevents
+    # the alert from reading as a fresh new opportunity.
+    if _is_repeated and final_tier in ("SNIPE_IT", "STARTER", "NEAR_ENTRY"):
+        if final_tier == "SNIPE_IT":
+            _repeated_note = (
+                "SNIPE_IT thesis remains valid after cooldown. Verify price "
+                "still holds trigger/location before new capital."
+            )
+        else:
+            _repeated_note = (
+                "Repeated signal — thesis remains valid; no new aggression "
+                "unless next proof confirms."
+            )
+        lines.append(f"  Repeated: {_repeated_note}")
+    if _proof_note:
+        lines.append(f"  Proof: {_proof_note}")
+    lines += [
         f"  Next: {next_action}",
         f"  Why:  {reason}",
     ]
@@ -1748,6 +1969,12 @@ def format_alert(
     lines.append(f"  Status:     {drift_status}")
     if freshness_note:
         lines.append(f"  Note:       {freshness_note}")
+    # Phase 14C.2: repeated/cooldown alerts are scan-time snapshots; remind the
+    # desk to re-verify the live price before acting on a re-fired thesis.
+    if _is_repeated:
+        lines.append(
+            "  Note:       Signal is scan-time only; verify current price before action."
+        )
 
     lines += [
         "──────────────────────────────",

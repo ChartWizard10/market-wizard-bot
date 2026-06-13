@@ -501,8 +501,11 @@ class TestFormatAlertPhase13_8BIntegration:
         assert "Elite candidate" in result
 
     def test_elite_phrase_in_starter_alert(self):
+        # Phase 14C.2: STARTER tier uses unified "High-quality STARTER" label;
+        # "Elite candidate" is suppressed to prevent prestige claims in reduced-size tier.
         result = format_alert(_tiering_result("STARTER"))
-        assert "Elite candidate" in result
+        assert "High-quality STARTER" in result
+        assert "Elite candidate" not in result
 
     def test_candidate_phrase_when_one_dim_standard(self):
         """One standard dimension drops to A+ candidate."""

@@ -425,6 +425,8 @@ class TestFormatAlertQualityPhrases:
         assert _QUALITY_LABEL_PHRASES["A_PLUS_CANDIDATE"] in result
 
     def test_clean_starter_phrase_for_fragile_risk(self):
+        # Phase 14C.2: STARTER tier now uses unified "High-quality STARTER" label
+        # regardless of quality dimension profile.
         result = format_alert(_tiering_result(
             "STARTER",
             retest_status="confirmed",
@@ -433,9 +435,11 @@ class TestFormatAlertQualityPhrases:
             overhead_status="clear",
             sma_value_alignment="supportive",
         ))
-        assert _QUALITY_LABEL_PHRASES["CLEAN_STARTER"] in result
+        assert "High-quality STARTER" in result
 
     def test_clean_starter_phrase_for_hostile_sma(self):
+        # Phase 14C.2: STARTER tier now uses unified "High-quality STARTER" label
+        # regardless of quality dimension profile.
         result = format_alert(_tiering_result(
             "STARTER",
             retest_status="confirmed",
@@ -444,7 +448,7 @@ class TestFormatAlertQualityPhrases:
             overhead_status="clear",
             sma_value_alignment="hostile",
         ))
-        assert _QUALITY_LABEL_PHRASES["CLEAN_STARTER"] in result
+        assert "High-quality STARTER" in result
 
     def test_watch_only_phrase_for_near_entry(self):
         result = format_alert(_ne_tiering_result(

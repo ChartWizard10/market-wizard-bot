@@ -415,8 +415,8 @@ class TestNearEntryBothConfirmedQualityContradiction:
         phrase = _build_quality_phrase("A_PLUS_ELITE", signal, final_tier="SNIPE_IT")
         assert "Elite candidate" in phrase
 
-    def test_starter_elite_phrase_unchanged(self):
-        """For STARTER, A_PLUS_ELITE phrase is still 'Elite candidate'."""
+    def test_starter_high_quality_starter_phrase(self):
+        """Phase 14C.2: For STARTER, A_PLUS_ELITE phrase is 'High-quality STARTER'."""
         signal = {
             "retest_status": "confirmed",
             "hold_status": "confirmed",
@@ -431,7 +431,9 @@ class TestNearEntryBothConfirmedQualityContradiction:
             "missing_conditions": [],
         }
         phrase = _build_quality_phrase("A_PLUS_ELITE", signal, final_tier="STARTER")
-        assert "Elite candidate" in phrase
+        assert "High-quality STARTER" in phrase
+        assert "full-size confirmation not granted" in phrase
+        assert "Elite candidate" not in phrase
 
 
 # ---------------------------------------------------------------------------
