@@ -514,7 +514,7 @@ class TestFormatAlertPhase13_8BIntegration:
     def test_starter_alert_renders_tactical_phrase_not_elite(self):
         # Phase 15C: STARTER may never carry the premium label.
         result = format_alert(_tiering_result("STARTER"))
-        assert "Strong tactical setup" in result
+        assert "High-quality STARTER" in result
         assert "Elite candidate" not in result
         assert "High-quality executable" not in result
 

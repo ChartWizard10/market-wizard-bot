@@ -435,7 +435,7 @@ class TestNearEntryBothConfirmedQualityContradiction:
             "missing_conditions": [],
         }
         phrase = _build_quality_phrase("A_PLUS_ELITE", signal, final_tier="STARTER")
-        assert "Strong tactical setup" in phrase
+        assert "High-quality STARTER" in phrase
         assert "Elite candidate" not in phrase
 
 

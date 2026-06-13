@@ -436,7 +436,7 @@ class TestFormatAlertQualityPhrases:
             sma_value_alignment="supportive",
         ))
         # Phase 15C: STARTER top labels render the tier-safe tactical phrase.
-        assert "Strong tactical setup" in result
+        assert "High-quality STARTER" in result
 
     def test_clean_starter_phrase_for_hostile_sma(self):
         result = format_alert(_tiering_result(
@@ -448,7 +448,7 @@ class TestFormatAlertQualityPhrases:
             sma_value_alignment="hostile",
         ))
         # Phase 15C: STARTER top labels render the tier-safe tactical phrase.
-        assert "Strong tactical setup" in result
+        assert "High-quality STARTER" in result
 
     def test_watch_only_phrase_for_near_entry(self):
         result = format_alert(_ne_tiering_result(
