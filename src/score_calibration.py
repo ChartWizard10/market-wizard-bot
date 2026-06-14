@@ -31,6 +31,13 @@ _TOTAL_DELTA_CEIL  =  +4
 _ELITE_SCORE_FLOOR =  90
 _ELITE_CAP         =  89
 
+# Phase 14C.3: candle evidence caps (applied after the elite cap). A vetoed
+# candle can never read elite; an unresolved candle on SNIPE_IT without a
+# next-candle HOLD/CONTINUATION is held below the executable-elite line.
+_CANDLE_VETO_CAP        = 89
+_CANDLE_UNRESOLVED_CAP  = 88
+_CANDLE_UNRESOLVED_FAMILIES = {"DOJI_INDECISION", "ABSORPTION", "UNRESOLVED"}
+
 # Risk realism state → adjustment
 _RISK_ADJ = {
     "healthy":  0,
@@ -175,8 +182,17 @@ def _calibrate(tiering_result: dict, _config: dict) -> dict:
         loc_state = str(location.get("location_state", "unknown"))
         reasons.append((f"location={loc_state}", location_delta))
 
+    # ---- F. Candle evidence (Phase 14C.3) ---------------------------------
+    candle = tiering_result.get("candle_evidence") or {}
+    candle_delta = _candle_delta(candle)
+    if candle_delta != 0:
+        reasons.append((_candle_reason_key(candle), candle_delta))
+
     # ---- Sum + bound ------------------------------------------------------
-    raw_delta     = risk_delta + path_delta + traj_delta + quality_delta + location_delta
+    raw_delta = (
+        risk_delta + path_delta + traj_delta + quality_delta
+        + location_delta + candle_delta
+    )
     bounded_delta = max(_TOTAL_DELTA_FLOOR, min(_TOTAL_DELTA_CEIL, raw_delta))
     calibrated    = raw_score + bounded_delta
 
@@ -188,6 +204,11 @@ def _calibrate(tiering_result: dict, _config: dict) -> dict:
         calibrated = _ELITE_CAP
         elite_cap_applied = True
         reasons.append(("elite_cap_applied", _ELITE_CAP - (raw_score + bounded_delta)))
+
+    # ---- Candle caps (Phase 14C.3) ----------------------------------------
+    # A confirmed retest-hold exempts the candle layer from capping; otherwise a
+    # candle veto holds below 90, and an unresolved SNIPE_IT candle holds <= 88.
+    calibrated = _apply_candle_caps(calibrated, candle, final_tier)
 
     final_delta = calibrated - raw_score
     score_band  = _band(calibrated)
@@ -269,6 +290,61 @@ def _location_adj(
         return delta
 
     return _LOCATION_ADJ_STARTER.get(state, 0)
+
+
+# ---------------------------------------------------------------------------
+# Candle evidence adjustment (Phase 14C.3)
+# ---------------------------------------------------------------------------
+
+def _candle_delta(candle: dict) -> int:
+    """Read the candle engine's recommended score_delta. Absent/unknown -> 0.
+
+    The candle engine already bounds its recommendation to [-4, +3]; this layer
+    re-bounds defensively and only applies it to the calibrated score.
+    """
+    if not isinstance(candle, dict):
+        return 0
+    delta = candle.get("score_delta", 0)
+    try:
+        delta = int(delta)
+    except (TypeError, ValueError):
+        return 0
+    return max(-4, min(3, delta))
+
+
+def _candle_reason_key(candle: dict) -> str:
+    fam = str((candle or {}).get("candle_family", "UNKNOWN"))
+    return f"candle={fam}"
+
+
+def _apply_candle_caps(calibrated: int, candle: dict, final_tier: str) -> int:
+    """Hold calibrated score below elite when candle evidence is incomplete.
+
+    - RETEST_HOLD with a HOLD/CONTINUATION verdict needs no candle cap.
+    - Any candle veto holds the score below 90.
+    - An unresolved-family SNIPE_IT candle without a HOLD/CONTINUATION verdict
+      holds the score at or below 88.
+    """
+    if not isinstance(candle, dict) or not candle:
+        return calibrated
+    family  = str(candle.get("candle_family", "UNKNOWN"))
+    verdict = str(candle.get("next_candle_verdict", "UNKNOWN"))
+    veto    = str(candle.get("candle_veto", "NONE"))
+
+    if family == "RETEST_HOLD" and verdict in ("HOLD", "CONTINUATION"):
+        return calibrated
+
+    if veto not in ("NONE", "UNKNOWN"):
+        calibrated = min(calibrated, _CANDLE_VETO_CAP)
+
+    if (
+        final_tier == "SNIPE_IT"
+        and family in _CANDLE_UNRESOLVED_FAMILIES
+        and verdict not in ("HOLD", "CONTINUATION")
+    ):
+        calibrated = min(calibrated, _CANDLE_UNRESOLVED_CAP)
+
+    return calibrated
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +477,18 @@ def _humanize_reason(name: str, delta: int, band: str) -> str:
             "above_zone_extension": "extended above zone — chase risk",
             "below_zone_failure":  "price below zone — failure risk",
         }.get(state, f"location={state}")
+    if name.startswith("candle="):
+        family = name.split("=", 1)[1]
+        return {
+            "RETEST_HOLD":        "candle retest-hold confirmed",
+            "DISPLACEMENT":       "displacement with control close",
+            "REJECTION":          "wick rejection at level",
+            "ABSORPTION":         "absorption unresolved",
+            "DOJI_INDECISION":    "doji at trigger / verdict pending",
+            "FAILED_BREAK":       "failed next-candle verdict",
+            "OUTSIDE_VOLATILITY": "outside volatility unresolved",
+            "CONTINUATION":       "candle continuation",
+        }.get(family, f"candle={family}")
     return name
 
 

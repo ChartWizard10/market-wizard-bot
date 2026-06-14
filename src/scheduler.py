@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from src import discord_alerts
 from src import indicators
 from src import market_data as market_data_mod
+from src import candle_evidence
 from src import prefilter as prefilter_mod
 from src import score_calibration
 from src import state_store
@@ -343,6 +344,18 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("TRADE_LOCATION_ERROR: %s: %s", ticker, exc)
             tiering_result["trade_location"] = None
+
+        # Step 6.56: Candle evidence quality (Phase 14C.3 — evidence/display only;
+        # never affects tier, capital, routing, suppression, dedup, or raw score).
+        # Must run after trade_location and before calibration, which reads
+        # tiering_result["candle_evidence"]["score_delta"].
+        try:
+            tiering_result["candle_evidence"] = candle_evidence.build_candle_evidence_context(
+                enriched_map.get(ticker, {}), tiering_result
+            )
+        except Exception as exc:
+            log.warning("CANDLE_EVIDENCE_ERROR: %s: %s", ticker, exc)
+            tiering_result["candle_evidence"] = candle_evidence._unknown_context()
 
         # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
         # capital_action, discord_channel, safe_for_alert, suppression, or dedup)
