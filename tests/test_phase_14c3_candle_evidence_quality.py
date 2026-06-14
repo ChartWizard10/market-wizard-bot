@@ -439,3 +439,120 @@ class TestProductionSafety:
         tr = _tr("SNIPE_IT", trade_location=loc)
         ctx = ce.build_candle_evidence_context(_enr(20.0, 20.6, 19.4, 20.05), tr)
         assert -4 <= ctx["score_delta"] <= 3
+
+
+# ===========================================================================
+# 8. Phase 14C.3A — Live-edge candle truth (Groups A, B, C, D)
+# ===========================================================================
+
+class TestLiveEdgePatch:
+    """Phase 14C.3A: enriched-only (live-edge) path must be honest about
+    forming candles — OPEN_OR_UNKNOWN status, no positive score delta,
+    hard contradictions still produce negative delta, scheduler safe fallback."""
+
+    # ---- Group A: live-edge status honesty --------------------------------
+
+    def test_live_edge_candle_status_open_or_unknown(self):
+        # Enriched-only path (no bars supplied) → candle is still forming.
+        ctx = ce.build_candle_evidence_context(_enr(20.0, 21.0, 19.5, 20.8))
+        assert ctx["candle_status"] == "OPEN_OR_UNKNOWN"
+
+    def test_bars_closed_candle_status_is_closed(self):
+        # Historical bars path → completed candle.
+        bars = [{"open": 20.0, "high": 21.0, "low": 19.5, "close": 20.8}]
+        ctx = ce.build_candle_evidence_context({}, {}, bars=bars)
+        assert ctx["candle_status"] == "CLOSED"
+
+    def test_live_edge_next_candle_verdict_not_available(self):
+        # No next-candle exists on the enriched path.
+        ctx = ce.build_candle_evidence_context(_enr(20.0, 25.0, 19.8, 24.8, atr=2.0))
+        assert ctx["next_candle_verdict"] == "NOT_AVAILABLE"
+
+    def test_live_edge_zero_range_open_or_unknown(self):
+        # Zero-range live-edge bar must also report OPEN_OR_UNKNOWN.
+        ctx = ce.build_candle_evidence_context(_enr(10.0, 10.0, 10.0, 10.0))
+        assert ctx["candle_status"] == "OPEN_OR_UNKNOWN"
+
+    # ---- Group B: positive delta suppressed on live-edge ------------------
+
+    def test_live_edge_retest_hold_delta_capped_at_zero(self):
+        # RETEST_HOLD on live-edge would normally earn +1; must be capped to 0.
+        loc = _loc()
+        tr = _tr("SNIPE_IT", trade_location=loc)
+        ctx = ce.build_candle_evidence_context(_enr(20.0, 20.8, 19.5, 20.7, atr=2.0), tr)
+        assert ctx["candle_family"] == "RETEST_HOLD"
+        assert ctx["score_delta"] <= 0
+
+    def test_live_edge_displacement_delta_capped_at_zero(self):
+        # DISPLACEMENT on live-edge would earn +2; must be capped to 0.
+        ctx = ce.build_candle_evidence_context(_enr(20.0, 25.0, 19.8, 24.8, atr=2.0))
+        assert ctx["candle_family"] == "DISPLACEMENT"
+        assert ctx["score_delta"] <= 0
+
+    def test_live_edge_continuation_delta_capped_at_zero(self):
+        # CONTINUATION on live-edge would earn +1; must be capped to 0.
+        ctx = ce.build_candle_evidence_context(_enr(20.0, 21.5, 19.9, 21.3, atr=2.0))
+        assert ctx["score_delta"] <= 0
+
+    def test_bars_confirmed_retest_hold_positive_delta_preserved(self):
+        # From bars with next-candle HOLD verdict → +2 or +3 must still fire.
+        event = {"open": 20.0, "high": 20.8, "low": 19.5, "close": 20.7, "atr": 2.0}
+        nxt = {"open": 20.7, "high": 21.5, "low": 20.5, "close": 21.3}
+        tr = _tr("SNIPE_IT", trade_location=_loc())
+        ctx = ce.build_candle_evidence_context({}, tr, bars=[event, nxt], event_index=0)
+        assert ctx["candle_family"] == "RETEST_HOLD"
+        assert ctx["score_delta"] > 0
+
+    # ---- Group C: hard contradictions still produce negative on live-edge -
+
+    def test_live_edge_hostile_wick_still_negative(self):
+        # SNIPE_IT with dominant upper wick → HOSTILE_WICK veto, negative delta.
+        tr = _tr("SNIPE_IT", trade_location=_loc())
+        ctx = ce.build_candle_evidence_context(
+            _enr(20.0, 20.9, 19.4, 19.5, atr=2.0), tr
+        )
+        assert ctx["candle_veto"] == "HOSTILE_WICK"
+        assert ctx["score_delta"] < 0
+
+    def test_live_edge_doji_at_trigger_still_negative(self):
+        # DOJI at trigger level with SNIPE_IT → DOJI_AT_TRIGGER veto, delta < 0.
+        loc = _loc()
+        tr = _tr("SNIPE_IT", trade_location=loc)
+        ctx = ce.build_candle_evidence_context(_enr(20.0, 20.6, 19.4, 20.05), tr)
+        assert ctx["candle_veto"] == "DOJI_AT_TRIGGER"
+        assert ctx["score_delta"] < 0
+
+    def test_live_edge_failed_break_still_negative(self):
+        # Probed above zone then closed back in bearishly → FAILED_BREAK, delta < 0.
+        loc = _loc(zone_low=19.0, zone_high=21.0)
+        tr = _tr("SNIPE_IT", trade_location=loc)
+        ctx = ce.build_candle_evidence_context(
+            _enr(20.5, 21.3, 19.8, 20.0, atr=2.0), tr
+        )
+        assert ctx["candle_family"] == "FAILED_BREAK"
+        assert ctx["score_delta"] < 0
+
+    # ---- Group D: scheduler safe fallback ---------------------------------
+
+    def test_unknown_context_is_complete_safe_dict(self):
+        ctx = ce._unknown_context()
+        required = (
+            "status", "candle_status", "candle_family", "candle_veto",
+            "score_delta", "next_candle_verdict", "display_text", "warnings",
+            "body_pct", "upper_wick_pct", "lower_wick_pct", "close_position_pct",
+        )
+        for key in required:
+            assert key in ctx, f"missing key: {key}"
+        assert ctx["score_delta"] == 0
+        assert ctx["warnings"] == []
+        assert isinstance(ctx["display_text"], str)
+
+    def test_unknown_context_score_delta_is_zero(self):
+        ctx = ce._unknown_context()
+        assert ctx["score_delta"] == 0
+
+    def test_live_edge_display_text_has_provisional_qualifier(self):
+        # Enriched-only DISPLACEMENT display must carry "forming" qualifier.
+        ctx = ce.build_candle_evidence_context(_enr(20.0, 25.0, 19.8, 24.8, atr=2.0))
+        assert ctx["candle_family"] == "DISPLACEMENT"
+        assert "forming" in ctx["display_text"].lower() or "close pending" in ctx["display_text"].lower()

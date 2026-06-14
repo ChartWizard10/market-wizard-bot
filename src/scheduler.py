@@ -355,7 +355,7 @@ async def run_scan_pipeline(
             )
         except Exception as exc:
             log.warning("CANDLE_EVIDENCE_ERROR: %s: %s", ticker, exc)
-            tiering_result["candle_evidence"] = None
+            tiering_result["candle_evidence"] = candle_evidence._unknown_context()
 
         # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
         # capital_action, discord_channel, safe_for_alert, suppression, or dedup)

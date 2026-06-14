@@ -191,7 +191,7 @@ def _build(
     if rng <= _EPS:
         # Zero-range bar: defined but uninformative. Never raise.
         ctx["status"] = "insufficient_data"
-        ctx["candle_status"] = "OPEN_OR_UNKNOWN" if is_open else "CLOSED"
+        ctx["candle_status"] = "OPEN_OR_UNKNOWN" if (is_open or not from_bars) else "CLOSED"
         ctx["body_pct"] = 0.0
         ctx["upper_wick_pct"] = 0.0
         ctx["lower_wick_pct"] = 0.0
@@ -206,7 +206,8 @@ def _build(
         return ctx
 
     ctx["status"] = "ok"
-    ctx["candle_status"] = "OPEN_OR_UNKNOWN" if is_open else "CLOSED"
+    # Live-edge (enriched-only): candle is still forming — always OPEN_OR_UNKNOWN.
+    ctx["candle_status"] = "OPEN_OR_UNKNOWN" if (is_open or not from_bars) else "CLOSED"
 
     # ---- Metrics ----------------------------------------------------------
     body = abs(c - o)
@@ -308,11 +309,19 @@ def _build(
         hostile_wick=hostile_wick,
         final_tier=final_tier,
     )
+    # Live-edge: candle is still forming. Positive confirmations are provisional
+    # and not yet earned — cap at 0. Hard contradictions (negative) still apply.
+    if not from_bars and delta > 0:
+        delta = 0
+        reason = "forming candle — close pending"
     ctx["score_delta"] = max(_DELTA_FLOOR, min(_DELTA_CEIL, int(delta)))
     ctx["score_reason"] = reason
 
     # ---- Display ----------------------------------------------------------
-    ctx["display_text"] = _display_text(family, zone_label, verdict, ctx["level_reaction"])
+    display = _display_text(family, zone_label, verdict, ctx["level_reaction"])
+    if not from_bars and display:
+        display = display.rstrip(".") + " (forming — close pending)."
+    ctx["display_text"] = display
 
     return ctx
 
