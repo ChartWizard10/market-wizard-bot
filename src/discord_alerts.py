@@ -360,6 +360,43 @@ _DIP_TOWARD_RE = re.compile(r"\bdips?\s+toward(?:s)?\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
+# Phase 14C.3: candle evidence display helpers (display-only — never reads or
+# writes any decision field). The veto humanizer mirrors candle_evidence's own
+# map so discord_alerts stays self-contained (no cross-module import).
+# ---------------------------------------------------------------------------
+
+_CANDLE_VETO_TEXT = {
+    "OPEN_ONLY":               "candle still open; close not confirmed.",
+    "NO_CLOSE_CONFIRMATION":   "close confirmation missing.",
+    "NO_NEXT_CANDLE_VERDICT":  "next-candle verdict pending.",
+    "DOJI_AT_TRIGGER":         "doji at trigger; confirmation incomplete.",
+    "HOSTILE_WICK":            "hostile wick against the setup direction.",
+    "FAILED_RETEST":           "failed retest; no fresh aggression.",
+    "HIGH_VOLUME_NO_PROGRESS": "high-volume effort produced limited progress.",
+    "EXTENDED_FROM_VALUE":     "extended from value; chase risk.",
+    "MID_RANGE_NO_LEVEL":      "mid-range; no level interaction.",
+}
+
+# When candle evidence is vetoed, "all conditions satisfied/met" cannot stand —
+# the candle has not confirmed the claim. Display-only neutralization.
+_CANDLE_ALL_CONDITIONS_RE = re.compile(
+    r"\ball\s+conditions\s+(?:are\s+)?(?:satisfied|met)\b", re.IGNORECASE
+)
+
+
+def _humanize_candle_veto(veto: str) -> str:
+    return _CANDLE_VETO_TEXT.get(str(veto or "").strip().upper(), "")
+
+
+def _neutralize_all_conditions(text: str) -> str:
+    """Cool 'all conditions satisfied/met' to honest developing language. Used
+    only when an active candle veto contradicts a completed-claim phrasing."""
+    if not text:
+        return text
+    return _CANDLE_ALL_CONDITIONS_RE.sub("conditions still developing", text)
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.7E: NEAR_ENTRY-only upgrade-language seal + dangling tail cleaner.
 # ---------------------------------------------------------------------------
 
@@ -1953,6 +1990,19 @@ def format_alert(
     if _tl_display and _tl_state != "unknown":
         lines.append(f"  Location: {_tl_display}")
 
+    # Phase 14C.3: candle evidence read + caution (display-only — never affects
+    # tier, capital, routing, suppression, dedup, or raw score).
+    _candle         = tiering_result.get("candle_evidence") or {}
+    _candle_display = str(_candle.get("display_text", "")).strip()
+    _candle_family  = str(_candle.get("candle_family", "UNKNOWN"))
+    _candle_veto    = str(_candle.get("candle_veto", "NONE")).strip().upper()
+    if _candle_display and _candle_family not in ("UNKNOWN", ""):
+        lines.append(f"  Candle read: {_candle_display}")
+    if _candle_veto not in ("NONE", "UNKNOWN", ""):
+        _veto_text = _humanize_candle_veto(_candle_veto)
+        if _veto_text:
+            lines.append(f"  Candle caution: {_veto_text}")
+
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
         "──────────────────────────────",
@@ -1997,6 +2047,10 @@ def format_alert(
     # runs after all prior passes with access to the full validated signal dict.
     rendered = "\n".join(lines)
     rendered = _apply_final_body_contract_guard(final_tier, rendered)
+    # Phase 14C.3: a vetoed candle cannot leave "all conditions satisfied/met"
+    # standing — the candle has not confirmed the claim. Display-only.
+    if _candle_veto not in ("NONE", "UNKNOWN", ""):
+        rendered = _neutralize_all_conditions(rendered)
     return _apply_narrative_sovereignty_guard(final_tier, signal, rendered)
 
 
