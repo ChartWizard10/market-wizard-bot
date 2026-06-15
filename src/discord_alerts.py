@@ -7,6 +7,7 @@ Does not call Claude, yfinance, tiering, or state_store.
 """
 
 import logging
+import math
 import os
 import re
 
@@ -538,38 +539,28 @@ def _derive_upgrade_trigger(
     tl_ctx: dict,
     candle: dict,
 ) -> str:
-    """Synthesize an upgrade trigger when the field is blank or unusable.
+    """Synthesize an upgrade trigger using the Phase 14C.3C source-priority law.
 
-    Prefers the trade-location confirmation level (exact price already on the
-    alert), then zone low, then candle caution language.  Never invents prices.
+    Uses _select_upgrade_trigger_level to enforce correct level-source hierarchy.
+    Never returns a target/T1/T2/liquidity level as the execution proof trigger.
     Display-only.
     """
-    if tl_ctx:
-        conf = tl_ctx.get("confirmation_level")
-        if conf is not None:
-            try:
-                return (
-                    f"Body close / acceptance above {float(conf):.2f} "
-                    "with hold confirmation."
-                )
-            except (TypeError, ValueError):
-                pass
-        zone_low = tl_ctx.get("zone_low")
-        if zone_low is not None:
-            try:
-                return (
-                    f"Retest the active zone and close back above "
-                    f"{float(zone_low):.2f} with hold confirmation."
-                )
-            except (TypeError, ValueError):
-                pass
+    level, source, _ = _select_upgrade_trigger_level(signal, tl_ctx)
+
+    if level is not None:
+        if source == "zone_low":
+            return (
+                f"Retest the active zone and close back above "
+                f"{level:.2f} with hold confirmation."
+            )
+        return f"Body close / acceptance above {level:.2f} with hold confirmation."
 
     if candle:
         veto = str(candle.get("candle_veto", "NONE")).strip().upper()
         if veto not in ("NONE", "UNKNOWN", ""):
             return "Next candle confirms direction without violating invalidation."
 
-    return "—"
+    return "Retest the active zone and confirm hold with a body close before any capital."
 
 
 def _neutralize_completion_language_for_candle_gap(
@@ -661,6 +652,119 @@ def _dedupe_freshness_notes(
         return notes
 
     return [note] if note else []
+
+
+# ---------------------------------------------------------------------------
+# Phase 14C.3C: Upgrade-trigger level source guard.
+#
+# Prevents trade_location.confirmation_level (which trade_location.py can
+# set to T1 / the first target when price is below the zone) from ever
+# appearing as the "Upgrade trigger:" execution proof level.
+#
+# Source-priority law (highest → lowest):
+#   1. confirmation_level   — only when NOT a target value
+#   2. proof_level          — from signal (if present)
+#   3. trigger_level        — always trusted; shown on the EXECUTION line
+#   4. zone_high            — FVG / OB top (long-setup proof)
+#   5. zone_low             — last resort (retest-and-hold phrasing)
+#   Never: any value that appears in signal.targets[], t1, t2, take_profit.
+#
+# Display-only.  Never mutates score, tier, capital, routing, or any
+# structured decision field.
+# ---------------------------------------------------------------------------
+
+# Labels that identify take-profit / exit / liquidity / target levels.
+_TARGET_LEVEL_LABELS: set[str] = set({
+    "t1", "t2", "t3", "tp", "tp1", "tp2", "tp3",
+    "target", "ltp",
+    "liquidity", "liquidity_pool", "nearest_liquidity_pool",
+    "measured_move", "extension_target", "extension",
+    "take_profit", "profit_target",
+})
+
+
+def _is_target_like_label(label_str: str) -> bool:
+    """True when label identifies a take-profit / liquidity / target level."""
+    return str(label_str or "").strip().lower() in _TARGET_LEVEL_LABELS
+
+
+def _valid_execution_proof_level(value) -> "float | None":
+    """Return float if value is numeric, finite, and positive; else None."""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f) or f <= 0:
+        return None
+    return f
+
+
+def _collect_target_levels(signal: dict) -> set:
+    """Return all numeric level values listed in signal.targets[].
+
+    Every entry in targets[] is a profit / liquidity / exit target.
+    None of them should be selected as the upgrade-trigger proof level.
+    Direct t1/t2/take_profit fields are also included.
+    """
+    result: set[float] = set()
+    targets = (signal or {}).get("targets") or []
+    if isinstance(targets, list):
+        for t in targets:
+            if isinstance(t, dict):
+                lv = _valid_execution_proof_level(t.get("level"))
+                if lv is not None:
+                    result.add(lv)
+    for field in ("t1", "t2", "tp1", "tp2", "take_profit"):
+        v = _valid_execution_proof_level((signal or {}).get(field))
+        if v is not None:
+            result.add(v)
+    return set(result)
+
+
+def _select_upgrade_trigger_level(
+    signal: dict,
+    tl_ctx: dict,
+) -> "tuple[float | None, str, str]":
+    """Priority-ordered selection of a valid execution-proof level for display.
+
+    Returns (level, source_name, reason).
+    Returns (None, '', reason) when no valid proof level exists.
+    Never selects a value that appears in the signal's targets list.
+    """
+    banned = _collect_target_levels(signal)
+    sig = signal or {}
+    tl  = tl_ctx or {}
+
+    # 1. confirmation_level — trade_location's computed proof level.
+    #    Rejected when trade_location fell back to _first_target() (T1 contamination).
+    conf = _valid_execution_proof_level(tl.get("confirmation_level"))
+    if conf is not None and conf not in banned:
+        return (conf, "confirmation_level", "trade-location confirmation level")
+
+    # 2. proof_level from signal (explicit field, rarely populated but trusted)
+    proof = _valid_execution_proof_level(sig.get("proof_level"))
+    if proof is not None and proof not in banned:
+        return (proof, "proof_level", "signal proof level")
+
+    # 3. trigger_level — the execution anchor shown on the EXECUTION line.
+    #    Always an entry-proof level, never a take-profit.
+    trigger = _valid_execution_proof_level(sig.get("trigger_level"))
+    if trigger is not None:
+        return (trigger, "trigger_level", "execution trigger level")
+
+    # 4. zone_high — FVG top / OB top (long-setup proof)
+    zone_high = _valid_execution_proof_level(tl.get("zone_high"))
+    if zone_high is not None and zone_high not in banned:
+        return (zone_high, "zone_high", "zone top — execution proof level")
+
+    # 5. zone_low — last resort; rendered with retest-and-hold phrasing
+    zone_low = _valid_execution_proof_level(tl.get("zone_low"))
+    if zone_low is not None and zone_low not in banned:
+        return (zone_low, "zone_low", "zone low — retest-and-hold proof")
+
+    return (None, "", "no valid execution proof level found")
 
 
 # ---------------------------------------------------------------------------
