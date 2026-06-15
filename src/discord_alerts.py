@@ -359,7 +359,6 @@ def _apply_final_body_contract_guard(final_tier: str, body: str) -> str:
 _DIP_TOWARD_RE = re.compile(r"\bdips?\s+toward(?:s)?\b", re.IGNORECASE)
 
 
-# ---------------------------------------------------------------------------
 # Phase 14C.3: candle evidence display helpers (display-only — never reads or
 # writes any decision field). The veto humanizer mirrors candle_evidence's own
 # map so discord_alerts stays self-contained (no cross-module import).
@@ -394,6 +393,274 @@ def _neutralize_all_conditions(text: str) -> str:
     if not text:
         return text
     return _CANDLE_ALL_CONDITIONS_RE.sub("conditions still developing", text)
+
+
+# ---------------------------------------------------------------------------
+# Phase 14C.3B: Alert truth harmonization helpers.
+#
+# Five surgical defect fixes so an alert never contradicts its own tier,
+# blocker, location, or candle evidence:
+#   1. Synthesize missing-condition / upgrade-trigger when blank (NEAR_ENTRY).
+#   2. Neutralize generic completion language when a candle gap exists.
+#   3. Derive honest capital posture for repeated / cooldown-expired signals.
+#   4. Deduplicate scan-time freshness notes.
+#   5. Harmonize the proof line when candle confirmation is still required.
+#
+# Display-only.  Never mutates score, tier, capital_action, routing,
+# suppression, dedup, or any structured decision field.
+# ---------------------------------------------------------------------------
+
+# Inline veto-humanizer (display-only; mirrors candle_evidence.humanize_candle_veto).
+# Period-less version used in missing-condition synthesis (appended into sentences).
+_CANDLE_VETO_HUMAN: dict[str, str] = {
+    "OPEN_ONLY":               "candle still open; close not confirmed",
+    "NO_CLOSE_CONFIRMATION":   "close confirmation missing",
+    "NO_NEXT_CANDLE_VERDICT":  "next-candle verdict pending",
+    "DOJI_AT_TRIGGER":         "doji at trigger; confirmation incomplete",
+    "HOSTILE_WICK":            "hostile wick against the setup direction",
+    "FAILED_RETEST":           "failed retest; no fresh aggression",
+    "HIGH_VOLUME_NO_PROGRESS": "high-volume effort produced limited progress",
+    "EXTENDED_FROM_VALUE":     "extended from value; chase risk",
+    "MID_RANGE_NO_LEVEL":      "mid-range; no level interaction",
+}
+
+_SCAN_TIME_KEYWORDS = (
+    "scan-time", "scan time", "verify live", "verify current price",
+)
+
+# Matches Claude-generated prose claiming all conditions are met (with or
+# without a tier name). Does NOT match the CAPITAL_CONTRACT action headline
+# "SNIPE_IT conditions met." because that headline lacks the "all" prefix.
+_COMPLETION_LANG_RE = re.compile(
+    r"\ball\s+(?:(?:SNIPE_IT|STARTER|the)\s+)?conditions\s+"
+    r"(?:are\s+)?(?:satisfied|met|cleared|passed)\b",
+    re.IGNORECASE,
+)
+_COMPLETION_REPLACEMENT: dict[str, str] = {
+    "SNIPE_IT": (
+        "Structural SNIPE_IT conditions satisfied; "
+        "candle confirmation remains pending"
+    ),
+    "STARTER": (
+        "Starter structure is valid; "
+        "full-size confirmation remains pending"
+    ),
+    "NEAR_ENTRY": "Structure exists; execution confirmation remains incomplete",
+}
+
+
+def _is_blank_alert_field(value) -> bool:
+    """True when a field is empty, a dash placeholder, or 'none'."""
+    if value is None:
+        return True
+    return str(value).strip().lower() in ("", "—", "-", "none", "n/a", "na")
+
+
+def _has_candle_confirmation_gap(candle: dict) -> bool:
+    """True when candle evidence is incomplete, unresolved, forming, or failed.
+
+    Returns False when candle is absent or is the safe unknown context
+    (status='unknown').  Display-only — no decision side-effects.
+    """
+    if not candle:
+        return False
+    # Safe unknown context: status='unknown' and no real family populated.
+    if candle.get("status") == "unknown" and not candle.get("candle_family"):
+        return False
+    veto    = str(candle.get("candle_veto",        "NONE")).strip().upper()
+    verdict = str(candle.get("next_candle_verdict", "")).strip().upper()
+    family  = str(candle.get("candle_family",       "UNKNOWN")).strip().upper()
+    status  = str(candle.get("candle_status",       "")).strip().upper()
+    if veto not in ("NONE", "UNKNOWN", ""):
+        return True
+    if verdict in ("PENDING", "NOT_AVAILABLE", "INDECISION", "FAIL"):
+        return True
+    if family in (
+        "DOJI_INDECISION", "ABSORPTION", "UNRESOLVED",
+        "OUTSIDE_VOLATILITY", "FAILED_BREAK",
+    ):
+        return True
+    if status == "OPEN_OR_UNKNOWN":
+        return True
+    return False
+
+
+def _derive_missing_conditions(
+    signal: dict,
+    candle: dict,
+    tl_ctx: dict,
+    blocker_note: str,
+) -> str:
+    """Synthesize a truthful missing-condition sentence when the field is blank.
+
+    Priority: blocker note (primary) → retest → hold → lower-zone defense
+    → candle caution.  Never invents prices.  Display-only.
+    """
+    bn = str(blocker_note or "").strip()
+    if bn:
+        return bn
+
+    parts: list[str] = []
+    sig    = signal or {}
+    retest = str(sig.get("retest_status", "")).lower()
+    hold   = str(sig.get("hold_status",   "")).lower()
+
+    if retest not in ("confirmed",):
+        parts.append(
+            "Clean retest is incomplete; "
+            "wait for full zone interaction and hold"
+        )
+    if hold not in ("confirmed",):
+        parts.append(
+            "Hold confirmation remains incomplete; "
+            "wait for body-close acceptance inside/above the active zone"
+        )
+
+    if tl_ctx:
+        state = str(tl_ctx.get("location_state") or "").lower()
+        if state == "lower_zone_defense":
+            parts.append(
+                "Price is still defending the lower zone; "
+                "confirmation above the stated proof level is required"
+            )
+
+    if candle:
+        veto = str(candle.get("candle_veto", "NONE")).strip().upper()
+        veto_text = _CANDLE_VETO_HUMAN.get(veto, "")
+        if veto_text:
+            parts.append(veto_text)
+
+    return ". ".join(parts) + "." if parts else "—"
+
+
+def _derive_upgrade_trigger(
+    signal: dict,
+    tl_ctx: dict,
+    candle: dict,
+) -> str:
+    """Synthesize an upgrade trigger when the field is blank or unusable.
+
+    Prefers the trade-location confirmation level (exact price already on the
+    alert), then zone low, then candle caution language.  Never invents prices.
+    Display-only.
+    """
+    if tl_ctx:
+        conf = tl_ctx.get("confirmation_level")
+        if conf is not None:
+            try:
+                return (
+                    f"Body close / acceptance above {float(conf):.2f} "
+                    "with hold confirmation."
+                )
+            except (TypeError, ValueError):
+                pass
+        zone_low = tl_ctx.get("zone_low")
+        if zone_low is not None:
+            try:
+                return (
+                    f"Retest the active zone and close back above "
+                    f"{float(zone_low):.2f} with hold confirmation."
+                )
+            except (TypeError, ValueError):
+                pass
+
+    if candle:
+        veto = str(candle.get("candle_veto", "NONE")).strip().upper()
+        if veto not in ("NONE", "UNKNOWN", ""):
+            return "Next candle confirms direction without violating invalidation."
+
+    return "—"
+
+
+def _neutralize_completion_language_for_candle_gap(
+    text: str,
+    tier: str,
+    has_gap: bool,
+) -> str:
+    """Replace generic completion language with tier-specific honest text when
+    candle evidence is incomplete.  Preserves the CAPITAL_CONTRACT structured
+    ACTION headline ('SNIPE_IT conditions met.') which never carries 'all'.
+    Display-only — no score/tier/capital mutation.
+    """
+    if not has_gap or not text:
+        return text
+    replacement = _COMPLETION_REPLACEMENT.get(tier, "conditions still developing")
+    return _COMPLETION_LANG_RE.sub(replacement, text)
+
+
+def _derive_capital_posture_line(
+    final_tier: str,
+    candle: dict,
+    tl_ctx: dict,
+) -> str:
+    """Return the capital-posture sentence for a repeated / cooldown-expired signal.
+
+    Display-only — never mutates tier, capital_action, or routing.
+    """
+    has_gap = _has_candle_confirmation_gap(candle or {})
+
+    proof_above = False
+    if tl_ctx:
+        conf = tl_ctx.get("confirmation_level")
+        scan = tl_ctx.get("scan_price")
+        try:
+            proof_above = (
+                conf is not None and scan is not None
+                and float(conf) > float(scan)
+            )
+        except (TypeError, ValueError):
+            pass
+
+    if final_tier == "SNIPE_IT":
+        if has_gap or proof_above:
+            return (
+                "Capital posture: hold existing only; "
+                "no fresh add until candle/location proof confirms."
+            )
+        return (
+            "Capital posture: add only after live price still holds "
+            "trigger/location and invalidation remains valid."
+        )
+    if final_tier == "NEAR_ENTRY":
+        return "Capital posture: no capital; watch only until blocker resolves."
+    if final_tier == "STARTER":
+        return (
+            "Capital posture: starter only; "
+            "no add until next proof confirms."
+        )
+    return ""
+
+
+def _dedupe_freshness_notes(
+    freshness_note: str,
+    is_repeated: bool,
+    has_candle_evidence: bool,
+) -> list[str]:
+    """Return a deduped list of freshness note strings for the FRESHNESS block.
+
+    When the existing note already carries scan-time language and the alert is
+    also repeated, collapse to one unified note instead of printing two notes
+    that say the same thing.
+    """
+    note = str(freshness_note or "").strip()
+    note_is_scan_time = any(kw in note.lower() for kw in _SCAN_TIME_KEYWORDS)
+
+    if is_repeated or note_is_scan_time:
+        unified = (
+            "Signal is scan-time only; verify current price and candle "
+            "state before action."
+            if has_candle_evidence
+            else "Signal is scan-time only; verify current price before action."
+        )
+        if note_is_scan_time:
+            return [unified]
+        notes: list[str] = []
+        if note:
+            notes.append(note)
+        notes.append(unified)
+        return notes
+
+    return [note] if note else []
 
 
 # ---------------------------------------------------------------------------
@@ -1776,6 +2043,15 @@ def format_alert(
     _tl_zone_low  = _tl_ctx_pre.get("zone_low")
     _tl_zone_type = str(_tl_ctx_pre.get("zone_type") or "").upper()
 
+    # Phase 14C.3B: extract candle evidence early — needed for NEAR_ENTRY
+    # synthesis (Defect 1), proof-line harmonization (Defect 5), capital
+    # posture (Defect 3), and completion-language neutralization (Defect 2).
+    _candle         = tiering_result.get("candle_evidence") or {}
+    _candle_display = str(_candle.get("display_text", "")).strip()
+    _candle_family  = str(_candle.get("candle_family", "UNKNOWN"))
+    _candle_veto    = str(_candle.get("candle_veto", "NONE")).strip().upper()
+    _has_candle_gap = _has_candle_confirmation_gap(_candle)
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         f"{badge} | {ticker} | Score: {score}",
@@ -1857,6 +2133,12 @@ def format_alert(
             for tok in _mc_tokens
         ]
         missing_str = _format_missing_conditions(_mc_human) if _mc_human else "—"
+        # Phase 14C.3B Defect 1: never render blank missing-condition when
+        # useful context exists (blocker, retest, hold, zone defense, candle).
+        if _is_blank_alert_field(missing_str):
+            missing_str = _derive_missing_conditions(
+                signal, _candle, _tl_ctx_pre, raw_blocker_str
+            )
         # Phase 12.3: render blocker note above missing conditions.
         # Phase 12.3A: strip leading "Blocker:" prefix before adding our label
         # so _build_near_entry_blocker_note's prefix does not double up.
@@ -1866,6 +2148,12 @@ def format_alert(
         _blocker_cleaned = _humanize_bare_gate_keys(_blocker_cleaned)
         _blocker_cleaned = _seal_near_entry_classification_language(_blocker_cleaned)
         blocker_note = _sanitize(_blocker_cleaned)
+        # Phase 14C.3B Defect 1: synthesize upgrade trigger when blank/none.
+        _upgrade_trigger_ne = upgrade_trigger
+        if _is_blank_alert_field(_upgrade_trigger_ne):
+            _upgrade_trigger_ne = _derive_upgrade_trigger(
+                signal, _tl_ctx_pre, _candle
+            )
         lines += [
             "──────────────────────────────",
             "⚠️  NO CAPITAL YET",
@@ -1874,7 +2162,7 @@ def format_alert(
             lines.append(f"Blocker:            {blocker_note}")
         lines += [
             f"Missing conditions: {missing_str}",
-            f"Upgrade trigger:    {upgrade_trigger}",
+            f"Upgrade trigger:    {_upgrade_trigger_ne}",
         ]
 
     # Phase 13.8B/13.8C: setup quality diagnostic (informational; no tier/capital effect)
@@ -1940,20 +2228,23 @@ def format_alert(
     # next-proof level still above price, executable quality language may not
     # imply add/full aggression before that level is reclaimed.
     _proof_note = ""
-    if (
-        _tl_state == "mid_zone_acceptance"
-        and _tl_conf_above
-        and final_tier in ("SNIPE_IT", "STARTER")
-    ):
+    if _tl_state == "mid_zone_acceptance" and _tl_conf_above:
+        # Phase 14C.3B Defect 5: harmonize proof line with candle confirmation
+        # requirement when next-candle verdict is still pending.
+        _candle_sfx = " and candle confirmation" if _has_candle_gap else ""
         if final_tier == "SNIPE_IT":
             _proof_note = (
                 f"Structure valid; fresh/add aggression waits for "
-                f"acceptance above {_tl_conf_str}."
+                f"acceptance above {_tl_conf_str}{_candle_sfx}."
             )
-        else:
+        elif final_tier == "STARTER":
             _proof_note = (
                 f"Starter valid while holding zone; add waits for "
-                f"acceptance above {_tl_conf_str}."
+                f"acceptance above {_tl_conf_str}{_candle_sfx}."
+            )
+        elif final_tier == "NEAR_ENTRY":
+            _proof_note = (
+                "Structure valid, but execution proof remains incomplete."
             )
 
     lines += [
@@ -1963,20 +2254,22 @@ def format_alert(
         f"  {sizing_line}",
         f"  Quality read: {quality_phrase}",
     ]
-    # Phase 14C.2: repeated-signal realism line — keeps tier intact, prevents
-    # the alert from reading as a fresh new opportunity.
+    # Phase 14C.2 / 14C.3B Defect 3: repeated-signal realism. Keeps tier
+    # intact and declares explicit capital posture (hold / conditional-add /
+    # no-capital / starter-only) so the repeated alert is never mistaken for
+    # a fresh entry opportunity.
     if _is_repeated and final_tier in ("SNIPE_IT", "STARTER", "NEAR_ENTRY"):
         if final_tier == "SNIPE_IT":
-            _repeated_note = (
-                "SNIPE_IT thesis remains valid after cooldown. Verify price "
-                "still holds trigger/location before new capital."
-            )
+            _repeated_note = "SNIPE_IT thesis remains valid after cooldown."
         else:
             _repeated_note = (
-                "Repeated signal — thesis remains valid; no new aggression "
-                "unless next proof confirms."
+                "Repeated signal — thesis remains valid; "
+                "no new aggression unless next proof confirms."
             )
         lines.append(f"  Repeated: {_repeated_note}")
+        _posture = _derive_capital_posture_line(final_tier, _candle, _tl_ctx)
+        if _posture:
+            lines.append(f"  {_posture}")
     if _proof_note:
         lines.append(f"  Proof: {_proof_note}")
     lines += [
@@ -2017,14 +2310,13 @@ def format_alert(
         except (TypeError, ValueError):
             pass
     lines.append(f"  Status:     {drift_status}")
-    if freshness_note:
-        lines.append(f"  Note:       {freshness_note}")
-    # Phase 14C.2: repeated/cooldown alerts are scan-time snapshots; remind the
-    # desk to re-verify the live price before acting on a re-fired thesis.
-    if _is_repeated:
-        lines.append(
-            "  Note:       Signal is scan-time only; verify current price before action."
-        )
+    # Phase 14C.3B Defect 4: deduplicate freshness notes — never render two
+    # notes that say the same scan-time thing.
+    _has_live_candle = bool(
+        _candle_display and _candle_family not in ("UNKNOWN", "")
+    )
+    for _fn in _dedupe_freshness_notes(freshness_note, _is_repeated, _has_live_candle):
+        lines.append(f"  Note:       {_fn}")
 
     lines += [
         "──────────────────────────────",
@@ -2047,10 +2339,15 @@ def format_alert(
     # runs after all prior passes with access to the full validated signal dict.
     rendered = "\n".join(lines)
     rendered = _apply_final_body_contract_guard(final_tier, rendered)
-    # Phase 14C.3: a vetoed candle cannot leave "all conditions satisfied/met"
-    # standing — the candle has not confirmed the claim. Display-only.
-    if _candle_veto not in ("NONE", "UNKNOWN", ""):
-        rendered = _neutralize_all_conditions(rendered)
+    # Phase 14C.3B Defect 2: when candle evidence is incomplete / unresolved,
+    # generic completion language must not imply capital-ready status. Replace
+    # tier-specific completion phrases with honest pending language.
+    # _has_candle_gap is a superset of the 14C.3 veto-only gate; it also covers
+    # PENDING verdict, bad family, and OPEN_OR_UNKNOWN status.
+    if _has_candle_gap:
+        rendered = _neutralize_completion_language_for_candle_gap(
+            rendered, final_tier, _has_candle_gap
+        )
     return _apply_narrative_sovereignty_guard(final_tier, signal, rendered)
 
 

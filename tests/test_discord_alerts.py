@@ -667,7 +667,7 @@ def test_crnt_style_snapshot_only_warns_operator_to_verify_live_chart():
     assert "FRESHNESS" in text
     assert "2.50" in text
     assert "snapshot_only" in text
-    assert "verify live chart before entry" in text.lower()
+    assert "verify current price before action" in text.lower()
 
 
 # 11-14: discord_channel still recomputed from final_tier (not Claude's field)
