@@ -271,9 +271,13 @@ class TestDeriveUpgradeTrigger:
         assert "next candle" in result.lower()
         assert "invalidation" in result.lower()
 
-    def test_no_context_returns_dash(self):
+    def test_no_context_returns_safe_fallback(self):
+        # Phase 14C.3C: empty context now returns actionable fallback text,
+        # not "—", so the rendered alert never shows a useless placeholder.
         result = _derive_upgrade_trigger({}, {}, {})
-        assert result == "—"
+        assert result != "—"
+        assert "none" not in result.lower()
+        assert len(result) > 5
 
     def test_does_not_invent_prices(self):
         # No tl_ctx → should not return a numeric price
