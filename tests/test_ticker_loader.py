@@ -203,8 +203,8 @@ def test_full_universe_loads_correctly():
     """Validate the actual config/tickers.txt against expected counts."""
     result = load_tickers("config/tickers.txt")
     s = result["validation_summary"]
-    assert s["valid_ticker_count"] == 811, (
-        f"Expected 811 tickers, got {s['valid_ticker_count']}"
+    assert s["valid_ticker_count"] == 812, (
+        f"Expected 812 tickers, got {s['valid_ticker_count']}"
     )
     assert s["duplicate_count"] == 0, (
         f"Expected 0 duplicates, got {s['duplicate_count']}"
