@@ -210,6 +210,12 @@ def _calibrate(tiering_result: dict, _config: dict) -> dict:
     # candle veto holds below 90, and an unresolved SNIPE_IT candle holds <= 88.
     calibrated = _apply_candle_caps(calibrated, candle, final_tier)
 
+    # ---- 1H trigger-realism caps (Phase 14E.1) ----------------------------
+    # Conservative, downward-only. The 1H may cap calibrated score for realism;
+    # it may never raise it. Raw score, tier, capital, and routing are untouched.
+    one_hour = tiering_result.get("one_hour_entry") or {}
+    calibrated = _apply_one_hour_caps(calibrated, one_hour, reasons)
+
     final_delta = calibrated - raw_score
     score_band  = _band(calibrated)
     primary     = _primary_reason(reasons, score_band, elite_cap_applied)
@@ -345,6 +351,63 @@ def _apply_candle_caps(calibrated: int, candle: dict, final_tier: str) -> int:
         calibrated = min(calibrated, _CANDLE_UNRESOLVED_CAP)
 
     return calibrated
+
+
+# ---------------------------------------------------------------------------
+# 1H trigger-realism caps (Phase 14E.1) — downward-only, read-only
+# ---------------------------------------------------------------------------
+
+_ONE_HOUR_CAP_LOW_SCORE   = 79
+_ONE_HOUR_CAP_NO_ALERT    = 79
+_ONE_HOUR_CAP_FAILED      = 74
+_ONE_HOUR_CAP_LOCATION    = 79
+_ONE_HOUR_CAP_STALE       = 79
+_ONE_HOUR_CAP_NO_INVAL    = 79
+
+
+def _apply_one_hour_caps(calibrated: int, one_hour: dict, reasons: list) -> int:
+    """Hold calibrated score within 1H trigger-realism. Never raises it.
+
+    Reads tiering_result["one_hour_entry"] only. Disabled / missing 1H context
+    applies no cap (fully default-safe). Each applied cap appends a reason.
+    """
+    if not isinstance(one_hour, dict) or not one_hour:
+        return calibrated
+    status = str(one_hour.get("status", "DISABLED"))
+    if status == "DISABLED":
+        return calibrated
+
+    capped = calibrated
+
+    oh_score = one_hour.get("score")
+    try:
+        oh_score_int = int(oh_score)
+    except (TypeError, ValueError):
+        oh_score_int = None
+
+    alert_label = str(one_hour.get("alert_truth_label", ""))
+    trigger_state = str(one_hour.get("trigger_state", ""))
+    freshness = str(one_hour.get("data_freshness", ""))
+    location = one_hour.get("location_realism") or {}
+    loc_label = str(location.get("label", ""))
+    inval = one_hour.get("invalidation") or {}
+
+    if oh_score_int is not None and oh_score_int < 60:
+        capped = min(capped, _ONE_HOUR_CAP_LOW_SCORE)
+    if alert_label in ("NO_ALERT", "FAILED_TRIGGER"):
+        capped = min(capped, _ONE_HOUR_CAP_NO_ALERT)
+    if trigger_state in ("FAILED_RETEST", "INVALID_1H_TRIGGER", "STALE_TRIGGER"):
+        capped = min(capped, _ONE_HOUR_CAP_FAILED)
+    if loc_label in ("MIDRANGE_NO_EDGE", "HOSTILE_LOCATION", "MISSED_ENTRY"):
+        capped = min(capped, _ONE_HOUR_CAP_LOCATION)
+    if freshness == "STALE":
+        capped = min(capped, _ONE_HOUR_CAP_STALE)
+    if not inval.get("clear", False):
+        capped = min(capped, _ONE_HOUR_CAP_NO_INVAL)
+
+    if capped < calibrated:
+        reasons.append(("one_hour_trigger_realism", capped - calibrated))
+    return capped
 
 
 # ---------------------------------------------------------------------------

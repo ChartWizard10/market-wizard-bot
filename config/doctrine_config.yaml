@@ -20,6 +20,15 @@ disabled_indicators:
   - bollinger_bands
   - stochastic
 
+# Phase 14E.1 — dedicated 1H entry-trigger evidence engine. Separately acquired
+# 1H bars used for trigger proof only. Higher-timeframe (Weekly/Daily/4H) remains
+# sovereign; the 1H never creates the thesis. Evidence/display-layer only.
+one_hour:
+  enabled: true
+  interval: "60m"
+  lookback_period: "1mo"
+  max_bars: 80
+
 prefilter:
   max_claude_candidates_per_scan: 20
   prefilter_min_score: 55

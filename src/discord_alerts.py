@@ -15,6 +15,10 @@ log = logging.getLogger(__name__)
 
 _DISCORD_MAX_CHARS = 2000
 
+# Sentinel marking where the structured 1H evidence block is spliced in after the
+# narrative guards run. Deliberately keyword-free so no guard rewrites it.
+_ONE_HOUR_SENTINEL = "⁣ONE_HOUR_EVIDENCE_BLOCK⁣"
+
 _TIER_ENV_VAR = {
     "SNIPE_IT":   "DISCORD_SNIPE_CHANNEL_ID",
     "STARTER":    "DISCORD_STARTER_CHANNEL_ID",
@@ -386,6 +390,53 @@ _CANDLE_ALL_CONDITIONS_RE = re.compile(
 
 def _humanize_candle_veto(veto: str) -> str:
     return _CANDLE_VETO_TEXT.get(str(veto or "").strip().upper(), "")
+
+
+def _render_one_hour_lines(one_hour) -> list:
+    """Compact 1H entry-trigger evidence block (Phase 14E.1). Display-only.
+
+    Returns [] when the object is missing/disabled so alerts are never flooded.
+    WATCH_ONLY / NO_ALERT never carry entry-ready language — the sentence is
+    state-derived. Stale/degraded bar context renders an explicit caution.
+    """
+    if not isinstance(one_hour, dict):
+        return []
+    status = str(one_hour.get("status", "DISABLED"))
+    if status == "DISABLED":
+        return []
+
+    state = str(one_hour.get("trigger_state", "NO_1H_EVIDENCE"))
+    sentence = str(one_hour.get("scanner_sentence") or "").strip()
+    score = one_hour.get("score", 0)
+    try:
+        score = int(score)
+    except (TypeError, ValueError):
+        score = 0
+    score_label = str(one_hour.get("score_label", "NO_VALID_1H_TRIGGER"))
+    caps = one_hour.get("hard_caps_applied") or []
+    caps_text = ", ".join(str(c) for c in caps) if caps else "none"
+    truth = one_hour.get("pullback_retest_hold") or {}
+    candle = one_hour.get("candle_truth") or {}
+    location = one_hour.get("location_realism") or {}
+    freshness = str(one_hour.get("data_freshness", "STALE"))
+
+    out = [
+        f"  1H trigger: {state} — {sentence}",
+        f"  1H score:   {score_label} {score}/100; caps: {caps_text}",
+        (
+            "  1H truth:   "
+            f"retest={truth.get('retest_truth', 'NONE')}, "
+            f"hold={truth.get('hold_truth', 'NONE')}, "
+            f"candle={candle.get('event_type', 'NONE')}, "
+            f"location={location.get('label', 'MIDRANGE_NO_EDGE')}"
+        ),
+    ]
+    if freshness in ("STALE", "DEGRADED"):
+        out.append(
+            "  1H caution: stale/degraded bar context; "
+            "trigger-ready wording blocked."
+        )
+    return out
 
 
 def _neutralize_all_conditions(text: str) -> str:
@@ -2400,6 +2451,15 @@ def format_alert(
         if _veto_text:
             lines.append(f"  Candle caution: {_veto_text}")
 
+    # Phase 14E.1: compact 1H entry-trigger evidence block (display-only — never
+    # affects tier, capital, routing, suppression, dedup, or raw score). The block
+    # is structured, sovereign evidence and must NOT pass through the Claude-prose
+    # narrative neutralizers (which would, e.g., rewrite the literal HOLD_CONFIRMED
+    # enum). It is spliced in via a sentinel AFTER all guards have run.
+    _one_hour_block_lines = _render_one_hour_lines(tiering_result.get("one_hour_entry"))
+    if _one_hour_block_lines:
+        lines.append(_ONE_HOUR_SENTINEL)
+
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
         "──────────────────────────────",
@@ -2452,7 +2512,13 @@ def format_alert(
         rendered = _neutralize_completion_language_for_candle_gap(
             rendered, final_tier, _has_candle_gap
         )
-    return _apply_narrative_sovereignty_guard(final_tier, signal, rendered)
+    rendered = _apply_narrative_sovereignty_guard(final_tier, signal, rendered)
+    # Splice the structured 1H block in after every narrative guard has run.
+    if _one_hour_block_lines:
+        rendered = rendered.replace(
+            _ONE_HOUR_SENTINEL, "\n".join(_one_hour_block_lines)
+        )
+    return rendered
 
 
 # ---------------------------------------------------------------------------
