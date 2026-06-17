@@ -305,6 +305,64 @@ def batch_download(tickers: list, config: dict) -> dict:
     return results
 
 
+def fetch_one_hour_bars(ticker: str, config: dict) -> dict:
+    """Separately acquire recent 1H OHLCV bars for trigger-proof evidence.
+
+    Returns an envelope dict consumable by one_hour_entry.build_one_hour_entry_context:
+      {
+        "bars":      list of {open,high,low,close,volume,time} (oldest→newest),
+        "freshness": "FRESH" | "RECENT" | "DEGRADED" | "STALE",
+        "now":       iso timestamp the freshness was computed against,
+        "status":    "OK" | "EMPTY" | "ERROR",
+        "error":     None | str,
+      }
+
+    Never raises. On any failure returns status != "OK" with bars=[] so the 1H
+    engine degrades safely. This does NOT touch the daily/4H acquisition path.
+    """
+    one_hour_cfg = config.get("one_hour", {})
+    period = one_hour_cfg.get("lookback_period", "1mo")
+    interval = one_hour_cfg.get("interval", "60m")
+    max_bars = int(one_hour_cfg.get("max_bars", 80))
+
+    try:
+        df = yf.download(
+            ticker,
+            period=period,
+            interval=interval,
+            progress=False,
+            auto_adjust=True,
+        )
+    except Exception as exc:
+        log.warning("ONE_HOUR_FETCH_ERROR: %s: %s", ticker, exc)
+        return {"bars": [], "freshness": "STALE", "now": None, "status": "ERROR", "error": str(exc)}
+
+    if df is None or df.empty:
+        return {"bars": [], "freshness": "STALE", "now": None, "status": "EMPTY", "error": "empty 1H response"}
+
+    try:
+        df = _normalize(df)
+    except Exception as exc:
+        return {"bars": [], "freshness": "STALE", "now": None, "status": "ERROR", "error": f"1H normalize failed: {exc}"}
+
+    bars = []
+    tail = df.tail(max_bars)
+    for idx, row in tail.iterrows():
+        try:
+            bars.append({
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]) if "volume" in tail.columns else None,
+                "time": str(pd.to_datetime(idx)),
+            })
+        except (KeyError, ValueError, TypeError):
+            continue
+
+    return {"bars": bars, "freshness": None, "now": datetime.utcnow().isoformat(), "status": "OK", "error": None}
+
+
 def _error_result(ticker: str, msg: str) -> dict:
     return {
         "ticker": ticker,

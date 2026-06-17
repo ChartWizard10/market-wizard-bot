@@ -24,6 +24,7 @@ from src import discord_alerts
 from src import indicators
 from src import market_data as market_data_mod
 from src import candle_evidence
+from src import one_hour_entry
 from src import prefilter as prefilter_mod
 from src import score_calibration
 from src import state_store
@@ -356,6 +357,27 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("CANDLE_EVIDENCE_ERROR: %s: %s", ticker, exc)
             tiering_result["candle_evidence"] = candle_evidence._unknown_context()
+
+        # Step 6.57: 1H entry-trigger evidence (Phase 14E.1 — evidence/display only;
+        # never affects tier, capital, routing, suppression, dedup, or raw score).
+        # Separately acquires 1H bars; degrades safely when unavailable. Must run
+        # before calibration, which may read a conservative 1H score-realism cap.
+        try:
+            one_hour_envelope = market_data_mod.fetch_one_hour_bars(ticker, config)
+        except Exception as exc:
+            log.warning("ONE_HOUR_FETCH_ERROR: %s: %s", ticker, exc)
+            one_hour_envelope = None
+        try:
+            tiering_result["one_hour_entry"] = one_hour_entry.build_one_hour_entry_context(
+                ticker,
+                tiering_result,
+                enriched_data=enriched_map.get(ticker, {}),
+                one_hour_bars=one_hour_envelope,
+                config=config,
+            )
+        except Exception as exc:
+            log.warning("ONE_HOUR_ENTRY_ERROR: %s: %s", ticker, exc)
+            tiering_result["one_hour_entry"] = None
 
         # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
         # capital_action, discord_channel, safe_for_alert, suppression, or dedup)
