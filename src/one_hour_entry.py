@@ -282,6 +282,13 @@ def _build(ticker, tiering_result, enriched, one_hour_bars, htf_context, config)
     final_tier = str(tiering_result.get("final_tier", "WAIT")).upper()
     htf_permission = final_tier in ("SNIPE_IT", "STARTER")
     htf_forming = final_tier == "NEAR_ENTRY"
+    # HTF *context availability* is distinct from full entry *permission*. The
+    # scanner establishes higher-timeframe entry context whenever it emits a real
+    # setup tier (NEAR_ENTRY / STARTER / SNIPE_IT) — those carry validated
+    # structure (BOS / zone / continuation). A WAIT tier means no validated HTF
+    # thesis exists for the 1H engine to prove a trigger against; that is a
+    # genuine context-unavailable condition, not a false "no permission".
+    htf_context_available = final_tier in ("SNIPE_IT", "STARTER", "NEAR_ENTRY")
 
     if not bars:
         ctx["status"] = "DEGRADED"
@@ -364,7 +371,7 @@ def _build(ticker, tiering_result, enriched, one_hour_bars, htf_context, config)
     )
     caps, cap_reasons = _collect_caps(
         freshness, location, inval, prh, htf_permission, path, candle_truth,
-        trigger_state,
+        trigger_state, htf_context_available,
     )
     score = raw_score
     for cap_value in caps.values():
@@ -1218,7 +1225,7 @@ def _score_categories(htf_permission, htf_forming, location, candle_truth, prh, 
 
 def _collect_caps(
     freshness, location, inval, prh, htf_permission, path, candle_truth,
-    trigger_state,
+    trigger_state, htf_context_available=True,
 ):
     """Return (caps: {name: cap_value}, reasons: list[str]). Lowest cap wins."""
     caps = {}
@@ -1243,8 +1250,16 @@ def _collect_caps(
     elif loc == "EXTENDED_ENTRY_LOCATION":
         add("EXTENDED_LOCATION", _CAP_EXTENDED, "extended from value")
 
-    if not htf_permission:
-        add("NO_HTF_PERMISSION", _CAP_NO_HTF, "higher-timeframe setup not yet valid")
+    # HTF cap is only truthful when permission is genuinely absent. A valid
+    # forming setup (NEAR_ENTRY with BOS / FVG / continuation) HAS higher-
+    # timeframe context — calling it "no permission" was the SPG/PSA mapping
+    # defect. Only a missing HTF context (e.g. WAIT — no validated thesis) earns
+    # a conservative, truthfully-named context-unavailable cap.
+    if not htf_permission and not htf_context_available:
+        add(
+            "HTF_CONTEXT_UNAVAILABLE_FOR_1H_ENGINE", _CAP_NO_HTF,
+            "higher-timeframe context unavailable to the 1H engine",
+        )
 
     if prh.get("retest_truth") in ("NONE", "RETEST_MISSED"):
         add("NO_RETEST", _CAP_NO_RETEST, "no real retest of structure")

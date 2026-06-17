@@ -1743,6 +1743,133 @@ def _apply_narrative_sovereignty_guard(
 
 
 # ---------------------------------------------------------------------------
+# Phase 14E.1A: 1H alert-truth alignment.
+#
+# The legacy structured fields (retest_status / hold_status from the daily/4H
+# tiering pass) can read "confirmed" while the dedicated 1H entry-trigger
+# evidence engine — measuring actual 1H bars — proves the trigger is NOT yet
+# confirmed (RETEST_IN_PROGRESS / HOLD_WEAK / 1H_TRIGGER_WEAK / WATCH_ONLY).
+# When they conflict the 1H object is sovereign for trigger-PROOF wording: the
+# legacy proof language is cooled to honest watch-only language.
+#
+# This NEVER touches capital posture, routing, tier, suppression, dedup, or the
+# structured trigger/invalidation/target fields. It only neutralizes overstated
+# retest/hold/quality PROOF wording. The 1H block itself is spliced in after this
+# pass (via the keyword-free sentinel) and is therefore never altered here.
+# ---------------------------------------------------------------------------
+
+# Trigger states that mean the 1H has NOT proven a closed, confirmed hold.
+_ONE_HOUR_INCOMPLETE_STATES = {
+    "NO_1H_EVIDENCE", "APPROACHING_LOCATION", "PULLBACK_FORMING",
+    "RETEST_IN_PROGRESS", "HOLD_FORMING", "FAILED_RETEST",
+    "INVALID_1H_TRIGGER", "STALE_TRIGGER",
+}
+_ONE_HOUR_INCOMPLETE_HOLDS = {"HOLD_WEAK", "HOLD_FORMING", "HOLD_FAILED", "NONE"}
+_ONE_HOUR_INCOMPLETE_SCORES = {"1H_TRIGGER_WEAK", "NO_VALID_1H_TRIGGER"}
+_ONE_HOUR_INCOMPLETE_ALERTS = {
+    "NO_ALERT", "WATCH_ONLY", "FORMING_TRIGGER", "FAILED_TRIGGER",
+}
+
+# Confirmed-path states/labels — proof wording stays allowed (no overcooling).
+_ONE_HOUR_CONFIRMED_STATES = {"HOLD_CONFIRMED", "TRIGGER_LIVE"}
+_ONE_HOUR_CONFIRMED_ALERTS = {"CONFIRMED_TRIGGER", "LIVE_TRIGGER"}
+
+_OH_RETEST_VALUE_RE = re.compile(
+    r"^([ \t]*Retest:[ \t]+)confirmed\b", re.IGNORECASE | re.MULTILINE
+)
+_OH_HOLD_VALUE_RE = re.compile(
+    r"^([ \t]*Hold:[ \t]+)confirmed\b", re.IGNORECASE | re.MULTILINE
+)
+_OH_QUALITY_LINE_RE = re.compile(
+    r"^([ \t]*Quality read:[ \t]*).*$", re.MULTILINE
+)
+_OH_CONFIRMED_SEQUENCE_RE = re.compile(
+    r"\bconfirmed[ \t]+sequence[ \t]+and[ \t]+hold\b", re.IGNORECASE
+)
+_OH_APLUS_SETUP_RE = re.compile(r"\bA\+[ \t]+setup\b", re.IGNORECASE)
+_OH_NEAR_READY_RE = re.compile(r"\bnear[\t\- ]ready\b", re.IGNORECASE)
+
+_OH_WATCH_ONLY_QUALITY = (
+    "Watch-only valid — structure exists, but 1H trigger proof remains incomplete."
+)
+_OH_PROOF_LINE = (
+    "  1H proof: 1H evidence has not confirmed a closed hold."
+)
+
+
+def _one_hour_proof_incomplete(one_hour) -> bool:
+    """True when the 1H evidence object proves the trigger is NOT yet confirmed.
+
+    Returns False when the object is missing/disabled (legacy wording preserved)
+    or when the 1H genuinely confirms (HOLD_CONFIRMED/TRIGGER_LIVE with a
+    confirmed/live alert label) — so confirmed wording is never overcooled.
+    """
+    if not isinstance(one_hour, dict):
+        return False
+    status = str(one_hour.get("status", "DISABLED")).upper()
+    if status == "DISABLED":
+        return False
+
+    state = str(one_hour.get("trigger_state", "")).upper()
+    hold = str((one_hour.get("pullback_retest_hold") or {}).get("hold_truth", "")).upper()
+    score_label = str(one_hour.get("score_label", "")).upper()
+    alert_label = str(one_hour.get("alert_truth_label", "")).upper()
+
+    # Genuine confirmation — never cool.
+    if (
+        state in _ONE_HOUR_CONFIRMED_STATES
+        and hold == "HOLD_CONFIRMED"
+        and alert_label in _ONE_HOUR_CONFIRMED_ALERTS
+    ):
+        return False
+
+    return (
+        state in _ONE_HOUR_INCOMPLETE_STATES
+        or hold in _ONE_HOUR_INCOMPLETE_HOLDS
+        or score_label in _ONE_HOUR_INCOMPLETE_SCORES
+        or alert_label in _ONE_HOUR_INCOMPLETE_ALERTS
+    )
+
+
+def _apply_one_hour_truth_alignment_guard(body: str, one_hour) -> str:
+    """Cool legacy retest/hold/quality PROOF wording when the 1H object — the
+    sovereign trigger-proof source — has not confirmed a closed hold.
+
+    Display-only. Never touches capital, routing, tier, suppression, dedup, or
+    the structured trigger/invalidation/target fields. Runs before the 1H block
+    is spliced in, so the structured evidence block is never altered.
+    """
+    if not body or not _one_hour_proof_incomplete(one_hour):
+        return body
+
+    result = body
+    # EXECUTION retest/hold values: an overstated "confirmed" is cooled to the
+    # honest 1H read. Partial / missing values are already honest — left as-is.
+    result = _OH_RETEST_VALUE_RE.sub(r"\1in progress", result)
+    result = _OH_HOLD_VALUE_RE.sub(r"\1weak", result)
+
+    # Quality read line: replace the whole value so A+/elite/near-ready/
+    # "confirmed sequence and hold" prestige language cannot overstate 1H proof.
+    result = _OH_QUALITY_LINE_RE.sub(r"\g<1>" + _OH_WATCH_ONLY_QUALITY, result)
+
+    # Defense-in-depth: neutralize the same proof phrases anywhere else in prose.
+    result = _OH_CONFIRMED_SEQUENCE_RE.sub(
+        "structure present; 1H hold not yet confirmed", result
+    )
+    result = _OH_APLUS_SETUP_RE.sub("Watch-only valid setup", result)
+    result = _OH_NEAR_READY_RE.sub("watch-only", result)
+
+    # Add an explicit one-line 1H proof note in the ACTION section (right after
+    # the cooled Quality read line) so the incomplete-proof reason is visible.
+    if "1H proof: 1H evidence has not confirmed" not in result:
+        result = _OH_QUALITY_LINE_RE.sub(
+            lambda m: m.group(0) + "\n" + _OH_PROOF_LINE, result, count=1
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.8B: Structural Quality Hierarchy — five-dimension quality layer.
 #
 # Replaces the Phase 13.8A binary-gate model with five three-state dimensions
@@ -2513,6 +2640,14 @@ def format_alert(
             rendered, final_tier, _has_candle_gap
         )
     rendered = _apply_narrative_sovereignty_guard(final_tier, signal, rendered)
+    # Phase 14E.1A: 1H alert-truth alignment. When the dedicated 1H evidence
+    # object proves the trigger is not yet confirmed, cool any overstated legacy
+    # retest/hold/quality proof wording. Runs after every narrative guard and
+    # before the 1H block splice, so the structured 1H block is never altered and
+    # capital/routing/tier/structured fields are left intact.
+    rendered = _apply_one_hour_truth_alignment_guard(
+        rendered, tiering_result.get("one_hour_entry")
+    )
     # Splice the structured 1H block in after every narrative guard has run.
     if _one_hour_block_lines:
         rendered = rendered.replace(
