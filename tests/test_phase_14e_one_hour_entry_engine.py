@@ -483,13 +483,27 @@ class TestScoringAndCaps:
         assert "NO_CLEAR_INVALIDATION" in ctx["hard_caps_applied"]
         assert ctx["score"] <= 69
 
-    def test_no_htf_permission_caps_69(self):
-        ctx = _build(_CLEAN_SEQUENCE, )  # default SNIPE; now override tier
+    def test_missing_htf_context_caps_69(self):
+        # WAIT tier has no validated higher-timeframe thesis for the 1H engine to
+        # prove a trigger against — that is a genuine context-unavailable
+        # condition (Phase 14E.1A: truthful cap naming, not false "no permission").
         ctx_wait = ohe.build_one_hour_entry_context(
             "T", _tiering("WAIT"), _ENR, one_hour_bars=_CLEAN_SEQUENCE
         )
-        assert "NO_HTF_PERMISSION" in ctx_wait["hard_caps_applied"]
+        assert "HTF_CONTEXT_UNAVAILABLE_FOR_1H_ENGINE" in ctx_wait["hard_caps_applied"]
+        assert "NO_HTF_PERMISSION" not in ctx_wait["hard_caps_applied"]
         assert ctx_wait["score"] <= 69
+
+    def test_near_entry_does_not_apply_false_no_permission_cap(self):
+        # A valid forming NEAR_ENTRY setup HAS higher-timeframe context (BOS /
+        # FVG / continuation). The 1H engine must not stamp it with a false
+        # no-permission / context-unavailable cap (the SPG/PSA defect).
+        ctx_ne = ohe.build_one_hour_entry_context(
+            "T", _tiering("NEAR_ENTRY"), _ENR, one_hour_bars=_CLEAN_SEQUENCE
+        )
+        caps = ctx_ne["hard_caps_applied"]
+        assert "NO_HTF_PERMISSION" not in caps
+        assert "HTF_CONTEXT_UNAVAILABLE_FOR_1H_ENGINE" not in caps
 
     def test_stale_caps_59(self):
         ctx = ohe.build_one_hour_entry_context(
