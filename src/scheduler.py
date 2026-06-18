@@ -29,6 +29,7 @@ from src import prefilter as prefilter_mod
 from src import score_calibration
 from src import state_store
 from src import tiering
+from src import timeframe_alignment
 from src import trade_location
 from src import trajectory as trajectory_mod
 from src.claude_client import async_claude_scan, claude_call
@@ -378,6 +379,21 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("ONE_HOUR_ENTRY_ERROR: %s: %s", ticker, exc)
             tiering_result["one_hour_entry"] = None
+
+        # Step 6.58: Multi-timeframe alignment evidence (Phase 14F — evidence/
+        # display/audit only; never affects tier, capital, routing, suppression,
+        # dedup, or raw score). Reads one_hour_entry/trade_location/final_signal;
+        # the builder catches its own errors but the scheduler still guards.
+        try:
+            tiering_result["timeframe_alignment"] = timeframe_alignment.build_timeframe_alignment_context(
+                ticker,
+                tiering_result,
+                enriched_data=enriched_map.get(ticker, {}),
+                config=config,
+            )
+        except Exception as exc:
+            log.warning("TIMEFRAME_ALIGNMENT_ERROR: %s: %s", ticker, exc)
+            tiering_result["timeframe_alignment"] = timeframe_alignment.error_timeframe_alignment_object(str(exc))
 
         # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
         # capital_action, discord_channel, safe_for_alert, suppression, or dedup)
