@@ -11,6 +11,8 @@ import math
 import os
 import re
 
+from src import timeframe_alignment as _tf_alignment
+
 log = logging.getLogger(__name__)
 
 _DISCORD_MAX_CHARS = 2000
@@ -18,6 +20,10 @@ _DISCORD_MAX_CHARS = 2000
 # Sentinel marking where the structured 1H evidence block is spliced in after the
 # narrative guards run. Deliberately keyword-free so no guard rewrites it.
 _ONE_HOUR_SENTINEL = "⁣ONE_HOUR_EVIDENCE_BLOCK⁣"
+
+# Sentinel for the Phase 14F multi-timeframe alignment block — same splice-after-
+# guards protection so its structured enum values are never rewritten.
+_TF_ALIGNMENT_SENTINEL = "⁣TIMEFRAME_ALIGNMENT_BLOCK⁣"
 
 _TIER_ENV_VAR = {
     "SNIPE_IT":   "DISCORD_SNIPE_CHANNEL_ID",
@@ -2587,6 +2593,17 @@ def format_alert(
     if _one_hour_block_lines:
         lines.append(_ONE_HOUR_SENTINEL)
 
+    # Phase 14F: compact multi-timeframe alignment block (display/audit only —
+    # never affects tier, capital, routing, suppression, dedup, or raw score).
+    # Placed beside the 1H block; spliced via a keyword-free sentinel after all
+    # narrative guards so its structured enum values are never rewritten. Does
+    # not replace or remove the 1H block.
+    _tf_block_lines = _tf_alignment.render_timeframe_alignment_lines(
+        tiering_result.get("timeframe_alignment")
+    )
+    if _tf_block_lines:
+        lines.append(_TF_ALIGNMENT_SENTINEL)
+
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
         "──────────────────────────────",
@@ -2652,6 +2669,12 @@ def format_alert(
     if _one_hour_block_lines:
         rendered = rendered.replace(
             _ONE_HOUR_SENTINEL, "\n".join(_one_hour_block_lines)
+        )
+    # Splice the structured multi-timeframe alignment block in last (same
+    # protection: enum values are never rewritten by the narrative guards).
+    if _tf_block_lines:
+        rendered = rendered.replace(
+            _TF_ALIGNMENT_SENTINEL, "\n".join(_tf_block_lines)
         )
     return rendered
 
