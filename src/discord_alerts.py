@@ -11,6 +11,7 @@ import math
 import os
 import re
 
+from src import snipe_gate_audit as _snipe_audit
 from src import timeframe_alignment as _tf_alignment
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,10 @@ _ONE_HOUR_SENTINEL = "⁣ONE_HOUR_EVIDENCE_BLOCK⁣"
 # Sentinel for the Phase 14F multi-timeframe alignment block — same splice-after-
 # guards protection so its structured enum values are never rewritten.
 _TF_ALIGNMENT_SENTINEL = "⁣TIMEFRAME_ALIGNMENT_BLOCK⁣"
+
+# Sentinel for the optional Phase 14H SNIPE-audit compact line (config-gated,
+# default off). Same splice-after-guards protection for its label enum.
+_SNIPE_AUDIT_SENTINEL = "⁣SNIPE_GATE_AUDIT_LINE⁣"
 
 _TIER_ENV_VAR = {
     "SNIPE_IT":   "DISCORD_SNIPE_CHANNEL_ID",
@@ -2298,8 +2303,14 @@ def format_alert(
     tiering_result: dict,
     dedup_decision: dict | None = None,
     scan_id: str = "",
+    config: dict | None = None,
 ) -> str:
-    """Build plain-text alert message from validated tiering_result fields only."""
+    """Build plain-text alert message from validated tiering_result fields only.
+
+    Phase 14H: an optional compact SNIPE-audit line is rendered only when
+    config["snipe_gate_audit"]["render_compact_line"] is true. Default off — no
+    line is added when config is None (every existing caller is unaffected).
+    """
     final_tier   = tiering_result.get("final_tier", "WAIT")
     score        = tiering_result.get("score", 0)
     signal       = tiering_result.get("final_signal") or {}
@@ -2700,6 +2711,15 @@ def format_alert(
     if _tf_block_lines:
         lines.append(_TF_ALIGNMENT_SENTINEL)
 
+    # Phase 14H: optional compact SNIPE-audit line (config-gated, default off).
+    # One line only — no gate table, no bloat. Spliced via a keyword-free
+    # sentinel after the narrative guards so its label enum is never rewritten.
+    _snipe_audit_line = _snipe_audit.render_snipe_audit_line(
+        tiering_result.get("snipe_gate_audit"), config
+    )
+    if _snipe_audit_line:
+        lines.append(_SNIPE_AUDIT_SENTINEL)
+
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
         "──────────────────────────────",
@@ -2778,6 +2798,8 @@ def format_alert(
         rendered = rendered.replace(
             _TF_ALIGNMENT_SENTINEL, "\n".join(_tf_block_lines)
         )
+    if _snipe_audit_line:
+        rendered = rendered.replace(_SNIPE_AUDIT_SENTINEL, _snipe_audit_line)
     return rendered
 
 
@@ -2924,7 +2946,7 @@ async def send_alert(
         log.warning("ROUTING_FAILURE: %s %s — bot.get_channel(%s) returned None", final_tier, ticker, channel_id)
         return _missing_channel(final_tier, ticker)
 
-    text   = format_alert(tiering_result, dedup_decision, scan_id)
+    text   = format_alert(tiering_result, dedup_decision, scan_id, config)
     chunks = chunk_message(text)
 
     try:
