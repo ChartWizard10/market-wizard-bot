@@ -27,6 +27,7 @@ from src import candle_evidence
 from src import one_hour_entry
 from src import prefilter as prefilter_mod
 from src import score_calibration
+from src import snipe_gate_audit
 from src import state_store
 from src import tiering
 from src import timeframe_alignment
@@ -394,6 +395,21 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("TIMEFRAME_ALIGNMENT_ERROR: %s: %s", ticker, exc)
             tiering_result["timeframe_alignment"] = timeframe_alignment.error_timeframe_alignment_object(str(exc))
+
+        # Step 6.59: SNIPE_IT gate audit (Phase 14H — diagnostic/audit only; never
+        # affects tier, capital, routing, suppression, dedup, or raw score).
+        # Reads tiering/one_hour_entry/timeframe_alignment/trade_location/
+        # candle_evidence to explain why a candidate did or did not qualify.
+        try:
+            tiering_result["snipe_gate_audit"] = snipe_gate_audit.build_snipe_gate_audit(
+                ticker,
+                tiering_result,
+                enriched_data=enriched_map.get(ticker, {}),
+                config=config,
+            )
+        except Exception as exc:
+            log.warning("SNIPE_GATE_AUDIT_ERROR: %s: %s", ticker, exc)
+            tiering_result["snipe_gate_audit"] = snipe_gate_audit.error_snipe_gate_audit_object(str(exc))
 
         # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
         # capital_action, discord_channel, safe_for_alert, suppression, or dedup)

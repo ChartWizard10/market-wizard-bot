@@ -36,6 +36,14 @@ one_hour:
 timeframe_alignment:
   enabled: true
 
+# Phase 14H — SNIPE_IT gate audit. Read-only diagnostic flight-recorder that
+# explains why a candidate did or did not qualify for SNIPE_IT. Never promotes,
+# downgrades, routes, or mutates scanner behavior. Compact Discord line is OFF by
+# default (no alert bloat); the object is always stored on tiering_result.
+snipe_gate_audit:
+  enabled: true
+  render_compact_line: false
+
 prefilter:
   max_claude_candidates_per_scan: 20
   prefilter_min_score: 55
