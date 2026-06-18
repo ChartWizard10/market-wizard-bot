@@ -1876,6 +1876,102 @@ def _apply_one_hour_truth_alignment_guard(body: str, one_hour) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 14G: Alert posture compression — STARTER / NEAR_ENTRY language truth.
+#
+# Text-only. Compresses contradictory / duplicated posture wording so the alert
+# reads decisively. Never mutates tier, capital, routing, suppression, dedup,
+# or any structured field. Runs after the narrative + 1H-truth guards and before
+# the structured 1H / TF blocks are spliced in, so those blocks are untouched.
+#
+# STARTER law:  a STARTER is reduced-size capital, not watch-only. When 1H proof
+#   is still pending the cooled "Watch-only valid …" quality read contradicts the
+#   STARTER posture; it is replaced with decisive reduced-size language while
+#   add / full-size remains blocked on 1H closed-hold proof.
+# NEAR_ENTRY law: keep NO CAPITAL / watch-only, but never duplicate the blocker
+#   into the missing-conditions line ("Missing conditions: Blocker: …").
+# ---------------------------------------------------------------------------
+
+_STARTER_PENDING_QUALITY = (
+    "Starter valid — reduced-size only; add/full-size waits for 1H closed-hold proof."
+)
+
+_QUALITY_READ_LINE_RE = re.compile(
+    r"^([ \t]*Quality read:[ \t]*).*$", re.MULTILINE
+)
+_ONE_HOUR_PROOF_LINE_RE = re.compile(
+    r"^[ \t]*1H proof: 1H evidence has not confirmed a closed hold\.[ \t]*\n",
+    re.MULTILINE,
+)
+_NE_MISSING_CONDITIONS_LINE_RE = re.compile(
+    r"^Missing conditions:[ \t]*(.*)$", re.MULTILINE
+)
+_NE_BLOCKER_LINE_RE = re.compile(r"^Blocker:[ \t]*(.*)$", re.MULTILINE)
+_LEADING_BLOCKER_PREFIX_RE = re.compile(r"^Blocker:[ \t]*", re.IGNORECASE)
+
+
+def _apply_starter_posture_compression(
+    body: str, final_tier: str, capital_action: str
+) -> str:
+    """Replace contradictory watch-only quality wording in a STARTER alert with
+    decisive reduced-size posture. Add / full-size stays blocked on 1H proof.
+
+    Gated on the presence of the cooled "Watch-only valid" leak, which only
+    surfaces in a STARTER body when 1H trigger proof is pending. STARTER policy
+    permits reduced-size capital, so watch-only / no-capital wording must never
+    leak in. "no add" / "no full-size" wording is intentionally preserved.
+    """
+    if str(final_tier).upper() != "STARTER" or str(capital_action).lower() != "starter_only":
+        return body
+    if "watch-only valid" not in body.lower():
+        return body
+
+    result = body
+    # Decisive STARTER quality read.
+    result = _QUALITY_READ_LINE_RE.sub(r"\g<1>" + _STARTER_PENDING_QUALITY, result)
+    # The new quality read already states the add/full-size proof requirement —
+    # drop the now-redundant cooled 1H-proof narrative line (compression).
+    result = _ONE_HOUR_PROOF_LINE_RE.sub("", result)
+    # Defense-in-depth: no residual watch-only phrasing may remain in a STARTER.
+    result = re.sub(r"Watch-only valid", "Starter valid", result)
+    result = re.sub(r"\bwatch-only\b", "reduced-size starter", result, flags=re.IGNORECASE)
+    return result
+
+
+def _apply_near_entry_missing_proof_compression(body: str, final_tier: str) -> str:
+    """Compress duplicated blocker / missing-condition wording in a NEAR_ENTRY
+    alert. Only the duplicate pattern is touched — a clean "Missing conditions:"
+    line (a humanized list distinct from the blocker) is left intact.
+
+    Transforms:
+      "Missing conditions: Blocker: <X>"  ->  "Missing proof: <X>"
+    and, when the missing-proof content duplicates the Blocker line, collapses it
+    to "Missing proof: closed hold confirmation." Never removes the blocker,
+    upgrade trigger, invalidation, or NO CAPITAL lines.
+    """
+    if str(final_tier).upper() != "NEAR_ENTRY":
+        return body
+
+    bm = _NE_BLOCKER_LINE_RE.search(body)
+    blocker_text = bm.group(1).strip() if bm else ""
+
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", " ", str(s).strip().rstrip(". ").lower())
+
+    def _line_repl(m: re.Match) -> str:
+        content = m.group(1).strip()
+        deduped = _LEADING_BLOCKER_PREFIX_RE.sub("", content).strip()
+        is_blocker_prefixed = bool(_LEADING_BLOCKER_PREFIX_RE.match(content))
+        is_dup = bool(blocker_text) and _norm(deduped) == _norm(blocker_text)
+        if not (is_blocker_prefixed or is_dup):
+            return m.group(0)            # clean line — leave untouched
+        if is_dup:
+            deduped = "closed hold confirmation."
+        return "Missing proof: " + deduped
+
+    return _NE_MISSING_CONDITIONS_LINE_RE.sub(_line_repl, body)
+
+
+# ---------------------------------------------------------------------------
 # Phase 13.8B: Structural Quality Hierarchy — five-dimension quality layer.
 #
 # Replaces the Phase 13.8A binary-gate model with five three-state dimensions
@@ -2665,6 +2761,12 @@ def format_alert(
     rendered = _apply_one_hour_truth_alignment_guard(
         rendered, tiering_result.get("one_hour_entry")
     )
+    # Phase 14G: posture compression (text-only). STARTER must read as reduced-
+    # size, never watch-only; NEAR_ENTRY must not duplicate its blocker into the
+    # missing-conditions line. Runs after the truth guard and before the splices
+    # so the structured 1H / TF blocks are never touched.
+    rendered = _apply_starter_posture_compression(rendered, final_tier, capital_action)
+    rendered = _apply_near_entry_missing_proof_compression(rendered, final_tier)
     # Splice the structured 1H block in after every narrative guard has run.
     if _one_hour_block_lines:
         rendered = rendered.replace(
