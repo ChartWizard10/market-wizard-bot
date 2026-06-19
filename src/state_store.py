@@ -7,6 +7,7 @@ final_tier. Does not call Discord, Claude, yfinance, or the scheduler.
 
 import json
 import logging
+import math
 import shutil
 import time
 from datetime import datetime, timezone
@@ -281,15 +282,70 @@ def _degraded_snipe_snapshot(note: str) -> dict:
     }
 
 
+# ---- JSON-safety primitives (strict: json.dumps(row, allow_nan=False) safe) --
+
+def _json_safe_number(value):
+    """Finite int/float only — bool rejected. Else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return None
+
+
+def _json_safe_scalar(value):
+    """String-safe scalar. None/str pass through; finite numeric (non-bool) ->
+    str; bool/dict/list/set/tuple/object/callable/NaN/Infinity -> None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(value) if math.isfinite(value) else None
+    return None
+
+
+def _json_safe_bool_or_none(value):
+    """Only literal True / False survive; everything else -> None."""
+    if value is True:
+        return True
+    if value is False:
+        return False
+    return None
+
+
+def _json_safe_level(value):
+    """A numeric level may stay numeric. str / finite int / finite float (non-
+    bool) / None survive; bool / NaN / Infinity / nested -> None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return None
+
+
 def _snipe_gate_name(item):
-    """Extract a gate name from a dict in priority order, or a bare string."""
+    """Extract a JSON-safe gate name from a dict (gate > name > id > key) or a
+    bare string. Returns a non-empty string, or None."""
     if isinstance(item, str):
         return item or None
     if isinstance(item, dict):
         for key in ("gate", "name", "id", "key"):
-            v = item.get(key)
-            if isinstance(v, str) and v:
-                return v
+            safe = _json_safe_scalar(item.get(key))
+            if isinstance(safe, str) and safe:
+                return safe
     return None
 
 
@@ -311,11 +367,10 @@ def _snipe_compact_blocked_gates(blocked) -> list:
     for item in blocked:
         if isinstance(item, dict):
             out.append({
-                "gate": (item.get("gate") or item.get("name")
-                         or item.get("id") or item.get("key")),
-                "status": item.get("status"),
-                "reason": item.get("reason"),
-                "source": item.get("source"),
+                "gate": _snipe_gate_name(item),
+                "status": _json_safe_scalar(item.get("status")),
+                "reason": _json_safe_scalar(item.get("reason")),
+                "source": _json_safe_scalar(item.get("source")),
             })
         elif isinstance(item, str):
             out.append({"gate": item, "status": None, "reason": None, "source": None})
@@ -332,11 +387,11 @@ def _snipe_compact_missing_proofs(src) -> list:
             out.append(item)
         elif isinstance(item, dict):
             out.append({
-                "gate": item.get("gate"),
-                "name": item.get("name"),
-                "reason": item.get("reason"),
-                "required_evidence": item.get("required_evidence"),
-                "source": item.get("source"),
+                "gate": _json_safe_scalar(item.get("gate")),
+                "name": _json_safe_scalar(item.get("name")),
+                "reason": _json_safe_scalar(item.get("reason")),
+                "required_evidence": _json_safe_scalar(item.get("required_evidence")),
+                "source": _json_safe_scalar(item.get("source")),
             })
         # skip malformed entries
     return out
@@ -351,11 +406,11 @@ def _snipe_compact_promotion_triggers(src) -> list:
             out.append(item)
         elif isinstance(item, dict):
             out.append({
-                "gate": item.get("gate"),
-                "trigger": item.get("trigger"),
-                "level": item.get("level"),
-                "condition": item.get("condition"),
-                "reason": item.get("reason"),
+                "gate": _json_safe_scalar(item.get("gate")),
+                "trigger": _json_safe_scalar(item.get("trigger")),
+                "level": _json_safe_level(item.get("level")),
+                "condition": _json_safe_scalar(item.get("condition")),
+                "reason": _json_safe_scalar(item.get("reason")),
             })
         # skip malformed entries
     return out
@@ -370,6 +425,7 @@ def _snipe_compact_blocking_reasons(src) -> list:
             if item:
                 out.append(item)
         elif isinstance(item, dict):
+            # Preserve a genuine string only (never stringify an object repr).
             for key in ("reason", "message", "label", "name", "gate"):
                 v = item.get(key)
                 if isinstance(v, str) and v:
@@ -380,7 +436,8 @@ def _snipe_compact_blocking_reasons(src) -> list:
 
 
 def _compact_snipe_gate_audit_snapshot(audit):
-    """Return a compact, JSON-safe grading snapshot of a 14H snipe_gate_audit.
+    """Return a compact, strictly JSON-safe grading snapshot of a 14H
+    snipe_gate_audit (safe under json.dumps(..., allow_nan=False)).
 
     None when the audit is missing; a degraded snapshot when it is malformed or
     extraction fails. Never raises and never mutates the source object.
@@ -391,17 +448,19 @@ def _compact_snipe_gate_audit_snapshot(audit):
         return _degraded_snipe_snapshot("malformed source")
     try:
         return {
-            "audit_label": audit.get("audit_label"),
-            "promotion_state": audit.get("promotion_state"),
-            "snipe_score": audit.get("snipe_score"),
-            "snipe_grade": audit.get("snipe_grade"),
-            "eligible_for_snipe_review": audit.get("eligible_for_snipe_review"),
+            "audit_label": _json_safe_scalar(audit.get("audit_label")),
+            "promotion_state": _json_safe_scalar(audit.get("promotion_state")),
+            "snipe_score": _json_safe_number(audit.get("snipe_score")),
+            "snipe_grade": _json_safe_scalar(audit.get("snipe_grade")),
+            "eligible_for_snipe_review": _json_safe_bool_or_none(
+                audit.get("eligible_for_snipe_review")
+            ),
             "blocked_gate_names": _snipe_blocked_gate_names(audit.get("blocked_gates")),
             "blocked_gates": _snipe_compact_blocked_gates(audit.get("blocked_gates")),
             "missing_proofs": _snipe_compact_missing_proofs(audit.get("missing_proofs")),
             "promotion_triggers": _snipe_compact_promotion_triggers(audit.get("promotion_triggers")),
             "blocking_reasons": _snipe_compact_blocking_reasons(audit.get("blocking_reasons")),
-            "diagnostic_sentence": audit.get("diagnostic_sentence"),
+            "diagnostic_sentence": _json_safe_scalar(audit.get("diagnostic_sentence")),
         }
     except Exception as exc:  # pragma: no cover - defensive catch-all
         log.warning("SNIPE_AUDIT_SNAPSHOT_ERROR: %s", exc)

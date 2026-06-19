@@ -349,3 +349,150 @@ def test_old_record_without_snapshot_readable():
     # A pre-14H.1 row (no snipe_gate_audit key) is still a valid dict.
     old_row = {"ticker": "HAE", "tier": "STARTER", "score": 80}
     assert old_row.get("snipe_gate_audit") is None  # readable, no KeyError
+
+
+# ===========================================================================
+# 14H.1 HARDENING — strict JSON safety (json.dumps(row, allow_nan=False))
+# ===========================================================================
+
+def _unsafe_audit():
+    """An audit object packed with JSON-unsafe garbage in every field."""
+    return {
+        "audit_label": {"bad": "object"},
+        "promotion_state": object(),
+        "snipe_score": "ninety-two",
+        "snipe_grade": ["A"],
+        "eligible_for_snipe_review": "yes",
+        "blocked_gates": [{
+            "gate": {"bad": "nested"},
+            "status": set(["BLOCK"]),
+            "reason": object(),
+            "source": ["x"],
+        }],
+        "missing_proofs": [{
+            "gate": {"bad": 1},
+            "reason": object(),
+            "required_evidence": set(["hold"]),
+        }],
+        "promotion_triggers": [{
+            "gate": object(),
+            "level": float("nan"),
+            "condition": {"bad": 1},
+        }],
+        "blocking_reasons": [
+            {"reason": object()},
+            {"message": "valid message"},
+        ],
+        "diagnostic_sentence": object(),
+    }
+
+
+def test_strict_json_dumps_succeeds_on_unsafe_audit():
+    tr = _tiering(audit=_unsafe_audit())
+    row = _record(tr)            # must not raise
+    # Strict serialization rejects NaN/Infinity — proves no unsafe number leaked.
+    json.dumps(row, allow_nan=False)
+
+
+def test_unsafe_scalars_become_none_or_skipped():
+    snap = _record(_tiering(audit=_unsafe_audit()))["snipe_gate_audit"]
+    assert snap["audit_label"] is None
+    assert snap["promotion_state"] is None
+    assert snap["snipe_score"] is None
+    assert snap["snipe_grade"] is None
+    assert snap["eligible_for_snipe_review"] is None
+    assert snap["diagnostic_sentence"] is None
+    # Unsafe gate-name extraction yields nothing.
+    assert snap["blocked_gate_names"] == []
+    # Valid neighbouring blocking reason preserved.
+    assert snap["blocking_reasons"] == ["valid message"]
+
+
+def test_no_nested_objects_in_compact_dicts():
+    snap = _record(_tiering(audit=_unsafe_audit()))["snipe_gate_audit"]
+    def _all_safe(entries):
+        for e in entries:
+            assert isinstance(e, (str, dict))
+            if isinstance(e, dict):
+                for v in e.values():
+                    assert v is None or isinstance(v, (str, int, float))
+                    assert not isinstance(v, bool)
+    _all_safe(snap["blocked_gates"])
+    _all_safe(snap["missing_proofs"])
+    _all_safe(snap["promotion_triggers"])
+
+
+def test_unsafe_audit_does_not_mutate_source():
+    tr = _tiering(audit=_unsafe_audit())
+    src_audit = tr["snipe_gate_audit"]
+    snapshot_of_source = {
+        "snipe_score": src_audit["snipe_score"],
+        "eligible_for_snipe_review": src_audit["eligible_for_snipe_review"],
+        "blocked_gates_len": len(src_audit["blocked_gates"]),
+    }
+    _record(tr)
+    assert src_audit["snipe_score"] == "ninety-two"
+    assert src_audit["eligible_for_snipe_review"] == "yes"
+    assert snapshot_of_source["blocked_gates_len"] == len(src_audit["blocked_gates"])
+
+
+# ---- targeted helper unit tests ------------------------------------------
+
+def test_json_safe_number():
+    assert ss._json_safe_number(92) == 92
+    assert ss._json_safe_number(92.5) == 92.5
+    assert ss._json_safe_number(True) is None
+    assert ss._json_safe_number(False) is None
+    assert ss._json_safe_number("92") is None
+    assert ss._json_safe_number(float("nan")) is None
+    assert ss._json_safe_number(float("inf")) is None
+    assert ss._json_safe_number(float("-inf")) is None
+    assert ss._json_safe_number({"x": 1}) is None
+    assert ss._json_safe_number(None) is None
+
+
+def test_json_safe_scalar():
+    assert ss._json_safe_scalar("A") == "A"
+    assert ss._json_safe_scalar(92) == "92"
+    assert ss._json_safe_scalar(92.5) == "92.5"
+    assert ss._json_safe_scalar(True) is None
+    assert ss._json_safe_scalar({"bad": "object"}) is None
+    assert ss._json_safe_scalar(["A"]) is None
+    assert ss._json_safe_scalar(set(["x"])) is None
+    assert ss._json_safe_scalar((1, 2)) is None
+    assert ss._json_safe_scalar(object()) is None
+    assert ss._json_safe_scalar(lambda: 1) is None
+    assert ss._json_safe_scalar(float("nan")) is None
+    assert ss._json_safe_scalar(float("inf")) is None
+    assert ss._json_safe_scalar(None) is None
+
+
+def test_json_safe_bool_or_none():
+    assert ss._json_safe_bool_or_none(True) is True
+    assert ss._json_safe_bool_or_none(False) is False
+    assert ss._json_safe_bool_or_none("yes") is None
+    assert ss._json_safe_bool_or_none(1) is None
+    assert ss._json_safe_bool_or_none(0) is None
+    assert ss._json_safe_bool_or_none({}) is None
+    assert ss._json_safe_bool_or_none(object()) is None
+
+
+def test_snipe_score_rejects_nan_inf_and_bool():
+    for bad in (float("nan"), float("inf"), float("-inf"), True, "92", {"x": 1}):
+        snap = _record(_tiering(audit=_audit(snipe_score=bad)))["snipe_gate_audit"]
+        assert snap["snipe_score"] is None
+    snap_ok = _record(_tiering(audit=_audit(snipe_score=92)))["snipe_gate_audit"]
+    assert snap_ok["snipe_score"] == 92
+
+
+def test_promotion_trigger_level_rejects_unsafe_keeps_numeric():
+    # finite numeric level preserved
+    snap = _record(_tiering(audit=_audit(promotion_triggers=[
+        {"gate": "OH", "level": 110.5}])))["snipe_gate_audit"]
+    assert snap["promotion_triggers"][0]["level"] == 110.5
+    # NaN / nested level rejected
+    snap2 = _record(_tiering(audit=_audit(promotion_triggers=[
+        {"gate": "OH", "level": float("nan")},
+        {"gate": "OH2", "level": {"bad": 1}}])))["snipe_gate_audit"]
+    assert snap2["promotion_triggers"][0]["level"] is None
+    assert snap2["promotion_triggers"][1]["level"] is None
