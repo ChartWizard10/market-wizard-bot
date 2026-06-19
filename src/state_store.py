@@ -246,6 +246,168 @@ def check_alert(
 # State update
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Phase 14H.1: compact SNIPE gate-audit snapshot for the alert_history ledger.
+#
+# Persists a small grading payload of tiering_result["snipe_gate_audit"] so the
+# scanner's own tier-boundary evidence can be graded after the fact. This is a
+# black-box recorder: it never raises, never mutates the source audit, persists
+# only the compact grading fields (never the full 14H object), and keeps output
+# JSON-safe. Alert persistence is more important than audit persistence — any
+# failure here degrades the snapshot, it never breaks record_alert.
+# ---------------------------------------------------------------------------
+
+_SNIPE_SNAPSHOT_KEYS = (
+    "audit_label", "promotion_state", "snipe_score", "snipe_grade",
+    "eligible_for_snipe_review", "blocked_gate_names", "blocked_gates",
+    "missing_proofs", "promotion_triggers", "blocking_reasons",
+    "diagnostic_sentence",
+)
+
+
+def _degraded_snipe_snapshot(note: str) -> dict:
+    return {
+        "audit_label": None,
+        "promotion_state": None,
+        "snipe_score": None,
+        "snipe_grade": None,
+        "eligible_for_snipe_review": None,
+        "blocked_gate_names": [],
+        "blocked_gates": [],
+        "missing_proofs": [],
+        "promotion_triggers": [],
+        "blocking_reasons": [f"snipe_gate_audit snapshot degraded: {note}"],
+        "diagnostic_sentence": None,
+    }
+
+
+def _snipe_gate_name(item):
+    """Extract a gate name from a dict in priority order, or a bare string."""
+    if isinstance(item, str):
+        return item or None
+    if isinstance(item, dict):
+        for key in ("gate", "name", "id", "key"):
+            v = item.get(key)
+            if isinstance(v, str) and v:
+                return v
+    return None
+
+
+def _snipe_blocked_gate_names(blocked) -> list:
+    out = []
+    if not isinstance(blocked, list):
+        return out
+    for item in blocked:
+        name = _snipe_gate_name(item)
+        if name:
+            out.append(name)
+    return out
+
+
+def _snipe_compact_blocked_gates(blocked) -> list:
+    out = []
+    if not isinstance(blocked, list):
+        return out
+    for item in blocked:
+        if isinstance(item, dict):
+            out.append({
+                "gate": (item.get("gate") or item.get("name")
+                         or item.get("id") or item.get("key")),
+                "status": item.get("status"),
+                "reason": item.get("reason"),
+                "source": item.get("source"),
+            })
+        elif isinstance(item, str):
+            out.append({"gate": item, "status": None, "reason": None, "source": None})
+        # skip malformed (non-dict, non-str) entries
+    return out
+
+
+def _snipe_compact_missing_proofs(src) -> list:
+    out = []
+    if not isinstance(src, list):
+        return out
+    for item in src:
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict):
+            out.append({
+                "gate": item.get("gate"),
+                "name": item.get("name"),
+                "reason": item.get("reason"),
+                "required_evidence": item.get("required_evidence"),
+                "source": item.get("source"),
+            })
+        # skip malformed entries
+    return out
+
+
+def _snipe_compact_promotion_triggers(src) -> list:
+    out = []
+    if not isinstance(src, list):
+        return out
+    for item in src:
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict):
+            out.append({
+                "gate": item.get("gate"),
+                "trigger": item.get("trigger"),
+                "level": item.get("level"),
+                "condition": item.get("condition"),
+                "reason": item.get("reason"),
+            })
+        # skip malformed entries
+    return out
+
+
+def _snipe_compact_blocking_reasons(src) -> list:
+    out = []
+    if not isinstance(src, list):
+        return out
+    for item in src:
+        if isinstance(item, str):
+            if item:
+                out.append(item)
+        elif isinstance(item, dict):
+            for key in ("reason", "message", "label", "name", "gate"):
+                v = item.get(key)
+                if isinstance(v, str) and v:
+                    out.append(v)
+                    break
+        # skip malformed entries
+    return out
+
+
+def _compact_snipe_gate_audit_snapshot(audit):
+    """Return a compact, JSON-safe grading snapshot of a 14H snipe_gate_audit.
+
+    None when the audit is missing; a degraded snapshot when it is malformed or
+    extraction fails. Never raises and never mutates the source object.
+    """
+    if audit is None:
+        return None
+    if not isinstance(audit, dict):
+        return _degraded_snipe_snapshot("malformed source")
+    try:
+        return {
+            "audit_label": audit.get("audit_label"),
+            "promotion_state": audit.get("promotion_state"),
+            "snipe_score": audit.get("snipe_score"),
+            "snipe_grade": audit.get("snipe_grade"),
+            "eligible_for_snipe_review": audit.get("eligible_for_snipe_review"),
+            "blocked_gate_names": _snipe_blocked_gate_names(audit.get("blocked_gates")),
+            "blocked_gates": _snipe_compact_blocked_gates(audit.get("blocked_gates")),
+            "missing_proofs": _snipe_compact_missing_proofs(audit.get("missing_proofs")),
+            "promotion_triggers": _snipe_compact_promotion_triggers(audit.get("promotion_triggers")),
+            "blocking_reasons": _snipe_compact_blocking_reasons(audit.get("blocking_reasons")),
+            "diagnostic_sentence": audit.get("diagnostic_sentence"),
+        }
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        log.warning("SNIPE_AUDIT_SNAPSHOT_ERROR: %s", exc)
+        return _degraded_snipe_snapshot("extraction error")
+
+
 def record_alert(
     ticker: str,
     tiering_result: dict,
@@ -324,6 +486,14 @@ def record_alert(
         "original_claude_tier":              tiering_result.get("original_claude_tier"),
         "applied_vetoes":                    tiering_result.get("applied_vetoes") or [],
         "final_discord_channel":             tiering_result.get("final_discord_channel"),
+
+        # ---- Phase 14H.1: compact SNIPE gate-audit grading snapshot ----
+        # None when no audit exists; degraded snapshot when malformed. Never the
+        # full 14H object (no passed_gates / evidence_sources / invalidation /
+        # risk / nested raw matrices).
+        "snipe_gate_audit":                  _compact_snipe_gate_audit_snapshot(
+            tiering_result.get("snipe_gate_audit")
+        ),
     })
     if len(history) > max_entries:
         ticker_state["alert_history"] = history[-max_entries:]
