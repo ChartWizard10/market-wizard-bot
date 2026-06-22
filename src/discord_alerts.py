@@ -11,6 +11,7 @@ import math
 import os
 import re
 
+from src import higher_timeframe_context as _htf_context
 from src import snipe_gate_audit as _snipe_audit
 from src import timeframe_alignment as _tf_alignment
 
@@ -29,6 +30,10 @@ _TF_ALIGNMENT_SENTINEL = "⁣TIMEFRAME_ALIGNMENT_BLOCK⁣"
 # Sentinel for the optional Phase 14H SNIPE-audit compact line (config-gated,
 # default off). Same splice-after-guards protection for its label enum.
 _SNIPE_AUDIT_SENTINEL = "⁣SNIPE_GATE_AUDIT_LINE⁣"
+
+# Sentinel for the optional Phase 14I HTF-context compact line (config-gated,
+# default off).
+_HTF_CONTEXT_SENTINEL = "⁣HIGHER_TIMEFRAME_CONTEXT_LINE⁣"
 
 _TIER_ENV_VAR = {
     "SNIPE_IT":   "DISCORD_SNIPE_CHANNEL_ID",
@@ -2720,6 +2725,13 @@ def format_alert(
     if _snipe_audit_line:
         lines.append(_SNIPE_AUDIT_SENTINEL)
 
+    # Phase 14I: optional compact HTF-context line (config-gated, default off).
+    _htf_context_line = _htf_context.render_htf_line(
+        tiering_result.get("higher_timeframe_context"), config
+    )
+    if _htf_context_line:
+        lines.append(_HTF_CONTEXT_SENTINEL)
+
     # FRESHNESS block — always present; snapshot_only when no live recheck price
     lines += [
         "──────────────────────────────",
@@ -2800,6 +2812,8 @@ def format_alert(
         )
     if _snipe_audit_line:
         rendered = rendered.replace(_SNIPE_AUDIT_SENTINEL, _snipe_audit_line)
+    if _htf_context_line:
+        rendered = rendered.replace(_HTF_CONTEXT_SENTINEL, _htf_context_line)
     return rendered
 
 

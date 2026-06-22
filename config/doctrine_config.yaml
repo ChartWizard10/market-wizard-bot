@@ -44,6 +44,20 @@ snipe_gate_audit:
   enabled: true
   render_compact_line: false
 
+# Phase 14I — monthly/weekly structural memory engine. Resamples existing daily
+# bars into completed weekly/monthly context (campaign bias, dynamic SMA
+# support, HTF zones, bounce vs mid-range vs supply). Evidence-first: never
+# promotes SNIPE_IT, never mutates tier/capital. influence_tiering stays false in
+# this phase; compact alert line off by default; compact history snapshot on.
+higher_timeframe_context:
+  enabled: true
+  lookback_months: 60
+  min_weekly_bars: 52
+  min_monthly_bars: 12
+  render_compact_line: false
+  influence_tiering: false
+  persist_history_snapshot: true
+
 prefilter:
   max_claude_candidates_per_scan: 20
   prefilter_min_score: 55

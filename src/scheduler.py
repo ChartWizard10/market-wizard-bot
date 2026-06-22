@@ -24,6 +24,7 @@ from src import discord_alerts
 from src import indicators
 from src import market_data as market_data_mod
 from src import candle_evidence
+from src import higher_timeframe_context
 from src import one_hour_entry
 from src import prefilter as prefilter_mod
 from src import score_calibration
@@ -395,6 +396,25 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("TIMEFRAME_ALIGNMENT_ERROR: %s: %s", ticker, exc)
             tiering_result["timeframe_alignment"] = timeframe_alignment.error_timeframe_alignment_object(str(exc))
+
+        # Step 6.585: Higher-timeframe structural context (Phase 14I — evidence/
+        # display/audit only; never affects tier, capital, routing, suppression,
+        # dedup, or raw score). Resamples the candidate's existing daily bars into
+        # weekly/monthly context (candidate-only — no extra fetch, no full-universe
+        # bloat). Attached before snipe_gate_audit so the audit can read it later.
+        try:
+            _mres = market_results.get(ticker) or {}
+            _daily_bars = higher_timeframe_context.daily_bars_from_df(_mres.get("df"))
+            tiering_result["higher_timeframe_context"] = higher_timeframe_context.build_higher_timeframe_context(
+                ticker,
+                tiering_result,
+                enriched_data=enriched_map.get(ticker, {}),
+                daily_bars=_daily_bars,
+                config=config,
+            )
+        except Exception as exc:
+            log.warning("HIGHER_TIMEFRAME_CONTEXT_ERROR: %s: %s", ticker, exc)
+            tiering_result["higher_timeframe_context"] = higher_timeframe_context.error_htf_object(str(exc))
 
         # Step 6.59: SNIPE_IT gate audit (Phase 14H — diagnostic/audit only; never
         # affects tier, capital, routing, suppression, dedup, or raw score).

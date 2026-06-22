@@ -467,6 +467,21 @@ def _compact_snipe_gate_audit_snapshot(audit):
         return _degraded_snipe_snapshot("extraction error")
 
 
+def _higher_timeframe_history_snapshot(tiering_result, config):
+    """Compact, JSON-safe Phase 14I snapshot for alert_history. Gated on config
+    higher_timeframe_context.persist_history_snapshot (default True). Never raises
+    and never breaks record_alert."""
+    try:
+        cfg = (config or {}).get("higher_timeframe_context", {})
+        if isinstance(cfg, dict) and cfg.get("persist_history_snapshot", True) is False:
+            return None
+        from src import higher_timeframe_context as _htf
+        return _htf.compact_history_snapshot(tiering_result.get("higher_timeframe_context"))
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        log.warning("HTF_HISTORY_SNAPSHOT_ERROR: %s", exc)
+        return None
+
+
 def record_alert(
     ticker: str,
     tiering_result: dict,
@@ -552,6 +567,13 @@ def record_alert(
         # risk / nested raw matrices).
         "snipe_gate_audit":                  _compact_snipe_gate_audit_snapshot(
             tiering_result.get("snipe_gate_audit")
+        ),
+
+        # ---- Phase 14I: compact higher-timeframe structural context snapshot ----
+        # None when missing/disabled; degraded snapshot when malformed. Compact
+        # grading fields only (never the full 14I object). JSON-safe (allow_nan=False).
+        "higher_timeframe_context":          _higher_timeframe_history_snapshot(
+            tiering_result, config
         ),
     })
     if len(history) > max_entries:
