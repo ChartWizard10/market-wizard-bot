@@ -92,6 +92,10 @@ def default_snipe_gate_audit_object() -> dict:
         "audit_label": "INSUFFICIENT_CONTEXT",
         "promotion_state": "UNKNOWN",
         "snipe_score": 0,
+        "raw_snipe_score": 0,
+        "effective_snipe_score": 0,
+        "score_blocked_by": [],
+        "display_score_label": None,
         "snipe_grade": "UNKNOWN",
         "current_final_tier": None,
         "current_capital_action": None,
@@ -252,8 +256,20 @@ def _build(ticker, tiering_result, enriched, config) -> dict:
         obj["promotion_triggers"], some_critical_pass,
     )
 
+    # ---- Consistency seal (Phase 14K) --------------------------------------
+    # PROMOTION_READY is a claim that the audit sees no remaining reason a
+    # setup could not be reviewed/promoted. _promotion_state above only
+    # checks the _SNIPE_CRITICAL subset, so a gate outside that subset (e.g.
+    # LIVE_EDGE_SAFE blocked by a candle veto) could be BLOCKed while the
+    # claim still stood. Gate evaluation already records every gate's true
+    # status in blocked_gates/missing_proofs — seal against that full truth
+    # before the claim is allowed to stand. Never invents a new enum value;
+    # never auto-promotes; never loosens SNIPE_IT.
+    obj["promotion_state"] = _seal_promotion_state(obj)
+
     # Anti-paralysis integrity concern: every SNIPE gate is complete but the
-    # scanner did not promote. Surface it loudly (never auto-promote).
+    # scanner did not promote. Surface it loudly (never auto-promote). Only
+    # fires once promotion_state has survived the consistency seal above.
     if obj["promotion_state"] == "PROMOTION_READY":
         obj["blocking_reasons"].append(
             "SNIPE gates appear complete but final_tier is not SNIPE_IT."
@@ -262,8 +278,13 @@ def _build(ticker, tiering_result, enriched, config) -> dict:
     # ---- Score → caps → grade --------------------------------------------
     raw = _score_gates(status_by_gate)
     capped = _apply_caps(raw, status_by_gate, critical_blocks, insufficient)
-    obj["snipe_score"] = capped
-    obj["snipe_grade"] = _grade(capped)
+    effective, score_blocked_by, display_label = _seal_score(capped, status_by_gate)
+    obj["raw_snipe_score"] = capped
+    obj["effective_snipe_score"] = effective
+    obj["score_blocked_by"] = score_blocked_by
+    obj["display_score_label"] = display_label
+    obj["snipe_score"] = effective
+    obj["snipe_grade"] = _grade(effective)
 
     obj["diagnostic_sentence"] = _sentence(obj["audit_label"])
     return obj
@@ -531,6 +552,28 @@ def _promotion_state(
     return "UNKNOWN"
 
 
+def _seal_promotion_state(obj: dict) -> str:
+    """Phase 14K consistency seal: PROMOTION_READY may never coexist with an
+    active blocker. blocked_gates/missing_proofs already reflect the FULL
+    15-gate matrix (not just the _SNIPE_CRITICAL subset), so this check is
+    strictly more complete than the all_critical_pass computation above.
+
+    Downgrades to PROMOTION_PENDING (an existing enum value — never invents a
+    new one here) rather than erasing the READY signal entirely, since the
+    setup may still be on a legitimate promotion path.
+    """
+    state = obj.get("promotion_state")
+    if state != "PROMOTION_READY":
+        return state
+    if obj.get("blocked_gates") or obj.get("missing_proofs"):
+        obj["blocking_reasons"].append(
+            "Promotion state normalized: active blocker/missing proof present; "
+            "downgraded from PROMOTION_READY to PROMOTION_PENDING."
+        )
+        return "PROMOTION_PENDING"
+    return state
+
+
 # ---------------------------------------------------------------------------
 # Score → caps → grade
 # ---------------------------------------------------------------------------
@@ -569,6 +612,31 @@ def _apply_caps(raw, status_by_gate, critical_blocks, insufficient) -> int:
     for c in caps:
         score = min(score, c)
     return max(0, min(100, score))
+
+
+_SOFT_PROOF_BLOCK_CAP = 79   # mirrors the severity of the existing overhead/candle caps
+
+# Gates that contribute to _CRITICAL_POINTS/_apply_caps already suppress the
+# score on BLOCK. LIVE_EDGE_SAFE does not (by design — it is a live-edge/
+# candle-truth proof, not a structural critical gate), so a HOSTILE_WICK veto
+# could leave the score reading a clean, unblocked 100. Seal that gap here
+# without touching the existing critical-gate scoring above.
+_UNCAPPED_BLOCK_GATES = ("LIVE_EDGE_SAFE",)
+
+
+def _seal_score(score, status_by_gate) -> tuple:
+    """Phase 14K score-consistency seal.
+
+    Returns (effective_score, score_blocked_by, display_score_label). Never
+    raises the score — only ever caps it further, and only labels it when it
+    actually changed something, so a genuinely clean 100 still reads as 100.
+    """
+    blocked_by = [g for g in _UNCAPPED_BLOCK_GATES if status_by_gate.get(g) == "BLOCK"]
+    effective = score
+    if blocked_by:
+        effective = min(effective, _SOFT_PROOF_BLOCK_CAP)
+    label = "raw/pre-block" if effective < score else None
+    return effective, blocked_by, label
 
 
 def _grade(score) -> str:

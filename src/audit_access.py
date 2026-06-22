@@ -48,6 +48,8 @@ _SCAN_ID_RE = re.compile(r"^scan_[0-9]{8}_[0-9]{6}_[0-9a-zA-Z]+$")
 CONCLUSIONS = {
     "CORRECTLY_BLOCKED", "POSSIBLE_UNDER_PROMOTION", "CORRECT_STARTER",
     "CORRECT_NEAR_ENTRY", "NEEDS_MANUAL_REVIEW",
+    # Phase 14K additions:
+    "SNIPE_CONFIRMED", "INCONSISTENT_AUDIT_STATE",
 }
 
 _CONFIRMED_TOKENS = {"confirmed", "hold_confirmed", "retest_confirmed", "true", "yes", "pass"}
@@ -203,6 +205,15 @@ def interpret(row: dict) -> dict:
     """Promotion-path interpretation of a persisted row.
 
     Returns {"label": <CONCLUSIONS>, "notes": [str, ...]}.
+
+    Phase 14K: this is the defense-in-depth consistency seal for HISTORICAL
+    rows. A row persisted by an older (pre-14K) snipe_gate_audit build could
+    claim promotion_state == PROMOTION_READY while blocked_gate_names /
+    missing_proofs / an HTF contextual block are simultaneously non-empty
+    (the live HAE scan_20260622_164918_4fc48e contradiction). Such a row is
+    never rewritten — it is labeled INCONSISTENT_AUDIT_STATE rather than
+    POSSIBLE_UNDER_PROMOTION, so the contradiction is surfaced, not hidden,
+    and is never mistaken for a genuine under-promotion case.
     """
     tier = row.get("tier")
     sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
@@ -211,7 +222,8 @@ def interpret(row: dict) -> dict:
     promotion_state = sga.get("promotion_state")
     blocked = _nonempty_list(sga.get("blocked_gate_names")) or _nonempty_list(sga.get("blocked_gates"))
     missing = _nonempty_list(sga.get("missing_proofs"))
-    has_real_blockers = bool(blocked or missing)
+    htf_blocks = htf.get("blocks_snipe_contextually") is True
+    has_real_blockers = bool(blocked or missing) or htf_blocks
 
     retest_ok = _is_confirmed(row.get("retest_status"))
     hold_ok = _is_confirmed(row.get("hold_status"))
@@ -220,7 +232,7 @@ def interpret(row: dict) -> dict:
     notes: list = []
 
     # Contextual mentions (do not change the label, but surface the evidence).
-    if htf.get("blocks_snipe_contextually") is True:
+    if htf_blocks:
         notes.append("HTF contextual block: weekly/monthly supply/structure blocks SNIPE.")
     if _mentions_candle(blocked) or _mentions_candle(missing):
         notes.append("candle proof blocker: 1H closed-hold / candle truth unresolved.")
@@ -231,16 +243,20 @@ def interpret(row: dict) -> dict:
 
     # Primary label.
     if tier == "SNIPE_IT":
-        notes.insert(0, "Row is already SNIPE_IT — not an under-promotion candidate.")
-        label = "NEEDS_MANUAL_REVIEW"
-    elif promotion_state == "PROMOTION_READY":
+        label = "SNIPE_CONFIRMED"
+    elif promotion_state == "PROMOTION_READY" and not has_real_blockers:
         label = "POSSIBLE_UNDER_PROMOTION"
         notes.insert(0, "snipe_gate_audit.promotion_state == PROMOTION_READY but tier is not SNIPE_IT.")
-    elif tier == "STARTER" and has_real_blockers:
+    elif promotion_state == "PROMOTION_READY":
+        # Contradiction: "ready" claimed while an active blocker remains.
+        # Treat as blocked, not as under-promotion evidence.
+        label = "INCONSISTENT_AUDIT_STATE"
+        notes.insert(0, "Promotion state says ready, but active blockers remain; treating as blocked, not under-promotion.")
+    elif tier == "STARTER":
         label = "CORRECT_STARTER"
-    elif tier == "NEAR_ENTRY" and one_h_incomplete:
+    elif tier == "NEAR_ENTRY":
         label = "CORRECT_NEAR_ENTRY"
-    elif tier in ("STARTER", "NEAR_ENTRY", "WAIT") and has_real_blockers:
+    elif tier == "WAIT" and has_real_blockers:
         label = "CORRECTLY_BLOCKED"
     else:
         label = "NEEDS_MANUAL_REVIEW"
@@ -286,6 +302,21 @@ def _fmt_item(x) -> str:
     return str(x)
 
 
+def _score_label_suffix(sga: dict) -> str:
+    """Phase 14K score-consistency suffix.
+
+    Older (pre-14K) persisted rows lack raw_snipe_score/score_blocked_by —
+    in that case this is silent (no claim is made either way). When present,
+    a blocked-by gate must never let the score read as a clean, unexplained
+    perfect number.
+    """
+    raw = sga.get("raw_snipe_score")
+    blocked_by = _nonempty_list(sga.get("score_blocked_by"))
+    if raw is None or not blocked_by:
+        return ""
+    return f" (raw {raw} pre-block — score blocked by {', '.join(blocked_by)})"
+
+
 def format_row(row: dict) -> str:
     """Render one alert_history row as compact, sectioned audit text."""
     sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
@@ -318,7 +349,7 @@ def format_row(row: dict) -> str:
         "__SNIPE GATE AUDIT__",
         f"Audit label: {_fmt(sga.get('audit_label'))}",
         f"Promotion state: {_fmt(sga.get('promotion_state'))}",
-        f"SNIPE score: {_fmt(sga.get('snipe_score'))}",
+        f"SNIPE score: {_fmt(sga.get('snipe_score'))}{_score_label_suffix(sga)}",
         f"SNIPE grade: {_fmt(sga.get('snipe_grade'))}",
         f"Eligible for SNIPE review: {_fmt(sga.get('eligible_for_snipe_review'))}",
         f"Blocked gates: {_fmt(sga.get('blocked_gate_names'))}",

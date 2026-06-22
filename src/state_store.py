@@ -263,6 +263,10 @@ _SNIPE_SNAPSHOT_KEYS = (
     "eligible_for_snipe_review", "blocked_gate_names", "blocked_gates",
     "missing_proofs", "promotion_triggers", "blocking_reasons",
     "diagnostic_sentence",
+    # Phase 14K — raw-vs-effective score consistency (never trading-relevant;
+    # display/audit only).
+    "raw_snipe_score", "effective_snipe_score", "score_blocked_by",
+    "display_score_label",
 )
 
 
@@ -279,6 +283,10 @@ def _degraded_snipe_snapshot(note: str) -> dict:
         "promotion_triggers": [],
         "blocking_reasons": [f"snipe_gate_audit snapshot degraded: {note}"],
         "diagnostic_sentence": None,
+        "raw_snipe_score": None,
+        "effective_snipe_score": None,
+        "score_blocked_by": [],
+        "display_score_label": None,
     }
 
 
@@ -435,6 +443,13 @@ def _snipe_compact_blocking_reasons(src) -> list:
     return out
 
 
+def _json_safe_string_list(value) -> list:
+    """A list of plain JSON-safe strings only; anything else dropped."""
+    if not isinstance(value, list):
+        return []
+    return [v for v in value if isinstance(v, str) and v]
+
+
 def _compact_snipe_gate_audit_snapshot(audit):
     """Return a compact, strictly JSON-safe grading snapshot of a 14H
     snipe_gate_audit (safe under json.dumps(..., allow_nan=False)).
@@ -461,6 +476,10 @@ def _compact_snipe_gate_audit_snapshot(audit):
             "promotion_triggers": _snipe_compact_promotion_triggers(audit.get("promotion_triggers")),
             "blocking_reasons": _snipe_compact_blocking_reasons(audit.get("blocking_reasons")),
             "diagnostic_sentence": _json_safe_scalar(audit.get("diagnostic_sentence")),
+            "raw_snipe_score": _json_safe_number(audit.get("raw_snipe_score")),
+            "effective_snipe_score": _json_safe_number(audit.get("effective_snipe_score")),
+            "score_blocked_by": _json_safe_string_list(audit.get("score_blocked_by")),
+            "display_score_label": _json_safe_scalar(audit.get("display_score_label")),
         }
     except Exception as exc:  # pragma: no cover - defensive catch-all
         log.warning("SNIPE_AUDIT_SNAPSHOT_ERROR: %s", exc)
