@@ -194,7 +194,28 @@ def register_commands(
             "`!status` — Bot status and last scan summary\n"
             "`!autoscan start` — Enable scheduled auto-scan\n"
             "`!autoscan stop` — Disable scheduled auto-scan\n"
+            "`!audit <scan_id|TICKER> [json]` — Read-only alert_history evidence (operator-gated)\n"
         )
+
+    # ------------------------------------------------------------------
+    # !audit  (Phase 14J — read-only operator audit-access bridge)
+    # ------------------------------------------------------------------
+
+    @bot.command(name="audit")
+    async def audit_cmd(ctx, *, args: str = "") -> None:
+        from src import audit_access
+
+        user_id = getattr(getattr(ctx, "author", None), "id", None)
+        channel_id = getattr(getattr(ctx, "channel", None), "id", None)
+        try:
+            result = audit_access.run_audit(
+                config, args, user_id=user_id, channel_id=channel_id
+            )
+            for chunk in result.get("messages", []):
+                await ctx.send(chunk)
+        except Exception as exc:
+            log.error("!audit error: %s", exc)
+            await ctx.send(f"Audit error: {type(exc).__name__}")
 
     # ------------------------------------------------------------------
     # !scan
