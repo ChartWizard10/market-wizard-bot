@@ -490,3 +490,472 @@ def run_audit(config: dict, args, user_id=None, channel_id=None) -> dict:
 
 def _err(code: str, message: str) -> dict:
     return {"ok": False, "error": code, "match_count": 0, "json": None, "messages": [message]}
+
+
+# ===========================================================================
+# Phase 14L — AuditReady under-promotion radar
+# ===========================================================================
+#
+# !auditready scans recent alert_history rows for TRUE possible under-promotion:
+# a setup the SNIPE gate audit calls PROMOTION_READY (eligible, no blockers, no
+# missing proofs, no HTF contextual block) that the scanner nonetheless did not
+# promote to SNIPE_IT. It is a radar over the existing Phase 14J/14K evidence —
+# it reuses the same read-only state loader, the same permission gate, and the
+# same interpret() conclusion. It changes no tiering/scoring/routing/capital
+# logic and never mutates state. If it is noisy, it failed: a row is only a
+# candidate when interpret() == POSSIBLE_UNDER_PROMOTION AND no active blocker
+# is found by any structured or hard-text signal.
+
+_AUDITREADY_DEFAULT_SCAN_ROWS = 100
+_AUDITREADY_MIN_SCAN_ROWS = 10
+_AUDITREADY_MAX_SCAN_ROWS = 300
+_AUDITREADY_MAX_CANDIDATES = 10
+
+# capital_action values that mean full SNIPE-size capital was already granted —
+# such a row is not "under-promoted" by definition.
+_FULL_SNIPE_CAPITAL = {"full_snipe", "full_quality_allowed", "full", "snipe"}
+
+# Non-tradeable / non-candidate tiers.
+_NON_CANDIDATE_TIERS = {"SNIPE_IT", "PASS", "WAIT", "WATCHLIST", ""}
+
+# Benign, explicitly-non-blocking diagnostic text the 14K seal appends to a
+# genuinely clean PROMOTION_READY row. These must NOT count as active blockers.
+_BENIGN_REASON_MARKERS = (
+    "appear complete but final_tier is not snipe_it",
+    "downgraded from promotion_ready to promotion_pending",
+)
+
+# Full blocker vocabulary — applied ONLY to blocking_reasons AFTER benign
+# markers are filtered out (so the clean integrity note never trips it).
+_TEXT_BLOCKER_TERMS = (
+    "blocked", "blocker", "missing", "waits for", "pending", "not confirmed",
+    "not clean", "unresolved", "hostile wick", "candle veto", "failed retest",
+    "no fresh aggression", "hold weak", "hold partial", "trigger forming",
+    "no valid 1h", "proof incomplete", "full-size confirmation not granted",
+)
+
+# Hard blocker vocabulary — safe to scan the generic diagnostic_sentence with,
+# because (unlike "waits for"/"missing"/"pending") none of these terms appear in
+# the benign STARTER/NEAR_ENTRY boilerplate that a clean candidate still carries
+# (e.g. "starter valid, but SNIPE promotion waits for 1H closed-hold proof").
+_HARD_BLOCKER_TERMS = (
+    "hostile wick", "candle veto", "failed retest", "no fresh aggression",
+    "hold weak", "hold partial", "trigger forming", "no valid 1h",
+    "proof incomplete", "not confirmed", "not clean", "unresolved",
+    "blocked by", "full-size confirmation not granted",
+)
+
+_GRADE_RANK = {
+    "A+": 0, "A": 1, "A-": 2, "B+": 3, "B": 4, "B-": 5,
+    "C+": 6, "C": 7, "C-": 8, "D": 9, "F": 10, "UNKNOWN": 11,
+}
+
+
+def _row_ts(row: dict) -> str:
+    """Sortable timestamp string (ISO timestamps sort lexicographically)."""
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("timestamp") or row.get("alerted_at") or row.get("scan_time") or "")
+
+
+def _row_ticker(row: dict, parent: str = None) -> str:
+    if isinstance(row, dict) and row.get("ticker"):
+        return str(row.get("ticker"))
+    return str(parent or "?")
+
+
+def _row_final_tier(row: dict) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("final_tier") or row.get("tier") or "").upper().strip()
+
+
+def _num(value) -> float:
+    if isinstance(value, bool) or value is None:
+        return 0.0
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return f if f == f else 0.0     # NaN -> 0
+
+
+def _has_term(text, terms) -> bool:
+    if not isinstance(text, str):
+        return False
+    low = text.lower()
+    return any(t in low for t in terms)
+
+
+def _nonbenign_reasons(value) -> list:
+    """blocking_reasons strings with the 14K benign seal/integrity notes removed."""
+    out = []
+    if not isinstance(value, list):
+        return out
+    for item in value:
+        s = item if isinstance(item, str) else (
+            _fmt_item(item) if isinstance(item, dict) else None
+        )
+        if not isinstance(s, str) or not s:
+            continue
+        low = s.lower()
+        if any(marker in low for marker in _BENIGN_REASON_MARKERS):
+            continue
+        out.append(s)
+    return out
+
+
+def collect_recent_rows(state: dict, limit: int = _AUDITREADY_DEFAULT_SCAN_ROWS) -> list:
+    """Flatten alert_history rows across all tickers, newest first, capped at
+    `limit`. Read-only: a row missing its own `ticker` key is shallow-copied with
+    the parent ticker filled in (the source state dict is never mutated)."""
+    rows = []
+    tickers = (state or {}).get("tickers") or {}
+    if not isinstance(tickers, dict):
+        return []
+    for tkey, tstate in tickers.items():
+        if not isinstance(tstate, dict):
+            continue
+        history = tstate.get("alert_history")
+        if not isinstance(history, list):
+            continue
+        for row in history:
+            if not isinstance(row, dict):
+                continue
+            if not row.get("ticker"):
+                row = {**row, "ticker": tkey}     # shallow copy; no source mutation
+            rows.append(row)
+    rows.sort(key=_row_ts, reverse=True)
+    n = max(1, int(limit or _AUDITREADY_DEFAULT_SCAN_ROWS))
+    return rows[:n]
+
+
+def active_blockers(row: dict) -> list:
+    """Return human-readable active-blocker reasons for a row; empty == clean.
+
+    Reads BOTH structured fields (authoritative) and hard text signals. Treats
+    the 14K benign integrity/seal notes as non-blocking, and never scans
+    promotion_triggers (a trigger like "avoid body close below invalidation" is
+    guidance, not a blocker). Errs strict: any signal of an unresolved blocker
+    disqualifies the row.
+    """
+    reasons = []
+    sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
+    htf = row.get("higher_timeframe_context") if isinstance(row.get("higher_timeframe_context"), dict) else {}
+
+    if _nonempty_list(sga.get("blocked_gate_names")):
+        reasons.append(f"blocked gates: {', '.join(_fmt_item(x) for x in sga['blocked_gate_names'])}")
+    if _nonempty_list(sga.get("blocked_gates")):
+        reasons.append("blocked_gates present")
+    if _nonempty_list(sga.get("missing_proofs")):
+        reasons.append(f"missing proofs: {', '.join(_fmt_item(x) for x in sga['missing_proofs'])}")
+    if _nonempty_list(sga.get("score_blocked_by")):
+        reasons.append(f"score blocked by: {', '.join(_fmt_item(x) for x in sga['score_blocked_by'])}")
+    if htf.get("blocks_snipe_contextually") is True:
+        reasons.append("HTF contextual block (weekly/monthly supply/structure)")
+
+    for r in _nonbenign_reasons(sga.get("blocking_reasons")):
+        if _has_term(r, _TEXT_BLOCKER_TERMS):
+            reasons.append(f"blocking reason: {r}")
+
+    diag = sga.get("diagnostic_sentence")
+    if _has_term(diag, _HARD_BLOCKER_TERMS):
+        reasons.append(f"diagnostic blocker: {diag}")
+
+    return reasons
+
+
+def is_auditready_candidate(row: dict):
+    """Return (is_candidate: bool, reasons: list[str]).
+
+    For a non-candidate, reasons explains WHY it failed (diagnostic). For a
+    candidate, reasons holds the explicit "why flagged" justification.
+    """
+    sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else None
+    final_tier = _row_final_tier(row)
+    capital = str(row.get("capital_action") or "").lower().strip()
+
+    fails = []
+    if final_tier in _NON_CANDIDATE_TIERS:
+        fails.append(f"tier {final_tier or 'unknown'} is not an under-promotion candidate")
+    if capital in _FULL_SNIPE_CAPITAL:
+        fails.append(f"capital_action {capital} is already full size")
+    if not sga:
+        fails.append("no snipe_gate_audit snapshot")
+    else:
+        if sga.get("eligible_for_snipe_review") is not True:
+            fails.append("not eligible_for_snipe_review")
+        if sga.get("promotion_state") != "PROMOTION_READY":
+            fails.append(f"promotion_state {sga.get('promotion_state')} != PROMOTION_READY")
+
+    fails.extend(active_blockers(row))
+
+    if interpret(row)["label"] != "POSSIBLE_UNDER_PROMOTION":
+        fails.append("audit interpretation is not POSSIBLE_UNDER_PROMOTION")
+
+    if fails:
+        return False, fails
+
+    why = [
+        "promotion_state is PROMOTION_READY, no blocked gates, no missing "
+        f"proofs, no active blockers, but final_tier is {final_tier}.",
+    ]
+    return True, why
+
+
+def _candidate_priority(row: dict) -> str:
+    """NEAR_ENTRY with no blockers is more severe than STARTER."""
+    return "HIGH PRIORITY" if _row_final_tier(row) == "NEAR_ENTRY" else "PRIORITY"
+
+
+def _candidate_eff_score(row: dict) -> float:
+    sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
+    eff = sga.get("effective_snipe_score")
+    if eff is None:
+        eff = sga.get("snipe_score")
+    return _num(eff)
+
+
+def _candidate_grade_rank(row: dict) -> int:
+    sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
+    return _GRADE_RANK.get(str(sga.get("snipe_grade") or "UNKNOWN").upper(), _GRADE_RANK["UNKNOWN"])
+
+
+def _rank_candidates(candidates: list) -> list:
+    """candidates: list[(row, why)]. Rank: higher effective score, then better
+    grade, then newer timestamp. Python's stable sort lets us layer these."""
+    ranked = sorted(candidates, key=lambda rw: _row_ts(rw[0]), reverse=True)        # newest first
+    ranked.sort(key=lambda rw: (-_candidate_eff_score(rw[0]), _candidate_grade_rank(rw[0])))
+    return ranked
+
+
+def _empty_counts() -> dict:
+    return {
+        "SNIPE_CONFIRMED": 0, "CORRECT_STARTER": 0, "CORRECT_NEAR_ENTRY": 0,
+        "INCONSISTENT_AUDIT_STATE": 0, "POSSIBLE_UNDER_PROMOTION": 0,
+        "CORRECTLY_BLOCKED": 0, "NEEDS_MANUAL_REVIEW": 0,
+    }
+
+
+def _empty_promo_counts() -> dict:
+    return {
+        "PROMOTION_READY": 0, "PROMOTION_PENDING": 0, "PROMOTION_BLOCKED": 0,
+        "ALREADY_SNIPE": 0, "NOT_ELIGIBLE": 0, "UNKNOWN": 0,
+    }
+
+
+def _auditready_candidate_json(row: dict, why: list) -> dict:
+    sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
+    htf = row.get("higher_timeframe_context") if isinstance(row.get("higher_timeframe_context"), dict) else {}
+    return {
+        "ticker": _row_ticker(row),
+        "scan_id": row.get("scan_id"),
+        "timestamp": _row_ts(row) or None,
+        "final_tier": _row_final_tier(row),
+        "capital_action": row.get("capital_action"),
+        "score": row.get("score"),
+        "snipe_score": sga.get("snipe_score"),
+        "raw_snipe_score": sga.get("raw_snipe_score"),
+        "effective_snipe_score": sga.get("effective_snipe_score"),
+        "score_blocked_by": sga.get("score_blocked_by"),
+        "display_score_label": sga.get("display_score_label"),
+        "snipe_grade": sga.get("snipe_grade"),
+        "promotion_state": sga.get("promotion_state"),
+        "audit_label": sga.get("audit_label"),
+        "blocks_snipe_contextually": htf.get("blocks_snipe_contextually"),
+        "conclusion": "POSSIBLE_UNDER_PROMOTION",
+        "priority": _candidate_priority(row),
+        "why_flagged": why,
+    }
+
+
+def _fmt_score_line(row: dict) -> str:
+    sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
+    raw = sga.get("raw_snipe_score")
+    eff = sga.get("effective_snipe_score")
+    if eff is not None and raw is not None and eff != raw:
+        return f"{_fmt(eff)} (raw {_fmt(raw)})"
+    if eff is not None:
+        return _fmt(eff)
+    return _fmt(sga.get("snipe_score"))
+
+
+def _render_candidate(idx: int, row: dict, why: list) -> str:
+    sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
+    htf = row.get("higher_timeframe_context") if isinstance(row.get("higher_timeframe_context"), dict) else {}
+    tier = _row_final_tier(row)
+    priority = _candidate_priority(row)
+    htf_ctx = (
+        f"{_fmt(htf.get('weekly_campaign_state'))} / {_fmt(htf.get('campaign_location_label'))} "
+        f"({_fmt(htf.get('campaign_location_quality'))})" if htf else "—"
+    )
+    review = (
+        "NEAR_ENTRY with a fully ready SNIPE audit and zero blockers — review for "
+        "promotion urgently." if tier == "NEAR_ENTRY"
+        else "STARTER with a fully ready SNIPE audit and zero blockers — review for promotion."
+    )
+    return "\n".join([
+        f"**Candidate #{idx} — {_row_ticker(row)}**  [{priority}]",
+        f"Scan ID: {_fmt(row.get('scan_id'))}",
+        f"Timestamp: {_fmt(_row_ts(row) or None)}",
+        f"Final tier: {_fmt(tier)}",
+        f"Capital action: {_fmt(row.get('capital_action'))}",
+        f"Score: {_fmt(row.get('score'))}",
+        f"SNIPE score: {_fmt_score_line(row)}",
+        f"SNIPE grade: {_fmt(sga.get('snipe_grade'))}",
+        f"Promotion state: {_fmt(sga.get('promotion_state'))}",
+        f"Audit label: {_fmt(sga.get('audit_label'))}",
+        f"HTF context: {htf_ctx}",
+        "Conclusion: POSSIBLE_UNDER_PROMOTION",
+        f"Why flagged: {' '.join(why)}",
+        f"Upgrade / review note: {review}",
+        f"Command: !audit {_fmt(row.get('scan_id'))}",
+    ])
+
+
+def _render_auditready_candidates(meta: dict, counts: dict, candidates: list) -> str:
+    head = [
+        "**AUDITREADY — POSSIBLE UNDER-PROMOTION CANDIDATES**",
+        f"Rows scanned: {meta['rows_scanned']}",
+        f"Candidates found: {meta['candidates_found']}",
+        f"Newest timestamp inspected: {_fmt(meta['newest'])}",
+        f"Oldest timestamp inspected: {_fmt(meta['oldest'])}",
+        "",
+    ]
+    blocks = [_render_candidate(i + 1, row, why) for i, (row, why) in enumerate(candidates)]
+    return "\n".join(head) + "\n\n".join(blocks)
+
+
+def _render_auditready_clear(meta: dict, counts: dict, promo_counts: dict) -> str:
+    return "\n".join([
+        "**AUDITREADY — CLEAR**",
+        f"Rows scanned: {meta['rows_scanned']}",
+        f"Newest row: {_fmt(meta['newest'])}",
+        f"Oldest row: {_fmt(meta['oldest'])}",
+        f"SNIPE_CONFIRMED: {counts['SNIPE_CONFIRMED']}",
+        f"CORRECT_STARTER: {counts['CORRECT_STARTER']}",
+        f"CORRECT_NEAR_ENTRY: {counts['CORRECT_NEAR_ENTRY']}",
+        f"INCONSISTENT_AUDIT_STATE: {counts['INCONSISTENT_AUDIT_STATE']}",
+        f"PROMOTION_PENDING: {promo_counts['PROMOTION_PENDING']}",
+        f"PROMOTION_BLOCKED: {promo_counts['PROMOTION_BLOCKED']}",
+        "POSSIBLE_UNDER_PROMOTION: 0",
+        "",
+        "Interpretation:",
+        "No true under-promotion candidates found. Scanner is not currently "
+        "showing evidence of SNIPE suppression in the inspected window.",
+        "",
+        "Next:",
+        "Continue monitoring. Use `!audit <scan_id|TICKER>` on any individual "
+        "alert you want to inspect.",
+    ])
+
+
+def build_auditready_report(config: dict, limit: int = _AUDITREADY_DEFAULT_SCAN_ROWS,
+                            json_mode: bool = False) -> dict:
+    """Scan recent rows and render the radar result. READ-ONLY."""
+    loaded = load_state_readonly(config)
+    if not loaded["ok"]:
+        if loaded["error"] == "state_file_not_found":
+            msg = (
+                "AUDITREADY unavailable — alert_history state file not found.\n"
+                "This command must run inside the live production bot container "
+                "with access to `.state/alert_history.json`."
+            )
+        elif loaded["error"] == "state_file_malformed":
+            msg = (
+                "AUDITREADY unavailable — alert_history state file could not be "
+                "parsed.\nNo state was modified."
+            )
+        else:
+            msg = f"AUDITREADY unavailable — {loaded['message']}"
+        return _err(loaded["error"], msg)
+
+    state = loaded["state"]
+    cfg = _audit_cfg(config)
+    max_candidates = int(cfg.get("auditready_max_candidates", _AUDITREADY_MAX_CANDIDATES)
+                         or _AUDITREADY_MAX_CANDIDATES)
+
+    rows = collect_recent_rows(state, limit)
+    counts = _empty_counts()
+    promo_counts = _empty_promo_counts()
+    found = []
+    for row in rows:
+        label = interpret(row)["label"]
+        counts[label] = counts.get(label, 0) + 1
+        sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
+        promo = sga.get("promotion_state")
+        if promo:
+            promo_counts[promo] = promo_counts.get(promo, 0) + 1
+        ok, why = is_auditready_candidate(row)
+        if ok:
+            found.append((row, why))
+
+    found = _rank_candidates(found)[:max_candidates]
+    meta = {
+        "rows_scanned": len(rows),
+        "newest": (_row_ts(rows[0]) or None) if rows else None,
+        "oldest": (_row_ts(rows[-1]) or None) if rows else None,
+        "candidates_found": len(found),
+    }
+
+    if json_mode:
+        payload = [_auditready_candidate_json(row, why) for (row, why) in found]
+        text = "```json\n" + json.dumps(
+            {"meta": meta, "counts": counts, "candidates": payload},
+            indent=2, default=str,
+        ) + "\n```"
+        return {"ok": True, "error": None, "match_count": len(found),
+                "json": payload, "messages": _chunk(text)}
+
+    if not found:
+        text = _render_auditready_clear(meta, counts, promo_counts)
+    else:
+        text = _render_auditready_candidates(meta, counts, found)
+    return {"ok": True, "error": None, "match_count": len(found),
+            "json": None, "messages": _chunk(text)}
+
+
+def run_auditready(config: dict, args=None, user_id=None, channel_id=None) -> dict:
+    """Top-level !auditready handler. READ-ONLY.
+
+    args: raw string after `!auditready`, or a token list. Recognizes an optional
+    numeric row-limit (clamped to 10..300) and an optional `json` flag.
+    """
+    auth = is_authorized(config, user_id=user_id, channel_id=channel_id)
+    if not auth["allowed"]:
+        return _err("unauthorized", f"Audit access denied: {auth['reason']}.")
+
+    if isinstance(args, str):
+        tokens = args.split()
+    elif isinstance(args, (list, tuple)):
+        tokens = [str(t) for t in args]
+    else:
+        tokens = []
+
+    json_mode = False
+    limit = None
+    for tok in tokens:
+        t = str(tok).strip().lower()
+        if not t:
+            continue
+        if t == "json":
+            json_mode = True
+        elif t.isdigit():
+            limit = int(t)
+        else:
+            return _err(
+                "usage",
+                "Usage: `!auditready [rows 10-300] [json]`  e.g. `!auditready`, "
+                "`!auditready 50`, `!auditready json`",
+            )
+
+    cfg = _audit_cfg(config)
+    default_rows = int(cfg.get("auditready_default_scan_rows", _AUDITREADY_DEFAULT_SCAN_ROWS)
+                       or _AUDITREADY_DEFAULT_SCAN_ROWS)
+    max_rows = int(cfg.get("auditready_max_scan_rows", _AUDITREADY_MAX_SCAN_ROWS)
+                   or _AUDITREADY_MAX_SCAN_ROWS)
+    if limit is None:
+        limit = default_rows
+    limit = max(_AUDITREADY_MIN_SCAN_ROWS, min(limit, max_rows))
+
+    return build_auditready_report(config, limit=limit, json_mode=json_mode)

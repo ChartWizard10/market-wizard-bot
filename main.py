@@ -195,6 +195,7 @@ def register_commands(
             "`!autoscan start` — Enable scheduled auto-scan\n"
             "`!autoscan stop` — Disable scheduled auto-scan\n"
             "`!audit <scan_id|TICKER> [json]` — Read-only alert_history evidence (operator-gated)\n"
+            "`!auditready [rows] [json]` — Radar: recent rows ready for SNIPE review but not promoted (operator-gated)\n"
         )
 
     # ------------------------------------------------------------------
@@ -216,6 +217,26 @@ def register_commands(
         except Exception as exc:
             log.error("!audit error: %s", exc)
             await ctx.send(f"Audit error: {type(exc).__name__}")
+
+    # ------------------------------------------------------------------
+    # !auditready  (Phase 14L — read-only under-promotion radar)
+    # ------------------------------------------------------------------
+
+    @bot.command(name="auditready")
+    async def auditready_cmd(ctx, *, args: str = "") -> None:
+        from src import audit_access
+
+        user_id = getattr(getattr(ctx, "author", None), "id", None)
+        channel_id = getattr(getattr(ctx, "channel", None), "id", None)
+        try:
+            result = audit_access.run_auditready(
+                config, args, user_id=user_id, channel_id=channel_id
+            )
+            for chunk in result.get("messages", []):
+                await ctx.send(chunk)
+        except Exception as exc:
+            log.error("!auditready error: %s", exc)
+            await ctx.send(f"Auditready error: {type(exc).__name__}")
 
     # ------------------------------------------------------------------
     # !scan
