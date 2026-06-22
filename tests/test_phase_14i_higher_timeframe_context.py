@@ -330,3 +330,272 @@ def test_enums_are_valid():
     for k in ("price_vs_10", "price_vs_20", "price_vs_50", "price_vs_200"):
         assert o["weekly"]["sma_relationship"][k] in htf.PRICE_VS
     assert o["weekly"]["sma_relationship"]["dynamic_support_state"] in htf.DYNAMIC_SUPPORT
+
+
+# ===========================================================================
+# PHASE 14I CONTINUATION — classification hardening + production wiring
+# 19–45 — categorical range position, score caps, contradiction guard
+# ===========================================================================
+
+# ---- categorical range position (weekly_range_position / monthly_range_position) --
+
+def test_weekly_range_position_lower_edge_on_bounce():
+    o = _build(_BOUNCE)
+    assert o["weekly_range_position"] == "LOWER_EDGE"
+
+
+def test_weekly_range_position_upper_edge_on_supply():
+    o = _build(_SUPPLY)
+    assert o["weekly_range_position"] in ("UPPER_EDGE", "EXTENDED_ABOVE")
+
+
+def test_weekly_range_position_mid_range_on_chop():
+    o = _build(_MIDRANGE)
+    assert o["weekly_range_position"] == "MID_RANGE"
+
+
+def test_monthly_range_position_present_and_valid_enum():
+    for path in (_UPTREND, _BOUNCE, _SUPPLY, _LOST, _MIDRANGE):
+        o = _build(path)
+        assert o["monthly_range_position"] in htf.RANGE_POSITIONS
+
+
+def test_range_position_category_extended_above_below_via_helper():
+    completed = [{"high": 110, "low": 90} for _ in range(10)]
+    assert htf._range_position_category(completed, 200) == "EXTENDED_ABOVE"
+    assert htf._range_position_category(completed, 10) == "EXTENDED_BELOW"
+    assert htf._range_position_category(completed, 100) == "MID_RANGE"
+    assert htf._range_position_category(completed, 91) == "LOWER_EDGE"
+    assert htf._range_position_category(completed, 109) == "UPPER_EDGE"
+
+
+def test_range_position_category_unknown_when_no_data():
+    assert htf._range_position_category([], 100) == "UNKNOWN"
+    assert htf._range_position_category([{"high": 100, "low": 100}], 100) == "UNKNOWN"
+
+
+def test_default_object_has_range_position_fields():
+    obj = htf.default_htf_object()
+    assert obj["weekly_range_position"] == "UNKNOWN"
+    assert obj["monthly_range_position"] == "UNKNOWN"
+
+
+def test_range_position_never_loosens_old_float_threshold_bounce():
+    # The old code accepted any pos <= 0.4 for a bounce read; the hardened
+    # category only accepts the outer 15% edge band. A mid-low (but not
+    # edge-confirmed) reaction must NOT be classified HTF_BOUNCE.
+    weekly_path = [100 - i * 0.3 for i in range(40)] + [88, 89, 90, 91]  # ~pos 0.3, not an edge
+    o = _build(weekly_path)
+    assert o["weekly_range_position"] not in ("LOWER_EDGE",)
+    assert o["weekly"]["campaign_state"] != "HTF_BOUNCE"
+
+
+# ---- score caps (conservative ceilings, never a floor, never a tier mutation) ----
+
+def _ctx_for_caps(label="MID_RANGE", quality="NEUTRAL", dyn="NEUTRAL", campaign="HTF_MID_RANGE",
+                   data_status="OK", path="OPEN"):
+    obj = htf.default_htf_object()
+    obj["data_status"] = data_status
+    obj["weekly"]["sma_relationship"]["dynamic_support_state"] = dyn
+    obj["weekly"]["campaign_state"] = campaign
+    obj["weekly"]["trend_state"] = "TRANSITION"
+    obj["monthly"]["bias_state"] = "TRANSITION"
+    obj["campaign_location"] = {
+        "label": label, "quality": quality,
+        "distance_to_nearest_support_pct": None, "distance_to_nearest_resistance_pct": None,
+        "path_state": path,
+    }
+    obj["htf_sequence"]["bos_context"] = {
+        "weekly_bos_detected": False, "monthly_bos_detected": False,
+        "bos_level": None, "bos_quality": "NONE",
+    }
+    return obj
+
+
+def test_score_cap_mid_range_ceiling():
+    caps, reasons = htf._collect_score_caps(_ctx_for_caps(label="MID_RANGE"), "NEUTRAL", "HTF_MID_RANGE")
+    assert caps.get("MID_RANGE_NO_EDGE") == htf._CAP_MID_RANGE == 60
+    assert reasons
+
+
+def test_score_cap_into_supply_unconfirmed():
+    caps, _ = htf._collect_score_caps(
+        _ctx_for_caps(label="INTO_HTF_SUPPLY", quality="HOSTILE"), "NEUTRAL", "HTF_SUPPLY_REJECTION"
+    )
+    assert caps.get("INTO_HTF_SUPPLY_UNCONFIRMED") == htf._CAP_INTO_SUPPLY == 65
+
+
+def test_score_cap_into_supply_exempt_when_accepted_through():
+    caps, _ = htf._collect_score_caps(
+        _ctx_for_caps(label="INTO_HTF_SUPPLY", quality="HOSTILE"), "RECLAIMING", "HTF_RECLAIM"
+    )
+    assert "INTO_HTF_SUPPLY_UNCONFIRMED" not in caps
+
+
+def test_score_cap_degraded_data_ceiling():
+    caps, _ = htf._collect_score_caps(
+        _ctx_for_caps(label="AT_HTF_SUPPORT", quality="FUNCTIONAL", data_status="DEGRADED_MISSING_VOLUME"),
+        "DEFENDED", "HTF_CONTINUATION",
+    )
+    assert caps.get("DEGRADED_HTF_DATA") == htf._CAP_DEGRADED == 50
+
+
+def test_score_cap_repair_ceiling():
+    caps, _ = htf._collect_score_caps(
+        _ctx_for_caps(label="ABOVE_HTF_RECLAIM", quality="FUNCTIONAL"), "RECLAIMING", "HTF_REPAIR"
+    )
+    assert caps.get("HTF_REPAIR_UNCONFIRMED") == htf._CAP_REPAIR == 75
+
+
+def test_caps_never_raise_score_only_lower_it():
+    obj = _ctx_for_caps(label="MID_RANGE")
+    score, *_rest, caps_applied = htf._score_context(obj, 100.0)
+    assert score <= 100
+    assert "MID_RANGE_NO_EDGE" in caps_applied
+    # A MID_RANGE read can never claim a score above its conservative ceiling.
+    assert score <= htf._CAP_MID_RANGE
+
+
+def test_score_caps_applied_recorded_on_full_build():
+    o = _build(_MIDRANGE)
+    assert "MID_RANGE_NO_EDGE" in o["setup_relationship"]["context_caps_applied"]
+    assert o["setup_relationship"]["context_score"] <= htf._CAP_MID_RANGE
+
+
+# ---- contradiction guard (_normalize_campaign_consistency) -----------------
+
+def _base_consistent_obj():
+    return _build(_UPTREND)
+
+
+def test_normalize_consistency_hostile_cannot_support_long_setup():
+    obj = htf.default_htf_object()
+    obj["data_status"] = "OK"
+    obj["campaign_location"]["quality"] = "HOSTILE"
+    obj["setup_relationship"]["supports_long_setup"] = True
+    obj["setup_relationship"]["promotion_support"] = ["HTF campaign context supports SNIPE review."]
+    out = htf._normalize_campaign_consistency(obj)
+    assert out["setup_relationship"]["supports_long_setup"] is False
+    assert out["setup_relationship"]["weakens_long_setup"] is True
+    assert out["setup_relationship"]["promotion_support"] == []
+    assert any("normalized" in n for n in out["setup_relationship"]["context_notes"])
+
+
+def test_normalize_consistency_mid_range_downgrades_sovereign_quality():
+    obj = htf.default_htf_object()
+    obj["data_status"] = "OK"
+    obj["campaign_location"]["label"] = "MID_RANGE"
+    obj["campaign_location"]["quality"] = "SOVEREIGN"
+    obj["setup_relationship"]["supports_long_setup"] = True
+    out = htf._normalize_campaign_consistency(obj)
+    assert out["campaign_location"]["quality"] == "NEUTRAL"
+    assert out["setup_relationship"]["supports_long_setup"] is False
+    assert out["setup_relationship"]["context_notes"]
+
+
+def test_normalize_consistency_blocks_snipe_cannot_be_sovereign_or_functional():
+    obj = htf.default_htf_object()
+    obj["data_status"] = "OK"
+    obj["campaign_location"]["label"] = "INTO_HTF_SUPPLY"
+    obj["campaign_location"]["quality"] = "SOVEREIGN"
+    obj["setup_relationship"]["blocks_snipe_contextually"] = True
+    out = htf._normalize_campaign_consistency(obj)
+    assert out["campaign_location"]["quality"] == "HOSTILE"
+    assert out["setup_relationship"]["context_notes"]
+
+
+def test_normalize_consistency_dyn_lost_overrides_continuation_campaign():
+    obj = htf.default_htf_object()
+    obj["data_status"] = "OK"
+    obj["weekly"]["sma_relationship"]["dynamic_support_state"] = "LOST"
+    obj["weekly"]["campaign_state"] = "HTF_CONTINUATION"
+    out = htf._normalize_campaign_consistency(obj)
+    assert out["weekly"]["campaign_state"] == "HTF_FAILURE"
+    assert out["setup_relationship"]["context_notes"]
+
+
+def test_normalize_consistency_bounce_exempt_from_dyn_lost_override():
+    obj = htf.default_htf_object()
+    obj["data_status"] = "OK"
+    obj["weekly"]["sma_relationship"]["dynamic_support_state"] = "LOST"
+    obj["weekly"]["campaign_state"] = "HTF_BOUNCE"
+    out = htf._normalize_campaign_consistency(obj)
+    # Deliberate design exemption: a confirmed bounce is allowed to outrank a
+    # still-LOST dynamic-support read.
+    assert out["weekly"]["campaign_state"] == "HTF_BOUNCE"
+
+
+def test_normalize_consistency_noop_on_consistent_object():
+    obj = _base_consistent_obj()
+    assert obj["setup_relationship"]["context_notes"] == []
+
+
+def test_normalize_consistency_appends_notes_on_every_intervention():
+    obj = htf.default_htf_object()
+    obj["data_status"] = "OK"
+    obj["campaign_location"]["quality"] = "HOSTILE"
+    obj["setup_relationship"]["supports_long_setup"] = True
+    before = len(obj["setup_relationship"]["context_notes"])
+    out = htf._normalize_campaign_consistency(obj)
+    assert len(out["setup_relationship"]["context_notes"]) > before
+
+
+def test_diagnostic_sentence_appends_notes_suffix():
+    obj = _build(_UPTREND)
+    obj["setup_relationship"]["context_notes"] = ["normalized: test note"]
+    sentence = htf._diagnostic_sentence(obj)
+    assert "normalized: test note" in sentence
+
+
+# ---- history snapshot stays minimal / audit-safe even with new fields ------
+
+def test_history_snapshot_schema_excludes_internal_caps_and_notes():
+    o = _build(_MIDRANGE)
+    assert o["setup_relationship"]["context_caps_applied"]   # caps did fire
+    snap = htf.compact_history_snapshot(o)
+    for forbidden in ("context_caps_applied", "context_notes", "weekly_range_position",
+                      "monthly_range_position"):
+        assert forbidden not in snap
+
+
+def test_history_snapshot_json_safe_with_unsafe_caps_notes_fixture():
+    o = _build(_UPTREND)
+    rel = o["setup_relationship"]
+    rel["context_score"] = float("nan")
+    rel["context_caps_applied"] = [object(), 5, None]
+    rel["context_notes"] = [object(), "fine", float("inf")]
+    rel["supports_long_setup"] = "not-a-bool"
+    rel["promotion_support"] = [None, 5, "ok", float("nan")]
+    snap = htf.compact_history_snapshot(o)
+    json.dumps(snap, allow_nan=False)
+    assert snap["context_score"] is None
+    assert snap["supports_long_setup"] is None
+    assert snap["promotion_support"] == ["ok"]
+
+
+# ---- production wiring re-confirmation --------------------------------------
+
+def test_config_doctrine_wiring_confirms_required_keys():
+    import yaml
+    with open("config/doctrine_config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    section = cfg.get("higher_timeframe_context")
+    assert section is not None
+    for key in ("enabled", "lookback_months", "min_weekly_bars", "min_monthly_bars",
+                "render_compact_line", "influence_tiering", "persist_history_snapshot"):
+        assert key in section
+    assert section["influence_tiering"] is False
+
+
+def test_never_mutates_tier_capital_with_new_fields_present():
+    tr = {
+        "final_tier": "STARTER", "capital_action": "starter_only",
+        "safe_for_alert": True, "score": 80,
+        "final_signal": {"ticker": "X", "trigger_level": 100.0},
+    }
+    before = copy.deepcopy(tr)
+    o = htf.build_higher_timeframe_context("X", tr, daily_bars=_daily_from_weekly(_MIDRANGE), config=_CFG)
+    assert tr == before
+    assert "weekly_range_position" in o and "monthly_range_position" in o
+    assert "context_caps_applied" in o["setup_relationship"]
+    assert "context_notes" in o["setup_relationship"]

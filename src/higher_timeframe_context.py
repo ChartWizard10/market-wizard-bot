@@ -54,6 +54,9 @@ CAMPAIGN_LOCATIONS = {
 }
 LOCATION_QUALITY = {"SOVEREIGN", "FUNCTIONAL", "INFORMATIONAL", "HOSTILE", "NEUTRAL", "UNKNOWN"}
 PATH_STATES = {"OPEN", "PARTIALLY_CONGESTED", "BLOCKED_BY_SUPPLY", "UNKNOWN"}
+RANGE_POSITIONS = {
+    "LOWER_EDGE", "UPPER_EDGE", "MID_RANGE", "EXTENDED_ABOVE", "EXTENDED_BELOW", "UNKNOWN",
+}
 CAME_FROM = {
     "MAJOR_SUPPORT", "MAJOR_SUPPLY", "MONTHLY_DEMAND", "WEEKLY_DEMAND",
     "MID_RANGE", "BREAKDOWN", "UNKNOWN",
@@ -74,6 +77,13 @@ _WEEKLY_PIVOT_L = 2
 _WEEKLY_PIVOT_R = 2
 _MONTHLY_PIVOT_L = 2
 _MONTHLY_PIVOT_R = 2
+_EDGE_POS_PCT = 0.15     # <=15% from the range low/high = a confirmed range edge
+
+# Score caps — conservative ceilings, never a floor and never a tier mutation.
+_CAP_MID_RANGE = 60
+_CAP_INTO_SUPPLY = 65
+_CAP_DEGRADED = 50
+_CAP_REPAIR = 75
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +121,8 @@ def default_htf_object() -> dict:
         },
         "monthly": _blank_tf_block(),
         "weekly": _blank_tf_block(),
+        "weekly_range_position": "UNKNOWN",
+        "monthly_range_position": "UNKNOWN",
         "campaign_location": {
             "label": "UNKNOWN", "quality": "UNKNOWN",
             "distance_to_nearest_support_pct": None,
@@ -129,6 +141,7 @@ def default_htf_object() -> dict:
             "blocks_snipe_contextually": False, "context_grade": "UNKNOWN",
             "context_score": None, "promotion_support": [], "missing_htf_proof": [],
             "blocking_reasons": [], "invalidation_conditions": [],
+            "context_caps_applied": [], "context_notes": [],
         },
     }
 
@@ -228,10 +241,18 @@ def _build(ticker, tiering_result, enriched, daily_bars, config) -> dict:
     obj["weekly"] = _build_tf_block(w_completed, price, "weekly", _WEEKLY_PIVOT_L, _WEEKLY_PIVOT_R)
     obj["monthly"] = _build_tf_block(m_completed, price, "monthly", _MONTHLY_PIVOT_L, _MONTHLY_PIVOT_R)
 
+    # Categorical range position — a confirmed edge read, not a raw float. Used
+    # to gate bounce / supply-rejection classification below (tightens, never
+    # loosens, the prior float-threshold-only read).
+    obj["weekly_range_position"] = _range_position_category(w_completed, price)
+    obj["monthly_range_position"] = _range_position_category(m_completed, price)
+
     # Weekly carries campaign_state; monthly carries bias_state.
     obj["monthly"]["bias_state"] = _monthly_bias(m_completed, price, obj["monthly"])
     obj["monthly"].pop("campaign_state", None)
-    obj["weekly"]["campaign_state"] = _weekly_campaign(w_completed, m_completed, price, obj["weekly"], obj["monthly"])
+    obj["weekly"]["campaign_state"] = _weekly_campaign(
+        w_completed, m_completed, price, obj["weekly"], obj["monthly"], obj["weekly_range_position"]
+    )
     obj["weekly"].pop("bias_state", None)
 
     # Campaign location + sequence + relationship/scoring.
@@ -240,6 +261,11 @@ def _build(ticker, tiering_result, enriched, daily_bars, config) -> dict:
     obj["setup_relationship"] = _setup_relationship(
         tiering_result, obj, price
     )
+
+    # Final contradiction guard — fixes internal inconsistencies between
+    # campaign_state / location / dynamic-support / setup_relationship before
+    # this evidence object is ever read by Discord/history/audit consumers.
+    obj = _normalize_campaign_consistency(obj)
 
     obj["diagnostic_sentence"] = _diagnostic_sentence(obj)
     return obj
@@ -624,32 +650,38 @@ def _monthly_bias(completed, price, block):
     return "TRANSITION"
 
 
-def _weekly_campaign(w_completed, m_completed, price, w_block, m_block):
+def _weekly_campaign(w_completed, m_completed, price, w_block, m_block, pos_cat="UNKNOWN"):
     if not w_completed:
         return "UNKNOWN"
     sr = w_block["support_resistance_map"]
-    sup = _nearest(sr, "below", "SUPPORT")
     res = _nearest(sr, "above", "RESISTANCE")
     dyn = w_block["sma_relationship"]["dynamic_support_state"]
     trend = w_block["trend_state"]
 
-    pos = _range_position(w_completed, price)         # 0 (low) .. 1 (high)
-    near_support = _opt(sup, "distance_pct") is not None and sup["distance_pct"] <= _NEAR_PCT
     into_supply = _opt(res, "distance_pct") is not None and res["distance_pct"] <= _SUPPLY_NEAR_PCT
     reacted_up = len(w_completed) >= 1 and w_completed[-1]["close"] > w_completed[-1]["open"]
 
-    # Bounce: a genuine reaction up off a recent major swing low (lower range)
-    # outranks the raw "value lost" read — price came into demand and reacted.
-    if pos <= 0.4 and reacted_up and _recent_swing_low(w_completed, within=6):
+    # Confirmed-zone gating: the categorical range position requires price to
+    # genuinely sit within the outer edge band of the historical range (a
+    # confirmed edge, not a raw float threshold). A pivot-confirmed swing zone
+    # on the same side adds further confirmation when one is available — a
+    # very recent low/high may not yet have a right-confirmed pivot, so its
+    # absence alone must not erase a freshly-confirmed range-edge bounce.
+    confirmed_lower_edge = pos_cat in ("LOWER_EDGE", "EXTENDED_BELOW")
+    confirmed_upper_edge = pos_cat in ("UPPER_EDGE", "EXTENDED_ABOVE") and into_supply
+
+    # Bounce: a genuine reaction up off a recent major swing low at a confirmed
+    # lower-edge zone outranks the raw "value lost" read.
+    if confirmed_lower_edge and reacted_up and _recent_swing_low(w_completed, within=6):
         return "HTF_BOUNCE"
     # Value loss / reclaim (dynamic-support truth).
     if dyn == "LOST":
         return "HTF_FAILURE"
     if dyn == "RECLAIMING":
         return "HTF_RECLAIM"
-    # Genuine supply rejection: in the UPPER range, pressed into overhead supply,
-    # and not a clean fresh breakout.
-    if into_supply and pos >= 0.7 and trend != "FRESH_EXPANSION":
+    # Genuine supply rejection: a confirmed upper-edge zone, pressed into
+    # overhead supply, and not a clean fresh breakout.
+    if confirmed_upper_edge and trend != "FRESH_EXPANSION":
         return "HTF_SUPPLY_REJECTION"
     if trend in ("FRESH_EXPANSION", "MATURE_CONTINUATION") and dyn in ("DEFENDED", "NEUTRAL", "OVEREXTENDED"):
         return "HTF_CONTINUATION"
@@ -676,6 +708,31 @@ def _range_position(completed, price, window=52):
     if hi <= lo:
         return 0.5
     return max(0.0, min(1.0, (price - lo) / (hi - lo)))
+
+
+def _range_position_category(completed, price, window=52):
+    """Categorical, confirmed range-edge read. Distinct from the raw float
+    position: only the outer _EDGE_POS_PCT band of the historical window
+    counts as a confirmed LOWER_EDGE/UPPER_EDGE; price outside the window's
+    high/low is EXTENDED_*; everything else is MID_RANGE.
+    """
+    seg = completed[-window:] if len(completed) >= window else completed
+    if not seg:
+        return "UNKNOWN"
+    hi = max(b["high"] for b in seg)
+    lo = min(b["low"] for b in seg)
+    if hi <= lo or price is None:
+        return "UNKNOWN"
+    if price > hi:
+        return "EXTENDED_ABOVE"
+    if price < lo:
+        return "EXTENDED_BELOW"
+    pos = (price - lo) / (hi - lo)
+    if pos <= _EDGE_POS_PCT:
+        return "LOWER_EDGE"
+    if pos >= 1.0 - _EDGE_POS_PCT:
+        return "UPPER_EDGE"
+    return "MID_RANGE"
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +865,7 @@ def _setup_relationship(tiering_result, obj, price):
         "blocks_snipe_contextually": False, "context_grade": "UNKNOWN",
         "context_score": None, "promotion_support": [], "missing_htf_proof": [],
         "blocking_reasons": [], "invalidation_conditions": [],
+        "context_caps_applied": [], "context_notes": [],
     }
     if obj["data_status"] in ("UNAVAILABLE", "ERROR"):
         return rel
@@ -819,13 +877,14 @@ def _setup_relationship(tiering_result, obj, price):
     bias = monthly.get("bias_state")
     dyn = weekly["sma_relationship"]["dynamic_support_state"]
 
-    score, support, missing, blocking, invalidations = _score_context(obj, price)
+    score, support, missing, blocking, invalidations, caps_applied = _score_context(obj, price)
     rel["context_score"] = score
     rel["context_grade"] = _grade(score)
     rel["promotion_support"] = support
     rel["missing_htf_proof"] = missing
     rel["blocking_reasons"] = blocking
     rel["invalidation_conditions"] = invalidations
+    rel["context_caps_applied"] = caps_applied
 
     hostile = loc["quality"] == "HOSTILE" or campaign in ("HTF_SUPPLY_REJECTION", "HTF_FAILURE")
     supportive = (
@@ -845,6 +904,79 @@ def _setup_relationship(tiering_result, obj, price):
         if "HTF campaign context supports SNIPE review." not in rel["promotion_support"]:
             rel["promotion_support"].append("HTF campaign context supports SNIPE review.")
     return rel
+
+
+# ---------------------------------------------------------------------------
+# Contradiction guard (final pass — fixes, never loosens)
+# ---------------------------------------------------------------------------
+
+def _normalize_campaign_consistency(context: dict) -> dict:
+    """Final contradiction-guard pass over the fully-built context object.
+
+    Detects internal inconsistencies between campaign_state, campaign_location,
+    dynamic-support truth, and setup_relationship that the upstream classifiers
+    could otherwise leave standing, and resolves each one toward caution (never
+    toward a more favorable read). Every intervention appends a note to
+    setup_relationship["context_notes"] so the downgrade is auditable. Pure,
+    never raises, never touches final_tier/capital_action/score-routing.
+    """
+    if not isinstance(context, dict):
+        return context
+    weekly = context.get("weekly")
+    loc = context.get("campaign_location")
+    rel = context.get("setup_relationship")
+    if not isinstance(weekly, dict) or not isinstance(loc, dict) or not isinstance(rel, dict):
+        return context
+
+    notes = list(rel.get("context_notes") or [])
+    dyn = (weekly.get("sma_relationship") or {}).get("dynamic_support_state")
+    campaign = weekly.get("campaign_state")
+    quality = loc.get("quality")
+    label = loc.get("label")
+
+    # Rule 1: dynamic support LOST can never coexist with a continuation/
+    # reclaim campaign read — value loss is the more conservative, controlling
+    # truth. (HTF_BOUNCE is deliberately exempt: a confirmed swing-low reaction
+    # at a lower-edge zone is allowed to outrank a still-LOST dynamic-support
+    # read by design — that is the entire point of a bounce classification.)
+    if dyn == "LOST" and campaign in ("HTF_CONTINUATION", "HTF_RECLAIM"):
+        weekly["campaign_state"] = "HTF_FAILURE"
+        campaign = "HTF_FAILURE"
+        notes.append("normalized: dynamic support LOST overrides a continuation/reclaim read")
+
+    # Rule 2: a HOSTILE location can never report supports_long_setup True.
+    if quality == "HOSTILE" and rel.get("supports_long_setup") is True:
+        rel["supports_long_setup"] = False
+        rel["weakens_long_setup"] = True
+        rel["promotion_support"] = [
+            s for s in (rel.get("promotion_support") or [])
+            if "supports SNIPE review" not in s
+        ]
+        notes.append("normalized: hostile location cannot support a long setup")
+
+    # Rule 3: MID_RANGE carries no decisive HTF zone — it can never be
+    # SOVEREIGN/FUNCTIONAL quality nor report supports_long_setup True.
+    if label == "MID_RANGE" and (
+        quality in ("SOVEREIGN", "FUNCTIONAL") or rel.get("supports_long_setup") is True
+    ):
+        loc["quality"] = "NEUTRAL"
+        quality = "NEUTRAL"
+        rel["supports_long_setup"] = False
+        notes.append("normalized: mid-range location downgraded to neutral — no decisive HTF zone")
+
+    # Rule 4: blocks_snipe_contextually True must always coexist with a
+    # non-favorable location quality — never SOVEREIGN/FUNCTIONAL.
+    if rel.get("blocks_snipe_contextually") is True and quality in ("SOVEREIGN", "FUNCTIONAL"):
+        loc["quality"] = "HOSTILE" if label in ("INTO_HTF_SUPPLY", "BELOW_HTF_FAILURE") else "NEUTRAL"
+        notes.append(
+            "normalized: blocking context cannot coexist with sovereign/functional location quality"
+        )
+
+    rel["context_notes"] = notes
+    context["weekly"] = weekly
+    context["campaign_location"] = loc
+    context["setup_relationship"] = rel
+    return context
 
 
 # ---------------------------------------------------------------------------
@@ -927,7 +1059,46 @@ def _score_context(obj, price):
         missing.append("HTF history incomplete; context is approximate")
 
     score = max(0, min(100, score))
-    return score, support, missing, blocking, invalidations
+
+    caps, cap_reasons = _collect_score_caps(obj, dyn, campaign)
+    for cap_value in caps.values():
+        score = min(score, cap_value)
+    score = max(0, min(100, score))
+    blocking.extend(r for r in cap_reasons if r not in blocking)
+
+    return score, support, missing, blocking, invalidations, list(caps.keys())
+
+
+def _collect_score_caps(obj, dyn, campaign):
+    """Conservative ceilings on context_score. Lowest cap wins. Never raises a
+    score, never mutates tier/capital — only restrains how much evidentiary
+    confidence an ambiguous or unconfirmed HTF read is allowed to claim.
+    """
+    loc = obj["campaign_location"]
+    caps, reasons = {}, []
+
+    def add(name, value, reason):
+        caps[name] = value
+        reasons.append(f"{name}: {reason} (cap {value})")
+
+    if obj["data_status"] != "OK":
+        add("DEGRADED_HTF_DATA", _CAP_DEGRADED, "HTF history degraded/insufficient")
+
+    if loc.get("label") == "MID_RANGE":
+        add("MID_RANGE_NO_EDGE", _CAP_MID_RANGE, "no decisive HTF zone — mid-range")
+
+    if loc.get("label") == "INTO_HTF_SUPPLY":
+        accepted_through = dyn in ("DEFENDED", "RECLAIMING") or campaign == "HTF_RECLAIM"
+        if not accepted_through:
+            add(
+                "INTO_HTF_SUPPLY_UNCONFIRMED", _CAP_INTO_SUPPLY,
+                "pressing into HTF supply without reclaim/acceptance-through proof",
+            )
+
+    if campaign == "HTF_REPAIR":
+        add("HTF_REPAIR_UNCONFIRMED", _CAP_REPAIR, "weekly repair — hold/follow-through not yet proven")
+
+    return caps, reasons
 
 
 # ---------------------------------------------------------------------------
@@ -943,17 +1114,22 @@ def _diagnostic_sentence(obj):
     loc = obj["campaign_location"]
     rel = obj["setup_relationship"]
     if rel["blocks_snipe_contextually"]:
-        return ("HTF context: Caution — setup is pushing into weekly/monthly supply; "
-                "SNIPE review requires acceptance through HTF resistance.")
-    if campaign == "HTF_REPAIR":
-        return ("HTF context: Weekly repair — price reclaimed value but still needs "
-                "defended hold and follow-through.")
-    if rel["supports_long_setup"]:
-        return (f"HTF context: Weekly campaign support — {campaign.replace('HTF_', '').lower()} "
-                f"from {loc['label'].replace('_', ' ').lower()}; monthly bias "
-                f"{bias.lower()}.")
-    return ("HTF context: Neutral — price is mid-range on weekly/monthly; "
-            "lower-timeframe proof controls.")
+        sentence = ("HTF context: Caution — setup is pushing into weekly/monthly supply; "
+                    "SNIPE review requires acceptance through HTF resistance.")
+    elif campaign == "HTF_REPAIR":
+        sentence = ("HTF context: Weekly repair — price reclaimed value but still needs "
+                    "defended hold and follow-through.")
+    elif rel["supports_long_setup"]:
+        sentence = (f"HTF context: Weekly campaign support — {campaign.replace('HTF_', '').lower()} "
+                    f"from {loc['label'].replace('_', ' ').lower()}; monthly bias "
+                    f"{bias.lower()}.")
+    else:
+        sentence = ("HTF context: Neutral — price is mid-range on weekly/monthly; "
+                    "lower-timeframe proof controls.")
+    notes = rel.get("context_notes") or []
+    if notes:
+        sentence += " (" + "; ".join(notes) + ")"
+    return sentence
 
 
 def render_htf_line(htf, config=None):
