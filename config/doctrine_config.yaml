@@ -67,7 +67,8 @@ higher_timeframe_context:
 audit_access:
   enabled: true
   allowed_user_ids: []      # Discord user IDs permitted to run !audit
-  allowed_channel_ids: []   # Discord channel IDs where !audit is permitted
+  allowed_channel_ids:      # Discord channel IDs where !audit is permitted
+    - 1518684614598590495
   max_rows: 3
 
 prefilter:
