@@ -519,7 +519,7 @@ def test_near_entry_marked_high_priority(tmp_path):
     res = audit_access.run_auditready(cfg, "", **_AUTH)
     assert res["match_count"] == 1
     text = "\n".join(res["messages"])
-    assert "HIGH PRIORITY" in text
+    assert "HIGH REVIEW PRIORITY" in text
 
 
 def test_starter_marked_priority(tmp_path):
@@ -539,3 +539,192 @@ def test_max_candidates_capped(tmp_path):
     cfg = _cfg(tmp_path, _state(*rows), auditready_max_candidates=10)
     res = audit_access.run_auditready(cfg, "300", **_AUTH)
     assert res["match_count"] == 10
+
+
+# ---------------------------------------------------------------------------
+# WATCHLIST eligibility reconciliation (Phase 14L review fix)
+#
+# A WATCHLIST row that is genuinely PROMOTION_READY with zero active blockers
+# is itself an audit contradiction (the lowest tier sitting on a fully ready
+# SNIPE audit) and must be surfaced exactly like STARTER/NEAR_ENTRY — through
+# the SAME strict gate, with no loosened blockers and no special-cased
+# interpret(). These tests pin that behavior and its priority/render wording.
+# ---------------------------------------------------------------------------
+
+def test_watchlist_not_in_non_candidate_tiers():
+    assert "WATCHLIST" not in audit_access._NON_CANDIDATE_TIERS
+
+
+def test_other_non_candidate_tiers_still_excluded():
+    assert audit_access._NON_CANDIDATE_TIERS == {"SNIPE_IT", "PASS", "WAIT", ""}
+
+
+def test_interpret_clean_watchlist_is_possible_under_promotion():
+    row = _row("WLT", "scan_wl_interp", tier="WATCHLIST", capital="none")
+    verdict = audit_access.interpret(row)
+    assert verdict["label"] == "POSSIBLE_UNDER_PROMOTION"
+
+
+def test_watchlist_clean_row_is_candidate():
+    row = _row("WLT", "scan_wl_ok", tier="WATCHLIST", capital="none")
+    ok, why = audit_access.is_auditready_candidate(row)
+    assert ok is True
+    assert any("WATCHLIST" in w for w in why)
+
+
+def test_watchlist_clean_row_appears_in_auditready_output(tmp_path):
+    row = _row("WLT", "scan_wl_appears", tier="WATCHLIST", capital="none")
+    cfg = _cfg(tmp_path, _state(row))
+    res = audit_access.run_auditready(cfg, "", **_AUTH)
+    assert res["match_count"] == 1
+    text = "\n".join(res["messages"])
+    assert "WLT" in text
+    assert "scan_wl_appears" in text
+    assert "!audit scan_wl_appears" in text
+
+
+def test_watchlist_excluded_when_blocked_gate_names_present():
+    row = _row("WLT", "scan_wl_bg", tier="WATCHLIST", capital="none",
+               sga=_ready_snap(blocked_gate_names=["OVERHEAD_CLEAR"],
+                               blocked_gates=["OVERHEAD_CLEAR"]))
+    ok, _ = audit_access.is_auditready_candidate(row)
+    assert ok is False
+
+
+def test_watchlist_excluded_when_missing_proofs_present():
+    row = _row("WLT", "scan_wl_mp", tier="WATCHLIST", capital="none",
+               sga=_ready_snap(missing_proofs=["closed 1H hold above 75.00"]))
+    ok, _ = audit_access.is_auditready_candidate(row)
+    assert ok is False
+
+
+def test_watchlist_excluded_when_blocked_gates_present():
+    row = _row("WLT", "scan_wl_bg2", tier="WATCHLIST", capital="none",
+               sga=_ready_snap(blocked_gates=["LIVE_EDGE_SAFE"]))
+    ok, _ = audit_access.is_auditready_candidate(row)
+    assert ok is False
+
+
+def test_watchlist_excluded_when_htf_contextual_block():
+    row = _row("WLT", "scan_wl_htf", tier="WATCHLIST", capital="none",
+               htf=_htf_snap(blocks=True))
+    ok, fails = audit_access.is_auditready_candidate(row)
+    assert ok is False
+    assert any("HTF contextual block" in f for f in fails)
+
+
+def test_watchlist_excluded_when_score_blocked_by_present():
+    row = _row("WLT", "scan_wl_sb", tier="WATCHLIST", capital="none",
+               sga=_ready_snap(score_blocked_by=["LIVE_EDGE_SAFE"]))
+    ok, _ = audit_access.is_auditready_candidate(row)
+    assert ok is False
+
+
+def test_watchlist_excluded_when_promotion_pending():
+    row = _row("WLT", "scan_wl_pp", tier="WATCHLIST", capital="none",
+               sga=_ready_snap(promotion_state="PROMOTION_PENDING",
+                               missing_proofs=["1H hold forming"]))
+    ok, _ = audit_access.is_auditready_candidate(row)
+    assert ok is False
+
+
+def test_watchlist_excluded_when_not_eligible_for_snipe_review():
+    row = _row("WLT", "scan_wl_ne", tier="WATCHLIST", capital="none",
+               sga=_ready_snap(eligible_for_snipe_review=False))
+    ok, _ = audit_access.is_auditready_candidate(row)
+    assert ok is False
+
+
+def test_watchlist_excluded_when_inconsistent_audit_state():
+    row = _row("WLT", "scan_wl_inc", tier="WATCHLIST", capital="none",
+               sga=_ready_snap(blocked_gate_names=["LIVE_EDGE_SAFE"],
+                               blocked_gates=["LIVE_EDGE_SAFE"],
+                               blocking_reasons=["LIVE_EDGE_SAFE: candle veto HOSTILE_WICK"]))
+    assert audit_access.interpret(row)["label"] == "INCONSISTENT_AUDIT_STATE"
+    ok, _ = audit_access.is_auditready_candidate(row)
+    assert ok is False
+
+
+def test_watchlist_excluded_when_text_only_candle_veto():
+    row = _row("WLT", "scan_wl_veto", tier="WATCHLIST", capital="none",
+               sga=_ready_snap(diagnostic_sentence="SNIPE audit: candle veto HOSTILE_WICK active."))
+    ok, fails = audit_access.is_auditready_candidate(row)
+    assert ok is False
+    assert any("diagnostic blocker" in f for f in fails)
+
+
+def test_watchlist_priority_label_is_review_priority(tmp_path):
+    row = _row("WLT", "scan_wl_prio", tier="WATCHLIST", capital="none")
+    cfg = _cfg(tmp_path, _state(row))
+    res = audit_access.run_auditready(cfg, "", **_AUTH)
+    text = "\n".join(res["messages"])
+    assert "[REVIEW PRIORITY]" in text
+
+
+def test_watchlist_why_flagged_exact_wording(tmp_path):
+    row = _row("WLT", "scan_wl_why", tier="WATCHLIST", capital="none")
+    cfg = _cfg(tmp_path, _state(row))
+    res = audit_access.run_auditready(cfg, "", **_AUTH)
+    text = "\n".join(res["messages"])
+    assert (
+        "Why flagged: promotion_state is PROMOTION_READY, no blocked gates, "
+        "no missing proofs, no active blockers, but final_tier is WATCHLIST."
+    ) in text
+
+
+def test_watchlist_review_note_exact_wording(tmp_path):
+    row = _row("WLT", "scan_wl_note", tier="WATCHLIST", capital="none")
+    cfg = _cfg(tmp_path, _state(row))
+    res = audit_access.run_auditready(cfg, "", **_AUTH)
+    text = "\n".join(res["messages"])
+    assert (
+        "Review note: WATCHLIST with clean PROMOTION_READY is an audit "
+        "contradiction, not capital permission. Review the scan_id with "
+        "!audit before any doctrine conclusion."
+    ) in text
+
+
+def test_watchlist_json_mode_priority_and_conclusion(tmp_path):
+    row = _row("WLT", "scan_wl_json", tier="WATCHLIST", capital="none")
+    cfg = _cfg(tmp_path, _state(row))
+    res = audit_access.run_auditready(cfg, "json", **_AUTH)
+    assert res["match_count"] == 1
+    payload = res["json"][0]
+    assert payload["final_tier"] == "WATCHLIST"
+    assert payload["priority"] == "REVIEW PRIORITY"
+    assert payload["conclusion"] == "POSSIBLE_UNDER_PROMOTION"
+
+
+def test_near_entry_priority_label_full_text(tmp_path):
+    near = _row("QLYS", "scan_near2", tier="NEAR_ENTRY", capital="wait_no_capital",
+                sga=_ready_snap(audit_label="NEAR_ENTRY_PENDING"))
+    cfg = _cfg(tmp_path, _state(near))
+    res = audit_access.run_auditready(cfg, "", **_AUTH)
+    text = "\n".join(res["messages"])
+    assert "[HIGH REVIEW PRIORITY]" in text
+
+
+def test_starter_priority_label_is_exactly_priority(tmp_path):
+    cfg = _cfg(tmp_path, _state(_row("HAE", "scan_st2")))
+    res = audit_access.run_auditready(cfg, "", **_AUTH)
+    text = "\n".join(res["messages"])
+    assert "[PRIORITY]" in text
+    assert "[REVIEW PRIORITY]" not in text
+    assert "[HIGH REVIEW PRIORITY]" not in text
+
+
+def test_mixed_tier_priorities_all_correct_in_same_scan(tmp_path):
+    watch = _row("WLT", "scan_mix_w", tier="WATCHLIST", capital="none",
+                 alerted_at="2026-06-22T08:00:00")
+    near = _row("QLYS", "scan_mix_n", tier="NEAR_ENTRY", capital="wait_no_capital",
+                alerted_at="2026-06-22T09:00:00",
+                sga=_ready_snap(audit_label="NEAR_ENTRY_PENDING"))
+    starter = _row("HAE", "scan_mix_s", tier="STARTER",
+                   alerted_at="2026-06-22T10:00:00")
+    cfg = _cfg(tmp_path, _state(watch, near, starter))
+    res = audit_access.run_auditready(cfg, "", **_AUTH)
+    assert res["match_count"] == 3
+    text = "\n".join(res["messages"])
+    assert "WLT" in text and "[REVIEW PRIORITY]" in text
+    assert "QLYS" in text and "[HIGH REVIEW PRIORITY]" in text
+    assert "HAE" in text and "[PRIORITY]" in text

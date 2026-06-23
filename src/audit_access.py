@@ -516,7 +516,14 @@ _AUDITREADY_MAX_CANDIDATES = 10
 _FULL_SNIPE_CAPITAL = {"full_snipe", "full_quality_allowed", "full", "snipe"}
 
 # Non-tradeable / non-candidate tiers.
-_NON_CANDIDATE_TIERS = {"SNIPE_IT", "PASS", "WAIT", "WATCHLIST", ""}
+#
+# WATCHLIST is intentionally NOT in this set. A WATCHLIST row whose
+# snipe_gate_audit is genuinely PROMOTION_READY with zero active blockers is
+# itself an audit contradiction (clean readiness sitting on the lowest tier)
+# and must be surfaced like any other under-promotion candidate, not hidden
+# behind a tier assumption. It passes through the identical strict gate below
+# as STARTER/NEAR_ENTRY — no loosened blockers, no special-cased interpret().
+_NON_CANDIDATE_TIERS = {"SNIPE_IT", "PASS", "WAIT", ""}
 
 # Benign, explicitly-non-blocking diagnostic text the 14K seal appends to a
 # genuinely clean PROMOTION_READY row. These must NOT count as active blockers.
@@ -704,8 +711,13 @@ def is_auditready_candidate(row: dict):
 
 
 def _candidate_priority(row: dict) -> str:
-    """NEAR_ENTRY with no blockers is more severe than STARTER."""
-    return "HIGH PRIORITY" if _row_final_tier(row) == "NEAR_ENTRY" else "PRIORITY"
+    """Audit-severity label only — never implies capital/trading permission."""
+    tier = _row_final_tier(row)
+    if tier == "WATCHLIST":
+        return "REVIEW PRIORITY"
+    if tier == "NEAR_ENTRY":
+        return "HIGH REVIEW PRIORITY"
+    return "PRIORITY"
 
 
 def _candidate_eff_score(row: dict) -> float:
@@ -789,11 +801,22 @@ def _render_candidate(idx: int, row: dict, why: list) -> str:
         f"{_fmt(htf.get('weekly_campaign_state'))} / {_fmt(htf.get('campaign_location_label'))} "
         f"({_fmt(htf.get('campaign_location_quality'))})" if htf else "—"
     )
-    review = (
-        "NEAR_ENTRY with a fully ready SNIPE audit and zero blockers — review for "
-        "promotion urgently." if tier == "NEAR_ENTRY"
-        else "STARTER with a fully ready SNIPE audit and zero blockers — review for promotion."
-    )
+    if tier == "WATCHLIST":
+        note_label = "Review note"
+        review = (
+            "WATCHLIST with clean PROMOTION_READY is an audit contradiction, not "
+            "capital permission. Review the scan_id with !audit before any "
+            "doctrine conclusion."
+        )
+    elif tier == "NEAR_ENTRY":
+        note_label = "Upgrade / review note"
+        review = (
+            "NEAR_ENTRY with a fully ready SNIPE audit and zero blockers — review "
+            "for promotion urgently."
+        )
+    else:
+        note_label = "Upgrade / review note"
+        review = "STARTER with a fully ready SNIPE audit and zero blockers — review for promotion."
     return "\n".join([
         f"**Candidate #{idx} — {_row_ticker(row)}**  [{priority}]",
         f"Scan ID: {_fmt(row.get('scan_id'))}",
@@ -808,7 +831,7 @@ def _render_candidate(idx: int, row: dict, why: list) -> str:
         f"HTF context: {htf_ctx}",
         "Conclusion: POSSIBLE_UNDER_PROMOTION",
         f"Why flagged: {' '.join(why)}",
-        f"Upgrade / review note: {review}",
+        f"{note_label}: {review}",
         f"Command: !audit {_fmt(row.get('scan_id'))}",
     ])
 
