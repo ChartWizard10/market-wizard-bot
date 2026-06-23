@@ -28,6 +28,7 @@ from src import higher_timeframe_context
 from src import one_hour_entry
 from src import prefilter as prefilter_mod
 from src import score_calibration
+from src import snipe_confirmed_seal
 from src import snipe_gate_audit
 from src import state_store
 from src import tiering
@@ -430,6 +431,29 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("SNIPE_GATE_AUDIT_ERROR: %s: %s", ticker, exc)
             tiering_result["snipe_gate_audit"] = snipe_gate_audit.error_snipe_gate_audit_object(str(exc))
+
+        # Step 6.595: SNIPE_CONFIRMED consistency seal (Phase 14M — TRUTH SEAL).
+        # Runs AFTER snipe_gate_audit so it can read the authoritative blocker
+        # evidence, and BEFORE rendering/routing/recording so a corrected tier
+        # cascades into wording (contract guard), channel routing, capital, dedup,
+        # and the persisted snapshot. It only ever DOWNGRADES a false SNIPE (a
+        # SNIPE_IT/full_quality_allowed/#snipe output whose own evidence still
+        # carries an active blocker); it never promotes and never deletes
+        # evidence. Guarded so a seal fault can never break a scan.
+        try:
+            tiering_result = snipe_confirmed_seal.seal_snipe_confirmed_consistency(
+                tiering_result, config
+            )
+            _seal = tiering_result.get("snipe_confirmed_seal") or {}
+            if _seal.get("applied"):
+                final_tier = tiering_result.get("final_tier", final_tier)
+                log.warning(
+                    "SNIPE_CONFIRMED_SEAL: %s %s→%s blockers=%s",
+                    ticker, _seal.get("original_tier"), _seal.get("corrected_tier"),
+                    "; ".join(_seal.get("blockers") or []),
+                )
+        except Exception as exc:
+            log.warning("SNIPE_CONFIRMED_SEAL_ERROR: %s: %s", ticker, exc)
 
         # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
         # capital_action, discord_channel, safe_for_alert, suppression, or dedup)

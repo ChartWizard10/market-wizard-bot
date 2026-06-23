@@ -50,6 +50,9 @@ CONCLUSIONS = {
     "CORRECT_NEAR_ENTRY", "NEEDS_MANUAL_REVIEW",
     # Phase 14K additions:
     "SNIPE_CONFIRMED", "INCONSISTENT_AUDIT_STATE",
+    # Phase 14M addition — a persisted SNIPE_IT row whose own evidence still
+    # carries active blockers is a false SNIPE confirmation, never a clean one.
+    "INCONSISTENT_SNIPE_CONFIRMED",
 }
 
 _CONFIRMED_TOKENS = {"confirmed", "hold_confirmed", "retest_confirmed", "true", "yes", "pass"}
@@ -222,8 +225,9 @@ def interpret(row: dict) -> dict:
     promotion_state = sga.get("promotion_state")
     blocked = _nonempty_list(sga.get("blocked_gate_names")) or _nonempty_list(sga.get("blocked_gates"))
     missing = _nonempty_list(sga.get("missing_proofs"))
+    score_blocked = _nonempty_list(sga.get("score_blocked_by"))
     htf_blocks = htf.get("blocks_snipe_contextually") is True
-    has_real_blockers = bool(blocked or missing) or htf_blocks
+    has_real_blockers = bool(blocked or missing or score_blocked) or htf_blocks
 
     retest_ok = _is_confirmed(row.get("retest_status"))
     hold_ok = _is_confirmed(row.get("hold_status"))
@@ -243,7 +247,19 @@ def interpret(row: dict) -> dict:
 
     # Primary label.
     if tier == "SNIPE_IT":
-        label = "SNIPE_CONFIRMED"
+        # Phase 14M: a SNIPE_IT row is only a CLEAN confirmation when no active
+        # blocker, missing proof, blocked score, or HTF contextual block
+        # remains. Otherwise it is a false SNIPE confirmation (the live FORM
+        # contradiction) — surfaced, never read as clean.
+        if has_real_blockers:
+            label = "INCONSISTENT_SNIPE_CONFIRMED"
+            notes.insert(
+                0,
+                "tier is SNIPE_IT but active SNIPE blockers/missing proofs remain; "
+                "not a clean SNIPE confirmation.",
+            )
+        else:
+            label = "SNIPE_CONFIRMED"
     elif promotion_state == "PROMOTION_READY" and not has_real_blockers:
         label = "POSSIBLE_UNDER_PROMOTION"
         notes.insert(0, "snipe_gate_audit.promotion_state == PROMOTION_READY but tier is not SNIPE_IT.")
@@ -744,7 +760,8 @@ def _rank_candidates(candidates: list) -> list:
 def _empty_counts() -> dict:
     return {
         "SNIPE_CONFIRMED": 0, "CORRECT_STARTER": 0, "CORRECT_NEAR_ENTRY": 0,
-        "INCONSISTENT_AUDIT_STATE": 0, "POSSIBLE_UNDER_PROMOTION": 0,
+        "INCONSISTENT_AUDIT_STATE": 0, "INCONSISTENT_SNIPE_CONFIRMED": 0,
+        "POSSIBLE_UNDER_PROMOTION": 0,
         "CORRECTLY_BLOCKED": 0, "NEEDS_MANUAL_REVIEW": 0,
     }
 
