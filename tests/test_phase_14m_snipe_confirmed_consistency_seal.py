@@ -131,7 +131,7 @@ def test_blocked_gate_downgrades_and_interprets_inconsistent():
     assert any("LIVE_EDGE_SAFE" in r for r in reasons)
     seal.seal_snipe_confirmed_consistency(tr, {})
     assert tr["final_tier"] != "SNIPE_IT"
-    assert tr["snipe_confirmed_seal"]["seal_label"] == "INCONSISTENT_SNIPE_CONFIRMED"
+    assert tr["snipe_confirmed_seal"]["seal_label"] == "SNIPE_CONFIRMATION_BLOCKED"
     # interpret() on the equivalent persisted row (still tier SNIPE_IT):
     assert audit_access.interpret(_row(audit=audit))["label"] == "INCONSISTENT_SNIPE_CONFIRMED"
 
@@ -272,7 +272,10 @@ def test_form_regression_full():
     assert "snipe" not in str(tr["final_discord_channel"]).lower()
     # Diagnostic explains the contradiction.
     assert "SNIPE confirmation blocked" in tr["snipe_confirmed_seal"]["diagnostic"]
-    assert tr["snipe_gate_audit"]["audit_label"] == "INCONSISTENT_SNIPE_CONFIRMED"
+    assert tr["snipe_gate_audit"]["audit_label"] == "SNIPE_CONFIRMATION_BLOCKED"
+    assert tr["snipe_gate_audit"]["promotion_state"] != "ALREADY_SNIPE"
+    assert tr["snipe_confirmed_seal"]["sealed_tier"] == tr["final_tier"]
+    assert tr["snipe_confirmed_seal"]["sealed_by_phase"] == "14M"
     # Raw evidence preserved.
     assert tr["snipe_gate_audit"]["raw_snipe_score"] == 84
     assert tr["snipe_gate_audit"]["blocked_gate_names"] == ["LIVE_EDGE_SAFE"]
@@ -459,6 +462,9 @@ def test_end_to_end_seal_record_audit():
     row = state["tickers"]["FORM"]["alert_history"][-1]
     # The recorded row is no longer a clean SNIPE; audit_access exposes the truth.
     assert row["tier"] != "SNIPE_IT"
-    assert row["snipe_gate_audit"]["audit_label"] == "INCONSISTENT_SNIPE_CONFIRMED"
+    assert row["snipe_gate_audit"]["audit_label"] == "SNIPE_CONFIRMATION_BLOCKED"
+    assert row["snipe_gate_audit"]["promotion_state"] != "ALREADY_SNIPE"
+    assert row["snipe_confirmed_seal"]["applied"] is True
+    assert row["snipe_confirmed_seal"]["sealed_tier"] == row["tier"]
     # The compact snapshot must remain strictly JSON-safe.
     json.dumps(row, allow_nan=False)

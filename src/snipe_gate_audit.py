@@ -24,9 +24,12 @@ STATUS_VALUES = {"ENABLED", "DISABLED", "DEGRADED", "ERROR"}
 AUDIT_LABELS = {
     "SNIPE_CONFIRMED", "STARTER_ONLY_VALID", "NEAR_ENTRY_PENDING",
     "WATCH_ONLY_BLOCKED", "DISQUALIFIED", "INSUFFICIENT_CONTEXT",
-    # Phase 14M — applied only by the SNIPE_CONFIRMED consistency seal when a
-    # false SNIPE is detected and downgraded (never emitted by _build itself).
+    # Phase 14M (superseded by 14M.1) — kept so any already-persisted legacy
+    # row still validates against this set. Never emitted by _build itself.
     "INCONSISTENT_SNIPE_CONFIRMED",
+    # Phase 14M.1 — applied only by the SNIPE_CONFIRMED consistency seal when a
+    # false SNIPE is detected and sealed down (never emitted by _build itself).
+    "SNIPE_CONFIRMATION_BLOCKED",
 }
 PROMOTION_STATES = {
     "ALREADY_SNIPE", "PROMOTION_READY", "PROMOTION_PENDING",

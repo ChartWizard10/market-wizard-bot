@@ -50,8 +50,11 @@ CONCLUSIONS = {
     "CORRECT_NEAR_ENTRY", "NEEDS_MANUAL_REVIEW",
     # Phase 14K additions:
     "SNIPE_CONFIRMED", "INCONSISTENT_AUDIT_STATE",
-    # Phase 14M addition — a persisted SNIPE_IT row whose own evidence still
-    # carries active blockers is a false SNIPE confirmation, never a clean one.
+    # Phase 14M addition — a LEGACY/historical persisted SNIPE_IT row (no Phase
+    # 14M.1 snipe_confirmed_seal marker) whose own evidence still carries
+    # active blockers is a false SNIPE confirmation, never a clean one. A
+    # post-14M sealed row never reaches this label (see sealed_applied above);
+    # it resolves to CORRECT_NEAR_ENTRY/CORRECT_STARTER instead.
     "INCONSISTENT_SNIPE_CONFIRMED",
 }
 
@@ -221,6 +224,8 @@ def interpret(row: dict) -> dict:
     tier = row.get("tier")
     sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
     htf = row.get("higher_timeframe_context") if isinstance(row.get("higher_timeframe_context"), dict) else {}
+    seal = row.get("snipe_confirmed_seal") if isinstance(row.get("snipe_confirmed_seal"), dict) else {}
+    sealed_applied = seal.get("applied") is True
 
     promotion_state = sga.get("promotion_state")
     blocked = _nonempty_list(sga.get("blocked_gate_names")) or _nonempty_list(sga.get("blocked_gates"))
@@ -246,7 +251,18 @@ def interpret(row: dict) -> dict:
         )
 
     # Primary label.
-    if tier == "SNIPE_IT":
+    if sealed_applied and tier in ("NEAR_ENTRY", "STARTER"):
+        # Phase 14M.1: a row the Phase 14M seal already downgraded out of
+        # SNIPE_IT carries its own seal marker. It is never re-read as
+        # ALREADY_SNIPE, INCONSISTENT_SNIPE_CONFIRMED, or an under-promotion
+        # candidate — it is the corrected tier truth, sealed down on purpose.
+        label = "CORRECT_NEAR_ENTRY" if tier == "NEAR_ENTRY" else "CORRECT_STARTER"
+        notes.insert(
+            0,
+            f"SNIPE confirmation was blocked; final tier was sealed down to {tier} "
+            "(Phase 14M seal) — candidate had SNIPE-shaped structure, not a clean SNIPE.",
+        )
+    elif tier == "SNIPE_IT":
         # Phase 14M: a SNIPE_IT row is only a CLEAN confirmation when no active
         # blocker, missing proof, blocked score, or HTF contextual block
         # remains. Otherwise it is a false SNIPE confirmation (the live FORM
@@ -695,10 +711,16 @@ def is_auditready_candidate(row: dict):
     candidate, reasons holds the explicit "why flagged" justification.
     """
     sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else None
+    seal = row.get("snipe_confirmed_seal") if isinstance(row.get("snipe_confirmed_seal"), dict) else None
     final_tier = _row_final_tier(row)
     capital = str(row.get("capital_action") or "").lower().strip()
 
     fails = []
+    if isinstance(seal, dict) and seal.get("applied") is True:
+        # Phase 14M.1: a row the Phase 14M seal sealed down out of SNIPE_IT is
+        # never a "possible under-promotion" — it was already corrected, on
+        # purpose, for a documented reason.
+        fails.append("snipe_confirmed_seal.applied is true (Phase 14M sealed-down row)")
     if final_tier in _NON_CANDIDATE_TIERS:
         fails.append(f"tier {final_tier or 'unknown'} is not an under-promotion candidate")
     if capital in _FULL_SNIPE_CAPITAL:

@@ -269,10 +269,17 @@ def _corrected_tier(obj, reasons) -> str:
 # Pipeline seal (mutates the tiering_result in place; only ever downgrades)
 # ---------------------------------------------------------------------------
 
-_SEAL_DIAGNOSTIC = (
-    "SNIPE confirmation blocked: active SNIPE blockers remain despite prior SNIPE tier."
-)
-_SEAL_LABEL = "INCONSISTENT_SNIPE_CONFIRMED"
+_SEAL_LABEL = "SNIPE_CONFIRMATION_BLOCKED"
+_SEAL_PROMOTION_STATE = "PROMOTION_BLOCKED"
+_SEAL_REASON = "active SNIPE confirmation blocker remained"
+_SEAL_PHASE = "14M"
+
+
+def _seal_diagnostic(corrected: str) -> str:
+    return (
+        f"SNIPE confirmation blocked; final tier sealed to {corrected} "
+        "because unresolved proof remains."
+    )
 
 
 def is_snipe_confirmation_output(tiering_result) -> bool:
@@ -361,25 +368,33 @@ def _apply_downgrade(tiering_result, corrected, reasons, original_tier) -> None:
     )
     tiering_result["downgrades"] = downgrades
 
+    diagnostic = _seal_diagnostic(corrected)
     tiering_result["snipe_confirmed_seal"] = {
         "applied": True,
         "original_tier": original_tier,
+        # Phase 14M.1 spec-shaped keys:
+        "sealed_tier": corrected,
+        "reason": _SEAL_REASON,
+        "active_blockers": list(reasons),
+        "sealed_by_phase": _SEAL_PHASE,
+        # Legacy 14M keys (kept for scheduler.py logging + existing callers):
         "corrected_tier": corrected,
         "blockers": list(reasons),
         "seal_label": _SEAL_LABEL,
-        "diagnostic": _SEAL_DIAGNOSTIC,
+        "diagnostic": diagnostic,
     }
 
     # Reflect the contradiction in the persisted audit organ so the recorded
-    # snapshot can never read as a clean SNIPE_CONFIRMED. Raw evidence
-    # (blocked_gates, missing_proofs, score_blocked_by, raw_snipe_score,
+    # snapshot can never read as a clean SNIPE_CONFIRMED or ALREADY_SNIPE. Raw
+    # evidence (blocked_gates, missing_proofs, score_blocked_by, raw_snipe_score,
     # snipe_score, snipe_grade) is left untouched.
     sga = tiering_result.get("snipe_gate_audit")
     if isinstance(sga, dict):
         sga["audit_label"] = _SEAL_LABEL
-        sga["diagnostic_sentence"] = _SEAL_DIAGNOSTIC
+        sga["promotion_state"] = _SEAL_PROMOTION_STATE
+        sga["diagnostic_sentence"] = diagnostic
         br = sga.get("blocking_reasons")
         if isinstance(br, list):
-            br.insert(0, _SEAL_DIAGNOSTIC)
+            br.insert(0, diagnostic)
         else:
-            sga["blocking_reasons"] = [_SEAL_DIAGNOSTIC]
+            sga["blocking_reasons"] = [diagnostic]
