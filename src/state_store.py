@@ -486,6 +486,32 @@ def _compact_snipe_gate_audit_snapshot(audit):
         return _degraded_snipe_snapshot("extraction error")
 
 
+def _compact_snipe_confirmed_seal_snapshot(seal):
+    """Phase 14M.1 — compact, strictly JSON-safe snapshot of the Phase 14M
+    snipe_confirmed_seal marker (safe under json.dumps(..., allow_nan=False)).
+
+    None when the seal never applied (the common case — no false SNIPE was
+    detected) or the source is malformed. Never raises, never mutates the
+    source object, never persists the full reasons/blockers verbosity beyond a
+    flat string list (no large nested objects).
+    """
+    if not isinstance(seal, dict) or seal.get("applied") is not True:
+        return None
+    try:
+        sealed_tier = seal.get("sealed_tier") or seal.get("corrected_tier")
+        return {
+            "applied": True,
+            "original_tier": _json_safe_scalar(seal.get("original_tier")),
+            "sealed_tier": _json_safe_scalar(sealed_tier),
+            "reason": _json_safe_scalar(seal.get("reason")) or "active SNIPE confirmation blocker remained",
+            "active_blockers": _json_safe_string_list(seal.get("active_blockers") or seal.get("blockers")),
+            "sealed_by_phase": _json_safe_scalar(seal.get("sealed_by_phase")) or "14M",
+        }
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        log.warning("SNIPE_CONFIRMED_SEAL_SNAPSHOT_ERROR: %s", exc)
+        return None
+
+
 def _higher_timeframe_history_snapshot(tiering_result, config):
     """Compact, JSON-safe Phase 14I snapshot for alert_history. Gated on config
     higher_timeframe_context.persist_history_snapshot (default True). Never raises
@@ -593,6 +619,14 @@ def record_alert(
         # grading fields only (never the full 14I object). JSON-safe (allow_nan=False).
         "higher_timeframe_context":          _higher_timeframe_history_snapshot(
             tiering_result, config
+        ),
+
+        # ---- Phase 14M.1: compact Phase 14M consistency-seal marker ----
+        # None when the seal never applied (the common case). When applied,
+        # a small flat record of the downgrade reason/blockers — never the
+        # full reasons verbosity, never a trading-decision field re-grant.
+        "snipe_confirmed_seal":              _compact_snipe_confirmed_seal_snapshot(
+            tiering_result.get("snipe_confirmed_seal")
         ),
     })
     if len(history) > max_entries:
