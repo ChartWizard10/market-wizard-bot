@@ -203,8 +203,8 @@ def test_full_universe_loads_correctly():
     """Validate the actual config/tickers.txt against expected counts."""
     result = load_tickers("config/tickers.txt")
     s = result["validation_summary"]
-    assert s["valid_ticker_count"] == 812, (
-        f"Expected 812 tickers, got {s['valid_ticker_count']}"
+    assert s["valid_ticker_count"] == 813, (
+        f"Expected 813 tickers, got {s['valid_ticker_count']}"
     )
     assert s["duplicate_count"] == 0, (
         f"Expected 0 duplicates, got {s['duplicate_count']}"
@@ -218,3 +218,13 @@ def test_full_universe_loads_correctly():
     assert s["last_10_tickers"] == [
         "XPO", "XPOF", "XYL", "YORW", "YUM", "ZBH", "ZBRA", "ZION", "ZS", "ZWS"
     ]
+
+
+def test_dram_present_in_universe():
+    """DRAM must be present exactly once in the loaded universe (Phase 14N)."""
+    result = load_tickers("config/tickers.txt")
+    tickers = result["tickers"]
+    assert "DRAM" in tickers, "DRAM must be in the loaded universe"
+    assert tickers.count("DRAM") == 1, "DRAM must appear exactly once"
+    # Alphabetical placement between DPZ and DRI
+    assert tickers.index("DPZ") < tickers.index("DRAM") < tickers.index("DRI")
