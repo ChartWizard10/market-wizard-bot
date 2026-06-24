@@ -22,12 +22,14 @@ FIELD_MAP honesty (verified against src/state_store.record_alert):
     NOT a global flat list).
   - A row uses keys `tier` (not final_tier), `alerted_at` (not timestamp),
     `final_discord_channel` (not signal_channel).
-  - The FULL one_hour_entry and timeframe_alignment objects are NOT persisted in
-    alert_history. Only `retest_status`/`hold_status` survive as 1H proxies; the
-    14F timeframe_alignment object is not persisted at all. Those sub-fields are
-    reported as "not persisted in alert_history" rather than invented.
-  - Persisted evidence snapshots: `snipe_gate_audit` (Phase 14H.1 compact) and
-    `higher_timeframe_context` (Phase 14I compact).
+  - Persisted evidence snapshots: `snipe_gate_audit` (Phase 14H.1 compact),
+    `higher_timeframe_context` (Phase 14I compact), `one_hour_entry` and
+    `timeframe_alignment` (Phase 14O compact). The legacy `retest_status`/
+    `hold_status` proxies (sourced from final_signal, not one_hour_entry)
+    are preserved unchanged alongside the new evidence.
+  - Historical rows persisted before Phase 14O lack `one_hour_entry`/
+    `timeframe_alignment` entirely; those rows are reported as "not persisted
+    on this historical row" rather than invented.
 """
 
 import json
@@ -309,6 +311,8 @@ def _mentions_candle(items) -> bool:
 # ---------------------------------------------------------------------------
 
 _NOT_PERSISTED = "n/a (not persisted in alert_history)"
+_NOT_PERSISTED_ROW = "n/a (not persisted on this historical row)"
+_TFA_NOT_PERSISTED_ROW = "Phase 14F timeframe_alignment object is not persisted on this historical row."
 
 
 def _fmt(value) -> str:
@@ -349,6 +353,70 @@ def _score_label_suffix(sga: dict) -> str:
     return f" (raw {raw} pre-block — score blocked by {', '.join(blocked_by)})"
 
 
+def _format_one_hour_entry_lines(row: dict) -> list:
+    oh = row.get("one_hour_entry") if isinstance(row.get("one_hour_entry"), dict) else None
+    if oh is None:
+        return [
+            "__1H ENTRY__ (proxy fields only — full one_hour_entry object is not persisted)",
+            f"Status: {_NOT_PERSISTED_ROW}",
+            f"Score: {_NOT_PERSISTED_ROW}",
+            f"Retest: {_fmt(row.get('retest_status'))}",
+            f"Hold: {_fmt(row.get('hold_status'))}",
+            f"Candle: {_NOT_PERSISTED_ROW}",
+            f"Location: {_NOT_PERSISTED_ROW}",
+        ]
+    loc = oh.get("location_realism") if isinstance(oh.get("location_realism"), dict) else {}
+    candle = oh.get("candle_truth") if isinstance(oh.get("candle_truth"), dict) else {}
+    prh = oh.get("pullback_retest_hold") if isinstance(oh.get("pullback_retest_hold"), dict) else {}
+    inval = oh.get("invalidation") if isinstance(oh.get("invalidation"), dict) else {}
+    path = oh.get("path_quality") if isinstance(oh.get("path_quality"), dict) else {}
+    return [
+        "__1H ENTRY__",
+        f"Status: {_fmt(oh.get('status'))}",
+        f"Data freshness: {_fmt(oh.get('data_freshness'))}",
+        f"Trigger state: {_fmt(oh.get('trigger_state'))}",
+        f"Score: {_fmt(oh.get('score'))} ({_fmt(oh.get('score_label'))})",
+        f"Retest: {_fmt(row.get('retest_status'))}",
+        f"Hold: {_fmt(row.get('hold_status'))}",
+        f"Retest truth: {_fmt(prh.get('retest_truth'))}",
+        f"Hold truth: {_fmt(prh.get('hold_truth'))}",
+        f"Location: {_fmt(loc.get('label'))}",
+        f"Candle: {_fmt(candle.get('event_type'))} (closed confirms: {_fmt(candle.get('closed_candle_confirms'))})",
+        f"Invalidation clear: {_fmt(inval.get('clear'))}",
+        f"Path label: {_fmt(path.get('path_label'))}",
+        f"Hard caps applied: {_fmt(oh.get('hard_caps_applied'))}",
+        f"Downgrade reasons: {_fmt(oh.get('downgrade_reasons'))}",
+        f"Alert truth label: {_fmt(oh.get('alert_truth_label'))}",
+        f"Diagnostic: {_fmt(oh.get('scanner_sentence'))}",
+    ]
+
+
+def _format_timeframe_alignment_lines(row: dict) -> list:
+    tfa = row.get("timeframe_alignment") if isinstance(row.get("timeframe_alignment"), dict) else None
+    if tfa is None:
+        return [
+            "__TIMEFRAME ALIGNMENT__",
+            f"  ({_TFA_NOT_PERSISTED_ROW})",
+        ]
+    campaign = tfa.get("campaign_timeframe") if isinstance(tfa.get("campaign_timeframe"), dict) else {}
+    swing = tfa.get("swing_timeframe") if isinstance(tfa.get("swing_timeframe"), dict) else {}
+    operational = tfa.get("operational_timeframe") if isinstance(tfa.get("operational_timeframe"), dict) else {}
+    trigger = tfa.get("trigger_timeframe") if isinstance(tfa.get("trigger_timeframe"), dict) else {}
+    return [
+        "__TIMEFRAME ALIGNMENT__",
+        f"Status: {_fmt(tfa.get('status'))}",
+        f"Alignment grade / score: {_fmt(tfa.get('alignment_grade'))} / {_fmt(tfa.get('alignment_score'))}",
+        f"Alignment label: {_fmt(tfa.get('alignment_label'))}",
+        f"Campaign (1W) state: {_fmt(campaign.get('state'))}",
+        f"Swing (1D) permission: {_fmt(swing.get('state'))}",
+        f"Operational (4H) location: {_fmt(operational.get('state'))}",
+        f"Trigger (1H) proof: {_fmt(trigger.get('state'))}",
+        f"Conflicts: {_fmt(tfa.get('conflicts'))}",
+        f"Missing context: {_fmt(tfa.get('missing_context'))}",
+        f"Diagnostic: {_fmt(tfa.get('scanner_sentence'))}",
+    ]
+
+
 def format_row(row: dict) -> str:
     """Render one alert_history row as compact, sectioned audit text."""
     sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
@@ -367,16 +435,9 @@ def format_row(row: dict) -> str:
         f"Score: {_fmt(row.get('score'))}",
         f"Signal channel: {_fmt(row.get('final_discord_channel'))}",
         "",
-        "__1H ENTRY__ (proxy fields only — full one_hour_entry object is not persisted)",
-        f"Status: {_NOT_PERSISTED}",
-        f"Score: {_NOT_PERSISTED}",
-        f"Retest: {_fmt(row.get('retest_status'))}",
-        f"Hold: {_fmt(row.get('hold_status'))}",
-        f"Candle: {_NOT_PERSISTED}",
-        f"Location: {_NOT_PERSISTED}",
+        *_format_one_hour_entry_lines(row),
         "",
-        "__TIMEFRAME ALIGNMENT__",
-        "  (Phase 14F timeframe_alignment object is not persisted in alert_history — live tiering_result only)",
+        *_format_timeframe_alignment_lines(row),
         "",
         "__SNIPE GATE AUDIT__",
         f"Audit label: {_fmt(sga.get('audit_label'))}",
@@ -415,6 +476,8 @@ def compact_json(row: dict) -> dict:
     """Sanitized compact JSON view (whitelist only — never raw state/secrets)."""
     sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else None
     htf = row.get("higher_timeframe_context") if isinstance(row.get("higher_timeframe_context"), dict) else None
+    oh = row.get("one_hour_entry") if isinstance(row.get("one_hour_entry"), dict) else None
+    tfa = row.get("timeframe_alignment") if isinstance(row.get("timeframe_alignment"), dict) else None
     verdict = interpret(row)
     return {
         "ticker": row.get("ticker"),
@@ -428,6 +491,8 @@ def compact_json(row: dict) -> dict:
         "hold_status": row.get("hold_status"),
         "snipe_gate_audit": sga,
         "higher_timeframe_context": htf,
+        "one_hour_entry": oh,
+        "timeframe_alignment": tfa,
         "conclusion": verdict["label"],
         "conclusion_notes": verdict["notes"],
     }
