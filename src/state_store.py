@@ -527,6 +527,240 @@ def _higher_timeframe_history_snapshot(tiering_result, config):
         return None
 
 
+# ---------------------------------------------------------------------------
+# Phase 14O: compact one_hour_entry / timeframe_alignment evidence snapshots.
+#
+# Black-box recorder: persists the deterministic 1H-entry and multi-timeframe
+# alignment evidence objects the scanner actually built at scan time, so a
+# post-hoc audit can inspect what the scanner saw. Never re-derives the
+# evidence, never mutates the source, never raises, never affects tiering,
+# capital, routing, or alert wording — display/audit only, same as the 14H/14I
+# snapshots above. Only real fields that exist on the source objects are
+# persisted (see src/one_hour_entry.py / src/timeframe_alignment.py schemas).
+# ---------------------------------------------------------------------------
+
+def _degraded_one_hour_entry_snapshot(note: str) -> dict:
+    return {
+        "enabled": None,
+        "status": None,
+        "data_freshness": None,
+        "bar_context": None,
+        "trigger_state": None,
+        "location_realism": None,
+        "candle_truth": None,
+        "pullback_retest_hold": None,
+        "invalidation": None,
+        "path_quality": None,
+        "score": None,
+        "score_label": None,
+        "hard_caps_applied": [],
+        "downgrade_reasons": [f"one_hour_entry snapshot degraded: {note}"],
+        "alert_truth_label": None,
+        "scanner_sentence": None,
+    }
+
+
+def _compact_one_hour_bar_context(bar_context):
+    if not isinstance(bar_context, dict):
+        return None
+    return {
+        "last_closed_bar_time": _json_safe_scalar(bar_context.get("last_closed_bar_time")),
+        "current_live_bar_time": _json_safe_scalar(bar_context.get("current_live_bar_time")),
+        "closed_bar_available": _json_safe_bool_or_none(bar_context.get("closed_bar_available")),
+        "live_bar_available": _json_safe_bool_or_none(bar_context.get("live_bar_available")),
+        "using_live_bar_for_confirmation": _json_safe_bool_or_none(
+            bar_context.get("using_live_bar_for_confirmation")
+        ),
+    }
+
+
+def _compact_one_hour_location_realism(location):
+    if not isinstance(location, dict):
+        return None
+    return {
+        "label": _json_safe_scalar(location.get("label")),
+        "reason": _json_safe_scalar(location.get("reason")),
+        "distance_to_trigger_pct": _json_safe_number(location.get("distance_to_trigger_pct")),
+        "distance_to_invalidation_pct": _json_safe_number(location.get("distance_to_invalidation_pct")),
+        "distance_to_overhead_pct": _json_safe_number(location.get("distance_to_overhead_pct")),
+    }
+
+
+def _compact_one_hour_candle_truth(candle_truth):
+    if not isinstance(candle_truth, dict):
+        return None
+    return {
+        "event_type": _json_safe_scalar(candle_truth.get("event_type")),
+        "closed_candle_confirms": _json_safe_bool_or_none(candle_truth.get("closed_candle_confirms")),
+        "live_candle_constructive": _json_safe_bool_or_none(candle_truth.get("live_candle_constructive")),
+        "body_acceptance": _json_safe_bool_or_none(candle_truth.get("body_acceptance")),
+        "wick_rejection": _json_safe_bool_or_none(candle_truth.get("wick_rejection")),
+        "follow_through_present": _json_safe_bool_or_none(candle_truth.get("follow_through_present")),
+        "volume_support": _json_safe_scalar(candle_truth.get("volume_support")),
+    }
+
+
+def _compact_one_hour_pullback_retest_hold(prh):
+    if not isinstance(prh, dict):
+        return None
+    return {
+        "pullback_truth": _json_safe_scalar(prh.get("pullback_truth")),
+        "retest_truth": _json_safe_scalar(prh.get("retest_truth")),
+        "hold_truth": _json_safe_scalar(prh.get("hold_truth")),
+        "retest_zone_type": _json_safe_scalar(prh.get("retest_zone_type")),
+    }
+
+
+def _compact_one_hour_invalidation(invalidation):
+    if not isinstance(invalidation, dict):
+        return None
+    return {
+        "clear": _json_safe_bool_or_none(invalidation.get("clear")),
+        "level": _json_safe_level(invalidation.get("level")),
+        "condition": _json_safe_scalar(invalidation.get("condition")),
+        "invalidation_distance_pct": _json_safe_number(invalidation.get("invalidation_distance_pct")),
+    }
+
+
+def _compact_one_hour_path_quality(path_quality):
+    if not isinstance(path_quality, dict):
+        return None
+    return {
+        "overhead_clear_enough": _json_safe_bool_or_none(path_quality.get("overhead_clear_enough")),
+        "nearest_resistance": _json_safe_level(path_quality.get("nearest_resistance")),
+        "rr_estimate": _json_safe_number(path_quality.get("rr_estimate")),
+        "path_label": _json_safe_scalar(path_quality.get("path_label")),
+    }
+
+
+def _compact_one_hour_entry_snapshot(one_hour_entry):
+    """Return a compact, strictly JSON-safe evidence snapshot of a Phase 14N
+    one_hour_entry object (safe under json.dumps(..., allow_nan=False)).
+
+    None when one_hour_entry is missing; a degraded snapshot when it is
+    malformed or extraction fails. Never raises and never mutates the source
+    object. Only real one_hour_entry.py fields are persisted.
+    """
+    if one_hour_entry is None:
+        return None
+    if not isinstance(one_hour_entry, dict):
+        return _degraded_one_hour_entry_snapshot("malformed source")
+    try:
+        return {
+            "enabled": _json_safe_bool_or_none(one_hour_entry.get("enabled")),
+            "status": _json_safe_scalar(one_hour_entry.get("status")),
+            "data_freshness": _json_safe_scalar(one_hour_entry.get("data_freshness")),
+            "bar_context": _compact_one_hour_bar_context(one_hour_entry.get("bar_context")),
+            "trigger_state": _json_safe_scalar(one_hour_entry.get("trigger_state")),
+            "location_realism": _compact_one_hour_location_realism(
+                one_hour_entry.get("location_realism")
+            ),
+            "candle_truth": _compact_one_hour_candle_truth(one_hour_entry.get("candle_truth")),
+            "pullback_retest_hold": _compact_one_hour_pullback_retest_hold(
+                one_hour_entry.get("pullback_retest_hold")
+            ),
+            "invalidation": _compact_one_hour_invalidation(one_hour_entry.get("invalidation")),
+            "path_quality": _compact_one_hour_path_quality(one_hour_entry.get("path_quality")),
+            "score": _json_safe_number(one_hour_entry.get("score")),
+            "score_label": _json_safe_scalar(one_hour_entry.get("score_label")),
+            "hard_caps_applied": _json_safe_string_list(one_hour_entry.get("hard_caps_applied")),
+            "downgrade_reasons": _json_safe_string_list(one_hour_entry.get("downgrade_reasons")),
+            "alert_truth_label": _json_safe_scalar(one_hour_entry.get("alert_truth_label")),
+            "scanner_sentence": _json_safe_scalar(one_hour_entry.get("scanner_sentence")),
+        }
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        log.warning("ONE_HOUR_ENTRY_SNAPSHOT_ERROR: %s", exc)
+        return _degraded_one_hour_entry_snapshot("extraction error")
+
+
+def _degraded_timeframe_alignment_snapshot(note: str) -> dict:
+    return {
+        "enabled": None,
+        "status": None,
+        "alignment_grade": None,
+        "alignment_score": None,
+        "alignment_label": None,
+        "campaign_timeframe": None,
+        "swing_timeframe": None,
+        "operational_timeframe": None,
+        "trigger_timeframe": None,
+        "conflicts": [],
+        "missing_context": [],
+        "hard_caps_applied": [],
+        "downgrade_reasons": [f"timeframe_alignment snapshot degraded: {note}"],
+        "scanner_sentence": None,
+    }
+
+
+def _compact_timeframe_alignment_layer(layer):
+    if not isinstance(layer, dict):
+        return None
+    return {
+        "timeframe": _json_safe_scalar(layer.get("timeframe")),
+        "role": _json_safe_scalar(layer.get("role")),
+        "state": _json_safe_scalar(layer.get("state")),
+        "evidence": _json_safe_string_list(layer.get("evidence")),
+        "warnings": _json_safe_string_list(layer.get("warnings")),
+        "blocks_trigger": _json_safe_bool_or_none(layer.get("blocks_trigger")),
+    }
+
+
+def _compact_timeframe_alignment_conflicts(conflicts):
+    out = []
+    if not isinstance(conflicts, list):
+        return out
+    for item in conflicts:
+        if isinstance(item, dict):
+            layer = _json_safe_scalar(item.get("layer"))
+            reason = _json_safe_scalar(item.get("reason"))
+            if layer or reason:
+                out.append({"layer": layer, "reason": reason})
+        # skip malformed entries
+    return out
+
+
+def _compact_timeframe_alignment_snapshot(timeframe_alignment):
+    """Return a compact, strictly JSON-safe evidence snapshot of a Phase 14F
+    timeframe_alignment object (safe under json.dumps(..., allow_nan=False)).
+
+    None when timeframe_alignment is missing; a degraded snapshot when it is
+    malformed or extraction fails. Never raises and never mutates the source
+    object. Only real timeframe_alignment.py fields are persisted.
+    """
+    if timeframe_alignment is None:
+        return None
+    if not isinstance(timeframe_alignment, dict):
+        return _degraded_timeframe_alignment_snapshot("malformed source")
+    try:
+        return {
+            "enabled": _json_safe_bool_or_none(timeframe_alignment.get("enabled")),
+            "status": _json_safe_scalar(timeframe_alignment.get("status")),
+            "alignment_grade": _json_safe_scalar(timeframe_alignment.get("alignment_grade")),
+            "alignment_score": _json_safe_number(timeframe_alignment.get("alignment_score")),
+            "alignment_label": _json_safe_scalar(timeframe_alignment.get("alignment_label")),
+            "campaign_timeframe": _compact_timeframe_alignment_layer(
+                timeframe_alignment.get("campaign_timeframe")
+            ),
+            "swing_timeframe": _compact_timeframe_alignment_layer(
+                timeframe_alignment.get("swing_timeframe")
+            ),
+            "operational_timeframe": _compact_timeframe_alignment_layer(
+                timeframe_alignment.get("operational_timeframe")
+            ),
+            "trigger_timeframe": _compact_timeframe_alignment_layer(
+                timeframe_alignment.get("trigger_timeframe")
+            ),
+            "conflicts": _compact_timeframe_alignment_conflicts(timeframe_alignment.get("conflicts")),
+            "missing_context": _json_safe_string_list(timeframe_alignment.get("missing_context")),
+            "hard_caps_applied": _json_safe_string_list(timeframe_alignment.get("hard_caps_applied")),
+            "downgrade_reasons": _json_safe_string_list(timeframe_alignment.get("downgrade_reasons")),
+            "scanner_sentence": _json_safe_scalar(timeframe_alignment.get("scanner_sentence")),
+        }
+    except Exception as exc:  # pragma: no cover - defensive catch-all
+        log.warning("TIMEFRAME_ALIGNMENT_SNAPSHOT_ERROR: %s", exc)
+        return _degraded_timeframe_alignment_snapshot("extraction error")
+
+
 def record_alert(
     ticker: str,
     tiering_result: dict,
@@ -627,6 +861,16 @@ def record_alert(
         # full reasons verbosity, never a trading-decision field re-grant.
         "snipe_confirmed_seal":              _compact_snipe_confirmed_seal_snapshot(
             tiering_result.get("snipe_confirmed_seal")
+        ),
+
+        # ---- Phase 14O: compact 1H entry + timeframe alignment evidence ----
+        # None when missing; degraded snapshot when malformed. Evidence/display
+        # only — never re-derived, never influences tiering_result truth above.
+        "one_hour_entry":                    _compact_one_hour_entry_snapshot(
+            tiering_result.get("one_hour_entry")
+        ),
+        "timeframe_alignment":               _compact_timeframe_alignment_snapshot(
+            tiering_result.get("timeframe_alignment")
         ),
     })
     if len(history) > max_entries:
