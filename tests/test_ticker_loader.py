@@ -203,8 +203,8 @@ def test_full_universe_loads_correctly():
     """Validate the actual config/tickers.txt against expected counts."""
     result = load_tickers("config/tickers.txt")
     s = result["validation_summary"]
-    assert s["valid_ticker_count"] == 813, (
-        f"Expected 813 tickers, got {s['valid_ticker_count']}"
+    assert s["valid_ticker_count"] == 814, (
+        f"Expected 814 tickers, got {s['valid_ticker_count']}"
     )
     assert s["duplicate_count"] == 0, (
         f"Expected 0 duplicates, got {s['duplicate_count']}"
@@ -228,3 +228,13 @@ def test_dram_present_in_universe():
     assert tickers.count("DRAM") == 1, "DRAM must appear exactly once"
     # Alphabetical placement between DPZ and DRI
     assert tickers.index("DPZ") < tickers.index("DRAM") < tickers.index("DRI")
+
+
+def test_ibm_present_in_universe():
+    """IBM must be present exactly once in the loaded universe (Phase 14N.1)."""
+    result = load_tickers("config/tickers.txt")
+    tickers = result["tickers"]
+    assert "IBM" in tickers, "IBM must be in the loaded universe"
+    assert tickers.count("IBM") == 1, "IBM must appear exactly once"
+    # Alphabetical placement between IBKR and ICE
+    assert tickers.index("IBKR") < tickers.index("IBM") < tickers.index("ICE")
