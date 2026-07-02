@@ -111,6 +111,9 @@ def default_snipe_gate_audit_object() -> dict:
         "missing_proofs": [],
         "blocking_reasons": [],
         "promotion_triggers": [],
+        # Phase 14Q — survival conditions are risk/failure boundaries (e.g. "avoid
+        # body close below invalidation"), NOT constructive promotion triggers.
+        "survival_conditions": [],
         "invalidation": {"level": None, "type": None, "clear": False, "source": None},
         "risk": {"rr": None, "risk_state": None, "risk_window_pct": None, "asymmetry_valid": False},
         "evidence_sources": {
@@ -218,8 +221,13 @@ def _build(ticker, tiering_result, enriched, config) -> dict:
     obj["invalidation"] = _invalidation_block(signal, oh, status_by_gate)
     obj["risk"] = _risk_block(signal, status_by_gate)
 
-    # ---- Promotion triggers ----------------------------------------------
+    # ---- Promotion triggers (constructive proof) + survival conditions -----
+    # Phase 14Q: a promotion trigger is constructive proof that would UPGRADE the
+    # tier; a survival condition is a risk/failure boundary that keeps the setup
+    # alive. "avoid body close below invalidation" is the latter and must never
+    # be presented as a promotion trigger.
     obj["promotion_triggers"] = _promotion_triggers(signal, oh, status_by_gate)
+    obj["survival_conditions"] = _survival_conditions(signal)
 
     # ---- Derived flags ----------------------------------------------------
     capital_blocks = capital_action in _CAPITAL_BLOCKS
@@ -511,9 +519,22 @@ def _promotion_triggers(signal, oh, status_by_gate) -> list:
         triggers.append("clear overhead resistance before full-size")
     if upgrade and upgrade.lower() not in ("none", "—", "-", "n/a"):
         triggers.append(f"acceptance per upgrade trigger: {upgrade}")
-    if inval_level is not None:
-        triggers.append(f"avoid body close below invalidation {inval_level:.2f}")
+    # Phase 14Q: "avoid body close below invalidation" is a SURVIVAL condition,
+    # not a promotion trigger — emitted separately by _survival_conditions().
     return triggers
+
+
+def _survival_conditions(signal) -> list:
+    """Risk/failure boundaries that keep a setup alive — NOT constructive
+    promotion proof. These never upgrade a tier; they define where the thesis
+    dies. Kept distinct from promotion_triggers so the audit never mislabels a
+    defensive boundary as an upgrade path.
+    """
+    conditions = []
+    inval_level = _f(signal.get("invalidation_level"))
+    if inval_level is not None:
+        conditions.append(f"avoid body close below invalidation {inval_level:.2f}")
+    return conditions
 
 
 # ---------------------------------------------------------------------------

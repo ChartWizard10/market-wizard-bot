@@ -261,8 +261,21 @@ def _is_hard_failure(obj, reasons) -> bool:
     return False
 
 
-def _corrected_tier(obj, reasons) -> str:
-    return "WAIT" if _is_hard_failure(obj, reasons) else "NEAR_ENTRY"
+def _corrected_tier(obj, reasons, classification=None) -> str:
+    """Phase 14Q — conditional floor.
+
+    Hard failure (failed/invalid trigger, failed hold, candle failure, failed
+    break, structural BLOCK) -> WAIT. Otherwise the floor is the highest tier the
+    blocker taxonomy permits:
+      * confirmed base sequence + only SNIPE_ONLY blocker -> STARTER (reduced size)
+      * any CAPITAL_BLOCKER / unconfirmed base sequence    -> NEAR_ENTRY (no capital)
+    The seal never promotes, so STARTER is the ceiling here; a clean SNIPE never
+    reaches this function (the detector returns no blocker).
+    """
+    if _is_hard_failure(obj, reasons):
+        return "WAIT"
+    floor = (classification or {}).get("recommended_floor")
+    return "STARTER" if floor == "STARTER" else "NEAR_ENTRY"
 
 
 # ---------------------------------------------------------------------------
@@ -275,11 +288,16 @@ _SEAL_REASON = "active SNIPE confirmation blocker remained"
 _SEAL_PHASE = "14M"
 
 
-def _seal_diagnostic(corrected: str) -> str:
-    return (
-        f"SNIPE confirmation blocked; final tier sealed to {corrected} "
-        "because unresolved proof remains."
-    )
+def _seal_diagnostic(corrected: str, named_proofs=None) -> str:
+    """Phase 14Q — name the exact unresolved proof(s) instead of the vague
+    legacy 'unresolved proof remains'. Always retains the literal
+    'SNIPE confirmation blocked' prefix and the corrected tier name.
+    """
+    if named_proofs:
+        tail = "blocked by: " + "; ".join(named_proofs)
+    else:
+        tail = "an active SNIPE blocker remains"
+    return f"SNIPE confirmation blocked; final tier sealed to {corrected}; {tail}."
 
 
 def is_snipe_confirmation_output(tiering_result) -> bool:
@@ -312,26 +330,83 @@ def seal_snipe_confirmed_consistency(tiering_result, config=None):
         original_tier = str(tiering_result.get("final_tier") or "").upper().strip()
         blocked, reasons = has_active_snipe_confirmation_blocker(tiering_result)
 
-        if not blocked:
-            tiering_result["snipe_confirmed_seal"] = {
-                "applied": False,
-                "original_tier": original_tier,
-                "corrected_tier": original_tier,
-                "blockers": [],
-                "seal_label": None,
-                "diagnostic": "SNIPE confirmation verified: no active SNIPE blockers remain.",
-            }
+        from src import snipe_blocker_taxonomy as taxonomy  # local import (no load cost / cycle)
+        classification = taxonomy.classify_blockers(tiering_result)
+        floor = classification.get("recommended_floor")
+
+        # Phase 14Q — SNIPE_IT stands when the only active context is a defensive
+        # rejection / soft cap / info note (taxonomy floor == SNIPE_IT). A rejection
+        # candle is not automatically a blocker: soft imperfections grade the alert,
+        # they do not bury it. The seal still never PROMOTES — it only declines to
+        # downgrade a genuinely capital-ready sequence.
+        if not blocked or floor == "SNIPE_IT":
+            _apply_verified(tiering_result, original_tier, classification, bool(blocked))
             return tiering_result
 
-        corrected = _corrected_tier(tiering_result, reasons)
-        _apply_downgrade(tiering_result, corrected, reasons, original_tier)
+        corrected = _corrected_tier(tiering_result, reasons, classification)
+        _apply_downgrade(tiering_result, corrected, reasons, original_tier, classification)
         return tiering_result
     except Exception:  # pragma: no cover - defensive; never break a scan
         return tiering_result
 
 
-def _apply_downgrade(tiering_result, corrected, reasons, original_tier) -> None:
+def _build_reconciliation(classification, original_tier, corrected_tier, named_proofs) -> dict:
+    """Compact, JSON-safe reconciliation summary shared by the verified and the
+    downgrade paths. Carries the normalized candle-context object, the leader
+    context, and the named/classified blockers so a sealed (or verified-SNIPE)
+    result can never read as PROMOTION_BLOCKED with blank/vague blockers.
+    """
+    return {
+        "core_sequence_complete": bool(classification.get("core_sequence_complete")),
+        "base_sequence_confirmed": bool(classification.get("base_sequence_confirmed")),
+        "capital_blockers": list(classification.get("capital_blockers") or []),
+        "snipe_only_blockers": list(classification.get("snipe_only_blockers") or []),
+        "soft_caps": list(classification.get("soft_caps") or []),
+        "info_notes": list(classification.get("info_notes") or []),
+        "candle_context": classification.get("candle_context") or {},
+        "leader_context": classification.get("leader_context"),
+        "leader_evidence": list(classification.get("leader_evidence") or []),
+        "leader_effect": classification.get("leader_effect"),
+        "hidden_blocker_violation": bool(classification.get("hidden_blocker_violation")),
+        "final_tier_before": original_tier,
+        "final_tier_after": corrected_tier,
+        "named_blockers": list(named_proofs),
+    }
+
+
+def _apply_verified(tiering_result, original_tier, classification, had_context) -> None:
+    """SNIPE_IT stands. Record the reconciliation truth (soft caps / defensive
+    context disclosed) without downgrading. applied=False; never mutates tier,
+    capital, routing, or the audit label."""
+    from src import snipe_blocker_taxonomy as taxonomy
+    reconciliation = _build_reconciliation(classification, original_tier, original_tier,
+                                            taxonomy.named_blockers(classification))
+    tiering_result["snipe_promotion_reconciliation"] = reconciliation
+    if had_context:
+        diagnostic = ("SNIPE confirmation verified: only defensive/soft context remains "
+                      "(no CAPITAL or SNIPE-only blocker); SNIPE_IT preserved.")
+    else:
+        diagnostic = "SNIPE confirmation verified: no active SNIPE blockers remain."
+    tiering_result["snipe_confirmed_seal"] = {
+        "applied": False,
+        "original_tier": original_tier,
+        "corrected_tier": original_tier,
+        "sealed_tier": original_tier,
+        "blockers": [],
+        "active_blockers": [],
+        "seal_label": None,
+        "diagnostic": diagnostic,
+        "reconciliation": reconciliation,
+    }
+
+
+def _apply_downgrade(tiering_result, corrected, reasons, original_tier, classification=None) -> None:
     from src import tiering  # local import avoids any import cycle / load cost
+    from src import snipe_blocker_taxonomy as taxonomy
+
+    if classification is None:
+        classification = taxonomy.classify_blockers(tiering_result)
+    named_proofs = taxonomy.named_blockers(classification)
 
     channel = tiering.CHANNEL_MAP[corrected]
     capital = tiering.CAPITAL_MAP[corrected]
@@ -368,7 +443,14 @@ def _apply_downgrade(tiering_result, corrected, reasons, original_tier) -> None:
     )
     tiering_result["downgrades"] = downgrades
 
-    diagnostic = _seal_diagnostic(corrected)
+    diagnostic = _seal_diagnostic(corrected, named_proofs)
+
+    # Phase 14Q — compact reconciliation summary (named, classified blockers) so
+    # the sealed result can never read as PROMOTION_BLOCKED with blank/vague
+    # blockers. Persisted with the marker; the raw audit arrays stay untouched.
+    reconciliation = _build_reconciliation(classification, original_tier, corrected, named_proofs)
+    tiering_result["snipe_promotion_reconciliation"] = reconciliation
+
     tiering_result["snipe_confirmed_seal"] = {
         "applied": True,
         "original_tier": original_tier,
@@ -382,6 +464,8 @@ def _apply_downgrade(tiering_result, corrected, reasons, original_tier) -> None:
         "blockers": list(reasons),
         "seal_label": _SEAL_LABEL,
         "diagnostic": diagnostic,
+        # Phase 14Q reconciliation (compact, JSON-safe).
+        "reconciliation": reconciliation,
     }
 
     # Reflect the contradiction in the persisted audit organ so the recorded

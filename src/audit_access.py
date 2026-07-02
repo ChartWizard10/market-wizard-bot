@@ -417,6 +417,72 @@ def _format_timeframe_alignment_lines(row: dict) -> list:
     ]
 
 
+def _fmt_blockers(items) -> str:
+    """Render a list of classified blocker dicts (code/class/proof) compactly.
+
+    Falls back to plain strings for legacy entries; '—' when empty.
+    """
+    if not isinstance(items, list) or not items:
+        return "—"
+    parts = []
+    for b in items:
+        if isinstance(b, dict):
+            parts.append(f"{b.get('code')} [{b.get('blocker_class')}]: {b.get('proof_required')}")
+        else:
+            parts.append(str(b))
+    return "; ".join(parts)
+
+
+def _format_reconciliation_lines(row: dict) -> list:
+    """Phase 14Q — __SNIPE PROMOTION RECONCILIATION__ section.
+
+    Surfaces the four-class blocker taxonomy and the before/after tier so an
+    operator can see exactly why a SNIPE candidate did or did not floor down,
+    and confirm no PROMOTION_BLOCKED ever stands with blank/unnamed blockers.
+
+    Source priority: the persisted snipe_confirmed_seal reconciliation block
+    (authoritative — captured at seal time). When absent (row never sealed, or
+    a pre-14Q historical row), the section is recomputed read-only from the
+    persisted snipe_gate_audit + one_hour_entry evidence. Recompute is
+    deterministic and never mutates the row.
+    """
+    from src import snipe_blocker_taxonomy as taxonomy  # local import (pure helper)
+
+    row_recon = row.get("snipe_promotion_reconciliation") if isinstance(row.get("snipe_promotion_reconciliation"), dict) else None
+    seal = row.get("snipe_confirmed_seal") if isinstance(row.get("snipe_confirmed_seal"), dict) else {}
+    seal_recon = seal.get("reconciliation") if isinstance(seal.get("reconciliation"), dict) else None
+    recon = seal_recon or row_recon
+    if recon is not None:
+        before = recon.get("final_tier_before", row.get("tier"))
+        after = recon.get("final_tier_after", row.get("tier"))
+    else:
+        recon = taxonomy.classify_blockers(row)
+        before = row.get("tier")
+        after = row.get("tier")
+    applied = seal.get("applied") is True
+
+    cc = recon.get("candle_context") if isinstance(recon.get("candle_context"), dict) else {}
+    return [
+        "__SNIPE PROMOTION RECONCILIATION__",
+        f"Core sequence complete: {_fmt(recon.get('core_sequence_complete'))}",
+        f"Base entry sequence confirmed: {_fmt(recon.get('base_sequence_confirmed'))}",
+        f"Seal applied: {_fmt(applied)}",
+        f"Final tier before -> after: {_fmt(before)} -> {_fmt(after)}",
+        f"Candle context: {_fmt(cc.get('candle_context'))}",
+        f"Candle context reason: {_fmt(cc.get('candle_context_reason'))}",
+        f"Candle context scope: {_fmt(cc.get('candle_context_scope'))}",
+        f"Candle tier effect: {_fmt(cc.get('candle_tier_effect'))}",
+        f"Capital blockers: {_fmt_blockers(recon.get('capital_blockers'))}",
+        f"SNIPE-only blockers: {_fmt_blockers(recon.get('snipe_only_blockers'))}",
+        f"Soft caps: {_fmt_blockers(recon.get('soft_caps'))}",
+        f"Info notes: {_fmt_blockers(recon.get('info_notes'))}",
+        f"Leader context: {_fmt(recon.get('leader_context'))}",
+        f"Leader evidence: {_fmt(recon.get('leader_evidence'))}",
+        f"Leader effect: {_fmt(recon.get('leader_effect'))}",
+        f"Hidden blocker violation: {_fmt(recon.get('hidden_blocker_violation'))}",
+    ]
+
+
 def format_row(row: dict) -> str:
     """Render one alert_history row as compact, sectioned audit text."""
     sga = row.get("snipe_gate_audit") if isinstance(row.get("snipe_gate_audit"), dict) else {}
@@ -448,6 +514,7 @@ def format_row(row: dict) -> str:
         f"Blocked gates: {_fmt(sga.get('blocked_gate_names'))}",
         f"Missing proofs: {_fmt(sga.get('missing_proofs'))}",
         f"Promotion triggers: {_fmt(sga.get('promotion_triggers'))}",
+        f"Survival conditions: {_fmt(sga.get('survival_conditions'))}",
         f"Blocking reasons: {_fmt(sga.get('blocking_reasons'))}",
         f"Diagnostic: {_fmt(sga.get('diagnostic_sentence'))}",
         "",
@@ -466,6 +533,8 @@ def format_row(row: dict) -> str:
         f"Blocking reasons: {_fmt(htf.get('blocking_reasons'))}",
         f"Diagnostic: {_fmt(htf.get('diagnostic_sentence'))}",
         "",
+        *_format_reconciliation_lines(row),
+        "",
         "__CONCLUSION__",
         f"{verdict['label']}" + (f" — {' '.join(verdict['notes'])}" if verdict["notes"] else ""),
     ]
@@ -478,6 +547,8 @@ def compact_json(row: dict) -> dict:
     htf = row.get("higher_timeframe_context") if isinstance(row.get("higher_timeframe_context"), dict) else None
     oh = row.get("one_hour_entry") if isinstance(row.get("one_hour_entry"), dict) else None
     tfa = row.get("timeframe_alignment") if isinstance(row.get("timeframe_alignment"), dict) else None
+    seal = row.get("snipe_confirmed_seal") if isinstance(row.get("snipe_confirmed_seal"), dict) else None
+    reconciliation = seal.get("reconciliation") if isinstance(seal, dict) and isinstance(seal.get("reconciliation"), dict) else None
     verdict = interpret(row)
     return {
         "ticker": row.get("ticker"),
@@ -493,6 +564,8 @@ def compact_json(row: dict) -> dict:
         "higher_timeframe_context": htf,
         "one_hour_entry": oh,
         "timeframe_alignment": tfa,
+        "snipe_confirmed_seal": seal,
+        "snipe_promotion_reconciliation": reconciliation,
         "conclusion": verdict["label"],
         "conclusion_notes": verdict["notes"],
     }
