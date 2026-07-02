@@ -597,16 +597,33 @@ def _classify(obj) -> dict:
         ))
 
     # ---- SNIPE-only: live-edge full-size proof forming (base earned) --------
+    # Phase 14R: closed candle truth is sovereign over open-bar cosmetics. At
+    # live scan cadence the current bar is almost always open, so the soft
+    # OPEN_ONLY / NO_NEXT_CANDLE_VERDICT vetoes fire on nearly every scan; they
+    # may only block full size when closed proof is genuinely absent (candle
+    # context UNRESOLVED/UNKNOWN). When the normalized candle context already
+    # proves NO_REJECTION or DEFENSIVE_REJECTION (a closed candle confirmed the
+    # sequence), the still-forming live edge is disclosure, not a blocker —
+    # otherwise SNIPE_IT is structurally impossible while the market is open.
+    # Hard live-edge vetoes (HOSTILE_WICK / FAILED_RETEST) remain CAPITAL above.
     if base_ok:
         soft_live_edge = _s(_d(obj, "candle_evidence").get("candle_veto")) in _SOFT_LIVE_EDGE_VETOES
         if soft_live_edge or "LIVE_EDGE_SAFE" in missing_names:
-            snipe_only.append(_blocker(
-                "LIVE_EDGE_SAFE", SNIPE_ONLY_BLOCKER,
-                "live-edge full-size proof forming",
-                "live-edge confirmed for full size",
-                "blocks SNIPE_IT full size; confirmed base keeps STARTER",
-                "closed live-edge confirmation",
-            ))
+            if cc["candle_context"] in (CC_NO_REJECTION, CC_DEFENSIVE):
+                soft.append(_blocker(
+                    "LIVE_EDGE_SAFE", SOFT_CAP,
+                    "live edge still forming (closed candle truth already confirmed)",
+                    "—", "disclosure only; closed proof exists — cannot block SNIPE_IT",
+                    "n/a (disclosure)",
+                ))
+            else:
+                snipe_only.append(_blocker(
+                    "LIVE_EDGE_SAFE", SNIPE_ONLY_BLOCKER,
+                    "live-edge full-size proof forming",
+                    "live-edge confirmed for full size",
+                    "blocks SNIPE_IT full size; confirmed base keeps STARTER",
+                    "closed live-edge confirmation",
+                ))
 
     # ---- SNIPE-only: score realism below SNIPE threshold --------------------
     if score_blocked:
