@@ -1947,6 +1947,86 @@ def _apply_starter_posture_compression(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Phase 14Q: STARTER truth-headline guard.
+#
+# A static "STARTER conditions met." ACTION headline overstates a STARTER whose
+# 1H trigger proof is still forming (RETEST_IN_PROGRESS / HOLD_WEAK / WATCH_ONLY
+# / candle unresolved). When the 1H object proves the trigger is NOT confirmed,
+# the headline is rewritten to a thesis-only truth: the structure/thesis remains
+# valid but fresh entry proof is incomplete, so no fresh aggression is implied.
+#
+# Display-only. Never touches tier, capital, routing, suppression, dedup, or the
+# structured fields. Gated on _one_hour_proof_incomplete, so a STARTER whose base
+# sequence genuinely confirms keeps the standard headline.
+# ---------------------------------------------------------------------------
+
+_STARTER_THESIS_HEADLINE = (
+    "STARTER thesis valid — structure holds, but fresh 1H trigger proof is "
+    "incomplete; no fresh aggression until closed 1H hold."
+)
+_STARTER_CONDITIONS_MET_LINE_RE = re.compile(
+    r"^([ \t]*)STARTER conditions met\.[ \t]*$", re.MULTILINE
+)
+_STARTER_ENTRY_VALID_NOW_RE = re.compile(
+    r"\bentry valid (?:now|near current[\w \t]*)\b", re.IGNORECASE
+)
+
+
+def _apply_starter_truth_headline_guard(body: str, final_tier: str, one_hour) -> str:
+    """Cool an overstated STARTER headline when the 1H trigger proof is forming.
+
+    Replaces 'STARTER conditions met.' with thesis-only truth wording and
+    neutralizes any 'entry valid now / near current' fresh-entry implication.
+    Runs after posture compression so the corrected headline survives to output.
+    """
+    if str(final_tier).upper() != "STARTER":
+        return body
+    if not _one_hour_proof_incomplete(one_hour):
+        return body
+    result = _STARTER_CONDITIONS_MET_LINE_RE.sub(r"\1" + _STARTER_THESIS_HEADLINE, body)
+    # Inline occurrences too (e.g. a contract-guard-rewritten "Why:" line) — the
+    # phrase may not claim completion anywhere while the 1H trigger is forming.
+    result = re.sub(r"STARTER conditions met\b\.?",
+                    "STARTER thesis valid — trigger proof incomplete.",
+                    result, flags=re.IGNORECASE)
+    result = _STARTER_ENTRY_VALID_NOW_RE.sub("setup on watch (reduced-size thesis only)", result)
+    return result
+
+
+def _apply_confirmed_base_starter_headline_guard(body: str, final_tier: str, tiering_result) -> str:
+    """Phase 14Q — a STARTER sealed down from SNIPE_IT with a CONFIRMED base
+    sequence (entry-zone retest/hold proven; only full-size/SNIPE proof missing)
+    must say so, naming the exact SNIPE-only blocker, instead of the generic
+    'STARTER conditions met.'.
+
+    Gated on the seal marker (applied + sealed_tier STARTER), which only exists
+    when the Phase 14M/14Q seal acted — legacy STARTER alerts are untouched.
+    Display-only; never touches tier, capital, routing, or structured fields.
+    """
+    if str(final_tier).upper() != "STARTER" or not isinstance(tiering_result, dict):
+        return body
+    seal = tiering_result.get("snipe_confirmed_seal")
+    if not isinstance(seal, dict) or seal.get("applied") is not True:
+        return body
+    if str(seal.get("sealed_tier") or "").upper() != "STARTER":
+        return body
+    recon = tiering_result.get("snipe_promotion_reconciliation")
+    recon = recon if isinstance(recon, dict) else {}
+    if not recon.get("base_sequence_confirmed"):
+        return body
+    codes = [
+        b.get("code") for b in (recon.get("snipe_only_blockers") or [])
+        if isinstance(b, dict) and b.get("code")
+    ]
+    blocked_by = " / ".join(codes) if codes else "full-size confirmation proof"
+    headline = (
+        f"Confirmed-base STARTER — base retest/hold valid; "
+        f"full-size/SNIPE blocked by {blocked_by}."
+    )
+    return _STARTER_CONDITIONS_MET_LINE_RE.sub(r"\1" + headline, body)
+
+
 def _apply_near_entry_missing_proof_compression(body: str, final_tier: str) -> str:
     """Compress duplicated blocker / missing-condition wording in a NEAR_ENTRY
     alert. Only the duplicate pattern is touched — a clean "Missing conditions:"
@@ -2798,6 +2878,17 @@ def format_alert(
     # missing-conditions line. Runs after the truth guard and before the splices
     # so the structured 1H / TF blocks are never touched.
     rendered = _apply_starter_posture_compression(rendered, final_tier, capital_action)
+    # Phase 14Q: STARTER truth-headline — a forming-1H STARTER may not say
+    # "STARTER conditions met." / "entry valid now". Runs after posture
+    # compression so the corrected thesis-only headline survives to output.
+    rendered = _apply_starter_truth_headline_guard(
+        rendered, final_tier, tiering_result.get("one_hour_entry")
+    )
+    # Phase 14Q: a STARTER sealed down from SNIPE_IT with a confirmed base must
+    # name the exact SNIPE-only blocker instead of the generic headline.
+    rendered = _apply_confirmed_base_starter_headline_guard(
+        rendered, final_tier, tiering_result
+    )
     rendered = _apply_near_entry_missing_proof_compression(rendered, final_tier)
     # Splice the structured 1H block in after every narrative guard has run.
     if _one_hour_block_lines:
