@@ -2734,6 +2734,21 @@ def format_alert(
         f"  {sizing_line}",
         f"  Quality read: {quality_phrase}",
     ]
+    # Phase 14S: internal ladder lane display. Public tiers stay simple, but
+    # the basket must be visible: "STARTER_ENTRY | STARTER_A" tells the
+    # operator this is an actionable reduced-size opportunity, not a dead
+    # watchlist; "SNIPER_ENTRY | SNIPER_A_PLUS" marks best-in-class. Never
+    # rendered for NEAR_ENTRY (no capital lane to advertise) and never implies
+    # full size for a starter lane.
+    _ladder = tiering_result.get("snipe_ladder")
+    if isinstance(_ladder, dict) and final_tier in ("SNIPE_IT", "STARTER"):
+        _lane_public = str(_ladder.get("public_signal_tier") or "")
+        _lane_grade = (
+            _ladder.get("sniper_grade") if final_tier == "SNIPE_IT"
+            else _ladder.get("starter_grade")
+        )
+        if _lane_public in ("STARTER_ENTRY", "SNIPER_ENTRY") and _lane_grade not in (None, "", "NONE"):
+            lines.append(f"  Lane: {_lane_public} | {_lane_grade}")
     # Phase 14C.2 / 14C.3B Defect 3: repeated-signal realism. Keeps tier
     # intact and declares explicit capital posture (hold / conditional-add /
     # no-capital / starter-only) so the repeated alert is never mistaken for

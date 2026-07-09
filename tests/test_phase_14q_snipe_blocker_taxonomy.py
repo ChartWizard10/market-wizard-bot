@@ -165,14 +165,30 @@ def test_unresolved_rejection_complete_base_sequence_floors_to_starter():
 # C — hostile rejection / weak 1H preserves Phase 14M.1 NEAR_ENTRY
 # ===========================================================================
 
-def test_hostile_rejection_weak_1h_preserves_14m1_near_entry():
+def test_weak_1h_alive_base_floors_starter_not_near_entry():
+    # Phase 14S recalibration: HOLD_WEAK / RETEST_IN_PROGRESS / WATCH_ONLY with
+    # an ALIVE base (real retest truth, invalidation clear, price above
+    # invalidation, path open) is a full-size gap, not failed proof — floors to
+    # STARTER with the blocker named. Missing proof is not failed proof.
     tr = _tr(oh=_oh(trigger="RETEST_IN_PROGRESS", hold="HOLD_WEAK", alert="WATCH_ONLY"))
+    seal.seal_snipe_confirmed_consistency(tr, {})
+    assert tr["final_tier"] == "STARTER"
+    assert tr["capital_action"] == "starter_only"
+    recon = tr["snipe_promotion_reconciliation"]
+    assert recon["candle_context"]["candle_context"] == "UNRESOLVED_REJECTION"
+    assert recon["snipe_only_blockers"], "exact SNIPE-only blocker must be printed"
+    assert "unresolved proof remains" not in tr["snipe_confirmed_seal"]["diagnostic"]
+
+
+def test_weak_1h_without_alive_base_stays_near_entry():
+    # No real retest truth -> base NOT alive -> 14M.1 discipline holds: no capital.
+    tr = _tr(oh=_oh(trigger="RETEST_IN_PROGRESS", hold="HOLD_WEAK", alert="WATCH_ONLY",
+                    retest="NONE"))
     seal.seal_snipe_confirmed_consistency(tr, {})
     assert tr["final_tier"] == "NEAR_ENTRY"
     assert tr["capital_action"] == "wait_no_capital"
     assert tr["final_discord_channel"] == "#near-entry-watch"
     recon = tr["snipe_promotion_reconciliation"]
-    assert recon["candle_context"]["candle_context"] == "HOSTILE_REJECTION"
     assert recon["capital_blockers"], "exact CAPITAL blocker must be printed"
     assert "unresolved proof remains" not in tr["snipe_confirmed_seal"]["diagnostic"]
 
@@ -269,11 +285,25 @@ def test_leader_complete_sequence_soft_caps_only_stays_snipe():
 # G — leader context cannot override weak 1H / hard failure
 # ===========================================================================
 
-def test_leader_weak_1h_stays_blocked():
+def test_leader_weak_1h_never_snipes():
+    # Phase 14S: leader sponsorship + alive base + weak 1H = STARTER at most —
+    # leader context can never buy SNIPE_IT without full trigger proof.
     tr = _tr(oh=_oh(trigger="RETEST_IN_PROGRESS", hold="HOLD_WEAK", alert="WATCH_ONLY"),
              tf=_TF_OK)
     c = tax.classify_blockers(tr)
     assert c["leader_context"] == "LEADER_CONTINUATION_CONTEXT"
+    assert c["recommended_floor"] != "SNIPE_IT"
+    seal.seal_snipe_confirmed_consistency(tr, {})
+    assert tr["final_tier"] != "SNIPE_IT"
+    assert tr["capital_action"] != "full_quality_allowed"
+
+
+def test_leader_weak_1h_without_alive_base_stays_blocked():
+    # Leader context + weak 1H with NO alive base evidence: still no capital.
+    tr = _tr(oh=_oh(trigger="RETEST_IN_PROGRESS", hold="HOLD_WEAK", alert="WATCH_ONLY",
+                    retest="NONE"),
+             tf=_TF_OK)
+    c = tax.classify_blockers(tr)
     assert c["leader_effect"] == "HARD_FAILURE_OVERRIDES"
     assert c["capital_blockers"]
     seal.seal_snipe_confirmed_consistency(tr, {})
@@ -321,7 +351,8 @@ def test_mrcy_weak_hold_not_snipe_and_not_clean_wording():
              final_tier="STARTER", capital="starter_only", channel="#starter-signals")
     c = tax.classify_blockers(tr)
     assert c["recommended_floor"] != "SNIPE_IT"
-    assert c["capital_blockers"]
+    # 14S: alive base -> full-size gap is SNIPE-only, but it must be NAMED.
+    assert c["snipe_only_blockers"] or c["capital_blockers"]
     body = discord_alerts.format_alert(tr).lower()
     assert "high-quality starter" not in body
     assert "clean starter" not in body

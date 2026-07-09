@@ -30,6 +30,7 @@ from src import prefilter as prefilter_mod
 from src import score_calibration
 from src import snipe_confirmed_seal
 from src import snipe_gate_audit
+from src import snipe_ladder_judgment
 from src import state_store
 from src import tiering
 from src import timeframe_alignment
@@ -431,6 +432,30 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("SNIPE_GATE_AUDIT_ERROR: %s: %s", ticker, exc)
             tiering_result["snipe_gate_audit"] = snipe_gate_audit.error_snipe_gate_audit_object(str(exc))
+
+        # Step 6.592: Unified SNIPE ladder judgment + arbitration (Phase 14S).
+        # Runs AFTER all evidence organs + the gate audit (so it judges the full
+        # card) and BEFORE the seal (promotion happens here, upstream — the seal
+        # stays downgrade-only). Grades every candidate onto
+        # PASS/WATCH_C/STARTER_B/STARTER_A/SNIPER_A/SNIPER_A_PLUS and lets that
+        # grade govern final_tier/capital/routing via the existing tier
+        # machinery. Promotion is whitelisted (NEAR_ENTRY->STARTER,
+        # STARTER->SNIPE_IT, one rung, never from WAIT). Guarded so a ladder
+        # fault can never break a scan.
+        try:
+            tiering_result = snipe_ladder_judgment.apply_ladder_arbitration(
+                tiering_result, config
+            )
+            _ladder = tiering_result.get("snipe_ladder") or {}
+            if _ladder:
+                final_tier = tiering_result.get("final_tier", final_tier)
+                log.info(
+                    "SNIPE_LADDER: %s %s (%s) -> final_tier=%s",
+                    ticker, _ladder.get("internal_ladder_tier"),
+                    _ladder.get("proof_state"), tiering_result.get("final_tier"),
+                )
+        except Exception as exc:
+            log.warning("SNIPE_LADDER_ERROR: %s: %s", ticker, exc)
 
         # Step 6.595: SNIPE_CONFIRMED consistency seal (Phase 14M — TRUTH SEAL).
         # Runs AFTER snipe_gate_audit so it can read the authoritative blocker

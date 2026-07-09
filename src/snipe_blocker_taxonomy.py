@@ -165,7 +165,12 @@ def base_sequence_confirmed(obj) -> bool:
     sga = obj.get("snipe_gate_audit") if isinstance(obj.get("snipe_gate_audit"), dict) else {}
     blocked = set(_gate_names(sga.get("blocked_gate_names")) or _gate_names(sga.get("blocked_gates")))
     missing = set(_proof_gate_names(sga.get("missing_proofs")))
-    if (blocked | missing) & _CRITICAL_BASE_GATES:
+    if blocked & _CRITICAL_BASE_GATES:
+        return False
+    # Phase 14S: a merely-MISSING 4H location (repairing) is location law, not
+    # base-sequence law — it cannot negate a positively confirmed trigger/
+    # retest/hold base. Every other critical gate still kills on missing.
+    if missing & (_CRITICAL_BASE_GATES - {"FOUR_H_LOCATION_VALID"}):
         return False
 
     oh = obj.get("one_hour_entry") if isinstance(obj.get("one_hour_entry"), dict) else None
@@ -310,7 +315,14 @@ def _defensive_proof_complete(obj) -> bool:
         or _s(signal.get("overhead_status")) == "CLEAR"
     )
     daily_granted = _s(_d(tf, "swing_timeframe").get("state")) == "PERMISSION_GRANTED"
-    four_h_valid = _s(_d(tf, "operational_timeframe").get("state")) == "LOCATION_VALID"
+    op_state = _s(_d(tf, "operational_timeframe").get("state"))
+    # Phase 14S: repairing location is not broken location — a 4H repair is
+    # functionally valid for defensive proof when the full base sequence
+    # (trigger/retest/hold) is already confirmed by the 1H engine.
+    four_h_valid = op_state == "LOCATION_VALID" or (
+        op_state in ("LOCATION_REPAIRING", "LOCATION_EXTENDED")
+        and base_sequence_confirmed(obj)
+    )
 
     price = _num(signal.get("scan_price"))
     if price is None:
@@ -321,6 +333,49 @@ def _defensive_proof_complete(obj) -> bool:
     no_zone_failure = _s(ce.get("level_reaction")) not in _HOSTILE_LEVEL_REACTIONS
 
     return bool(path_clean and daily_granted and four_h_valid and price_above_inval and no_zone_failure)
+
+
+def alive_base_evidence(obj) -> bool:
+    """Phase 14S — the defended idea still exists (base ALIVE), even though the
+    full base sequence is not yet CONFIRMED. Positive evidence only:
+
+      - real retest truth (RETEST_CORE_VALID / RETEST_REAL)
+      - invalidation clear (1H engine or signal level+condition)
+      - price has not accepted below invalidation
+      - path not hostile/blocked
+      - no failed hold / failed trigger
+
+    Missing proof is not failed proof: HOLD_WEAK / RETEST_IN_PROGRESS /
+    WATCH_ONLY do NOT kill an alive base. Absent evidence (no retest truth, no
+    1H organ) means NOT alive — never inferred.
+    """
+    if not isinstance(obj, dict):
+        return False
+    oh = obj.get("one_hour_entry") if isinstance(obj.get("one_hour_entry"), dict) else {}
+    signal = obj.get("final_signal") if isinstance(obj.get("final_signal"), dict) else {}
+    prh = _d(oh, "pullback_retest_hold")
+    if _s(prh.get("retest_truth")) not in _REAL_RETEST_TRUTHS:
+        return False
+    if _s(prh.get("hold_truth")) == "HOLD_FAILED":
+        return False
+    if _s(oh.get("trigger_state")) in _HARD_TRIGGER_STATES:
+        return False
+    inval_clear = bool(_d(oh, "invalidation").get("clear")) or (
+        signal.get("invalidation_level") is not None
+        and str(signal.get("invalidation_condition") or "").strip()
+    )
+    if not inval_clear:
+        return False
+    price = _num(signal.get("scan_price"))
+    if price is None:
+        price = _num(signal.get("current_price"))
+    inval = _num(signal.get("invalidation_level"))
+    if price is not None and inval is not None and price < inval:
+        return False
+    path = _d(oh, "path_quality")
+    if _s(path.get("path_label")) == "HOSTILE" or _s(signal.get("overhead_status")) == "BLOCKED":
+        return False
+    return True
 
 
 def _cc(context, scope, reason, effect, code, current="—", required="—", proof="n/a") -> dict:
@@ -435,7 +490,20 @@ def normalized_candle_context(obj, base_ok=None) -> dict:
                    "closed full-size candle / defensive proof set",
                    "closed 1H candle confirmation or full defensive proof")
 
-    # Base sequence not earned -> the entry-zone acceptance is unproven.
+    # Base sequence not CONFIRMED. Phase 14S rule E: HOSTILE requires real
+    # failure — HOLD_WEAK / RETEST_IN_PROGRESS / WATCH_ONLY alone are not
+    # hostile while the base is ALIVE (real retest truth, invalidation clear,
+    # price above invalidation, path open). Alive-but-unconfirmed -> UNRESOLVED
+    # (blocks full size only). No alive evidence -> entry-zone acceptance is
+    # genuinely unproven -> HOSTILE binds capital (preserves 14M.1 discipline).
+    if alive_base_evidence(obj):
+        return _cc(CC_UNRESOLVED, SCOPE_UNKNOWN,
+                   "base alive (real retest truth, zone defended) but 1H proof "
+                   "incomplete; defensive-vs-hostile unproven",
+                   SNIPE_ONLY_BLOCKER, CODE_UNRESOLVED,
+                   f"candle {event}, base alive, full-size proof incomplete",
+                   "closed 1H hold + supportive candle for full size",
+                   "closed 1H hold and candle confirmation")
     return _cc(CC_HOSTILE, SCOPE_ENTRY_ZONE,
                "1H hold not confirmed; entry-zone acceptance unproven",
                CAPITAL_BLOCKER, CODE_HOSTILE,
@@ -468,6 +536,8 @@ def classify_blockers(obj) -> dict:
     except Exception:  # pragma: no cover - defensive; classification never breaks a scan
         return {
             "core_sequence_complete": False,
+            "base_sequence_confirmed": False,
+            "base_alive": False,
             "capital_blockers": [],
             "snipe_only_blockers": [],
             "soft_caps": [],
@@ -497,8 +567,11 @@ def _classify(obj) -> dict:
     info: list = []
 
     base_ok = base_sequence_confirmed(obj)
+    alive = alive_base_evidence(obj)
 
     # ---- Critical base gates blocked/missing => CAPITAL_BLOCKER --------------
+    # Phase 14S: ONE_H and FOUR_H get graded severity below (missing proof is
+    # not failed proof); a BLOCK on any critical gate always binds capital.
     for gate in _CRITICAL_BASE_GATES:
         if gate in blocked_names:
             capital.append(_blocker(
@@ -506,11 +579,61 @@ def _classify(obj) -> dict:
                 "blocks all new capital; tier <= NEAR_ENTRY",
                 f"{gate} must PASS",
             ))
-        elif gate in missing_names:
+        elif gate in missing_names and gate not in ("ONE_H_TRIGGER_CONFIRMED", "FOUR_H_LOCATION_VALID"):
             capital.append(_blocker(
                 gate, CAPITAL_BLOCKER, "MISSING/forming", "PASS",
                 "blocks all new capital; tier <= NEAR_ENTRY",
                 f"{gate} proof must confirm",
+            ))
+
+    # ---- ONE_H missing/forming: graded (14S) ---------------------------------
+    # Alive base (real retest truth, invalidation clear, zone defended) makes a
+    # forming 1H a FULL-SIZE gap (SNIPE-only, STARTER floor). No alive evidence
+    # keeps it a capital blocker — preserves 14M.1 weak-1H discipline.
+    if "ONE_H_TRIGGER_CONFIRMED" in missing_names:
+        if alive:
+            snipe_only.append(_blocker(
+                "ONE_H_TRIGGER_CONFIRMED", SNIPE_ONLY_BLOCKER,
+                "1H trigger proof forming while base is alive",
+                "1H trigger live/confirmed + closed hold confirmed",
+                "blocks SNIPE_IT full size; alive base keeps STARTER",
+                "closed 1H hold + confirmed trigger",
+            ))
+        else:
+            capital.append(_blocker(
+                "ONE_H_TRIGGER_CONFIRMED", CAPITAL_BLOCKER, "MISSING/forming", "PASS",
+                "blocks all new capital; tier <= NEAR_ENTRY",
+                "ONE_H_TRIGGER_CONFIRMED proof must confirm",
+            ))
+
+    # ---- FOUR_H missing/repairing: graded (14S) -------------------------------
+    # Repairing location is not broken location. Functionally valid repair
+    # (full 1H proof on an alive base) is a SOFT disclosure; alive base without
+    # full 1H proof is a full-size gap; no alive evidence binds capital.
+    if "FOUR_H_LOCATION_VALID" in missing_names:
+        oh_trig = _s(_d(obj, "one_hour_entry").get("trigger_state"))
+        oh_hold = _s(_d(_d(obj, "one_hour_entry"), "pullback_retest_hold").get("hold_truth"))
+        functionally_valid = alive and oh_trig in _CONFIRMED_TRIGGER_STATES and oh_hold in _CONFIRMED_HOLD_TRUTHS
+        if functionally_valid:
+            soft.append(_blocker(
+                "FOUR_H_LOCATION_VALID", SOFT_CAP,
+                "4H repairing but functionally valid (full 1H proof on alive base)",
+                "—", "grades wording/posture only; cannot block SNIPE_IT",
+                "n/a (disclosure)",
+            ))
+        elif alive:
+            snipe_only.append(_blocker(
+                "FOUR_H_LOCATION_VALID", SNIPE_ONLY_BLOCKER,
+                "4H location repairing (alive base, full-size location proof pending)",
+                "LOCATION_VALID or functionally valid repair",
+                "blocks SNIPE_IT full size; alive base keeps STARTER",
+                "4H repair completes or full 1H proof confirms",
+            ))
+        else:
+            capital.append(_blocker(
+                "FOUR_H_LOCATION_VALID", CAPITAL_BLOCKER, "MISSING/forming", "PASS",
+                "blocks all new capital; tier <= NEAR_ENTRY",
+                "FOUR_H_LOCATION_VALID proof must confirm",
             ))
 
     # ---- Path / overhead blocked => CAPITAL_BLOCKER -------------------------
@@ -529,18 +652,30 @@ def _classify(obj) -> dict:
     alert_truth = _s(oh.get("alert_truth_label"))
     loc_label = _s(_d(oh, "location_realism").get("label"))
 
-    # 1H trigger / hold not confirmed -> base sequence not earned -> binds capital.
+    # 1H trigger / hold not confirmed -> base sequence not CONFIRMED. Phase 14S:
+    # missing proof is not failed proof. Hard trigger failure always binds
+    # capital; a merely forming/weak/watch-only 1H is a FULL-SIZE gap when the
+    # base is alive (STARTER floor), and binds capital only when it is not.
     if oh and (
         trig in _SOFT_FORMING_TRIGGERS or trig in _HARD_TRIGGER_STATES
         or hold_truth in _WEAK_HOLDS or alert_truth in _NON_CONFIRMED_ALERT_TRUTHS
     ):
-        capital.append(_blocker(
-            "ONE_H_TRIGGER_CONFIRMED", CAPITAL_BLOCKER,
-            f"1H {trig or alert_truth or hold_truth or 'unconfirmed'} not confirmed",
-            "1H trigger live/confirmed + closed hold confirmed",
-            "blocks all new capital; tier <= NEAR_ENTRY",
-            "closed 1H hold + confirmed trigger",
-        ))
+        if trig in _HARD_TRIGGER_STATES or hold_truth == "HOLD_FAILED" or not alive:
+            capital.append(_blocker(
+                "ONE_H_TRIGGER_CONFIRMED", CAPITAL_BLOCKER,
+                f"1H {trig or alert_truth or hold_truth or 'unconfirmed'} not confirmed",
+                "1H trigger live/confirmed + closed hold confirmed",
+                "blocks all new capital; tier <= NEAR_ENTRY",
+                "closed 1H hold + confirmed trigger",
+            ))
+        else:
+            snipe_only.append(_blocker(
+                "ONE_H_TRIGGER_CONFIRMED", SNIPE_ONLY_BLOCKER,
+                f"1H {trig or alert_truth or hold_truth} forming while base is alive",
+                "1H trigger live/confirmed + closed hold confirmed",
+                "blocks SNIPE_IT full size; alive base keeps STARTER",
+                "closed 1H hold + confirmed trigger",
+            ))
 
     # ---- Signal-level retest/hold (parity with the seal detector) -----------
     # A present-but-unconfirmed retest/hold status is a base-sequence gap and
@@ -679,7 +814,7 @@ def _classify(obj) -> dict:
     capital, snipe_only, soft, info = _resolve_cross_class(capital, snipe_only, soft, info)
 
     core_complete = base_ok and not capital
-    floor = _recommended_floor(obj, capital, snipe_only, core_complete)
+    floor = _recommended_floor(obj, capital, snipe_only, core_complete, alive)
 
     # ---- Leader effect: relief only when no hard failure exists --------------
     leader = compute_leader_continuation_context(obj)
@@ -698,6 +833,7 @@ def _classify(obj) -> dict:
     return {
         "core_sequence_complete": core_complete,
         "base_sequence_confirmed": base_ok,
+        "base_alive": alive,
         "capital_blockers": capital,
         "snipe_only_blockers": snipe_only,
         "soft_caps": soft,
@@ -730,14 +866,18 @@ def _resolve_cross_class(capital, snipe_only, soft, info) -> tuple:
     return tuple(out)
 
 
-def _recommended_floor(obj, capital, snipe_only, core_complete) -> str:
+def _recommended_floor(obj, capital, snipe_only, core_complete, alive=False) -> str:
     """Map the classification to a tier floor. Hard-failure detection is delegated
     to the seal (which owns the WAIT vs NEAR_ENTRY severity call); this returns the
     *highest tier the blockers permit*, never above STARTER (the seal never promotes).
+
+    Phase 14S: an ALIVE base (real retest truth, invalidation clear, zone
+    defended, no failure) with only SNIPE-only blockers floors at STARTER —
+    missing full-size proof caps, it does not bury.
     """
     if capital:
         return "NEAR_ENTRY"
-    if core_complete and snipe_only:
+    if (core_complete or alive) and snipe_only:
         return "STARTER"
     if snipe_only:
         return "NEAR_ENTRY"
