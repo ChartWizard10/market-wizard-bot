@@ -433,6 +433,40 @@ def _fmt_blockers(items) -> str:
     return "; ".join(parts)
 
 
+def _format_ladder_lines(row: dict) -> list:
+    """Phase 14S — __SNIPE LADDER__ section.
+
+    Source priority: the stored snipe_ladder object (live results carry it from
+    arbitration). Persisted rows recompute deterministically from the 14O
+    evidence — same read-only pattern as the reconciliation section.
+    """
+    from src import snipe_ladder_judgment as ladder_mod  # local import (pure helper)
+
+    ladder = row.get("snipe_ladder") if isinstance(row.get("snipe_ladder"), dict) else None
+    if ladder is None:
+        ladder = ladder_mod.classify_snipe_ladder(row)
+    return [
+        "__SNIPE LADDER__",
+        f"Internal ladder tier: {_fmt(ladder.get('internal_ladder_tier'))}",
+        f"Public signal tier: {_fmt(ladder.get('public_signal_tier'))}",
+        f"Opportunity lane: {_fmt(ladder.get('opportunity_lane'))}",
+        f"Proof state: {_fmt(ladder.get('proof_state'))}",
+        f"Base alive: {_fmt(ladder.get('base_alive'))}",
+        f"Starter grade: {_fmt(ladder.get('starter_grade'))}",
+        f"Sniper grade: {_fmt(ladder.get('sniper_grade'))}",
+        f"Hard failures: {_fmt(ladder.get('hard_failures'))}",
+        f"Starter blockers: {_fmt(ladder.get('starter_blockers'))}",
+        f"Sniper-only blockers: {_fmt(ladder.get('sniper_only_blockers'))}",
+        f"Soft caps: {_fmt(ladder.get('soft_caps'))}",
+        f"Basket: {_fmt(ladder.get('basket_reason'))}",
+        f"Why this ladder tier: {_fmt(ladder.get('why_this_ladder_tier'))}",
+        f"Why not higher: {_fmt(ladder.get('why_not_higher'))}",
+        f"Why not lower: {_fmt(ladder.get('why_not_lower'))}",
+        f"Next promotion proof: {_fmt(ladder.get('next_promotion_proof'))}",
+        f"Failure condition: {_fmt(ladder.get('failure_condition'))}",
+    ]
+
+
 def _format_reconciliation_lines(row: dict) -> list:
     """Phase 14Q — __SNIPE PROMOTION RECONCILIATION__ section.
 
@@ -533,6 +567,8 @@ def format_row(row: dict) -> str:
         f"Blocking reasons: {_fmt(htf.get('blocking_reasons'))}",
         f"Diagnostic: {_fmt(htf.get('diagnostic_sentence'))}",
         "",
+        *_format_ladder_lines(row),
+        "",
         *_format_reconciliation_lines(row),
         "",
         "__CONCLUSION__",
@@ -566,6 +602,7 @@ def compact_json(row: dict) -> dict:
         "timeframe_alignment": tfa,
         "snipe_confirmed_seal": seal,
         "snipe_promotion_reconciliation": reconciliation,
+        "snipe_ladder": row.get("snipe_ladder") if isinstance(row.get("snipe_ladder"), dict) else None,
         "conclusion": verdict["label"],
         "conclusion_notes": verdict["notes"],
     }

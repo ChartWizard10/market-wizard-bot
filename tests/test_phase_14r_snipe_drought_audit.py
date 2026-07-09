@@ -161,9 +161,11 @@ def test_snipe_only_blocker_does_not_become_capital_blocker():
 # ===========================================================================
 
 def test_hostile_rejection_blocks_capital():
+    # TRUE hostile: no real retest truth -> base not alive -> entry-zone
+    # acceptance genuinely unproven -> capital blocked (14M.1 discipline).
     tr = _sealed(_tr(one=_oh(trigger_state="RETEST_IN_PROGRESS",
                              alert_truth_label="WATCH_ONLY",
-                             pullback_retest_hold={"retest_truth": "RETEST_REAL",
+                             pullback_retest_hold={"retest_truth": "NONE",
                                                    "hold_truth": "HOLD_WEAK"},
                              candle_truth={"event_type": "REJECTION",
                                            "closed_candle_confirms": False})))
@@ -171,6 +173,21 @@ def test_hostile_rejection_blocks_capital():
     assert tr["capital_action"] == "wait_no_capital"
     recon = tr["snipe_promotion_reconciliation"]
     assert recon["capital_blockers"]
+
+
+def test_weak_1h_with_alive_base_floors_starter_14s():
+    # Phase 14S recalibration: the same weak 1H WITH an alive base (real retest
+    # truth, invalidation clear, zone defended) is a full-size gap -> STARTER.
+    tr = _sealed(_tr(one=_oh(trigger_state="RETEST_IN_PROGRESS",
+                             alert_truth_label="WATCH_ONLY",
+                             pullback_retest_hold={"retest_truth": "RETEST_REAL",
+                                                   "hold_truth": "HOLD_WEAK"},
+                             candle_truth={"event_type": "REJECTION",
+                                           "closed_candle_confirms": False})))
+    assert tr["final_tier"] == "STARTER"
+    assert tr["capital_action"] == "starter_only"
+    recon = tr["snipe_promotion_reconciliation"]
+    assert recon["snipe_only_blockers"], "full-size gap must be named"
 
 
 # ===========================================================================
