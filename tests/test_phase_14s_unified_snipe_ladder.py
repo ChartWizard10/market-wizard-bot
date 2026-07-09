@@ -632,3 +632,122 @@ def test_full_pipeline_end_to_end_json_safe():
     json.dumps(row, allow_nan=False)
     assert row["tier"] == "STARTER"
     assert row["capital_action"] == "starter_only"
+
+
+# ===========================================================================
+# Phase 14S.1 — audit recompute parity
+#
+# Root cause: state_store.record_alert never persists a nested final_signal
+# (it flattens final_signal fields onto the row's top level instead). Before
+# the 14S.1 fix, snipe_ladder_judgment._card() read structure_event, R:R,
+# invalidation_level/condition, scan_price, overhead_status, and trigger_level
+# ONLY from `obj["final_signal"]`, so on any persisted row `signal == {}` and
+# `structure` was always "" — collapsing every persisted row's recomputed
+# ladder to PASS, regardless of what actually happened at scan time.
+# ===========================================================================
+
+def _flatten_to_persisted_shape(tr: dict) -> dict:
+    """Mirror state_store.record_alert's shape: flatten final_signal fields
+    onto the row's top level and remove the nested final_signal entirely —
+    exactly what a real alert_history row looks like on disk.
+    """
+    signal = tr.get("final_signal") or {}
+    row = {k: v for k, v in tr.items() if k != "final_signal"}
+    row["tier"] = tr.get("final_tier")
+    row["retest_status"] = signal.get("retest_status")
+    row["hold_status"] = signal.get("hold_status")
+    row["risk_reward"] = signal.get("risk_reward")
+    row["invalidation_level"] = signal.get("invalidation_level")
+    row["structure_event"] = signal.get("structure_event")
+    row["overhead_status"] = signal.get("overhead_status")
+    row["scan_price"] = signal.get("scan_price")
+    row["targets"] = signal.get("targets") or []
+    assert "final_signal" not in row
+    return row
+
+
+def test_ladder_recompute_matches_live_after_persistence_watch_c():
+    tr = _wts()  # BOS + FVG-style repair; live ladder grades WATCH_C-family
+    live = lad.classify_snipe_ladder(tr)
+    assert live["internal_ladder_tier"] not in ("PASS",), "fixture must not be a genuine PASS"
+
+    row = _flatten_to_persisted_shape(tr)
+    recomputed = lad.classify_snipe_ladder(row)
+
+    assert recomputed["internal_ladder_tier"] == live["internal_ladder_tier"]
+    assert recomputed["internal_ladder_tier"] != "PASS"
+    assert recomputed["existing_final_tier_recommendation"] == live["existing_final_tier_recommendation"]
+
+
+def test_ladder_recompute_matches_live_after_persistence_sniper_a_plus():
+    tr = _wdc(candle={"event_type": "DISPLACEMENT", "closed_candle_confirms": True})
+    tr["higher_timeframe_context"] = {"weekly_campaign_state": "HTF_CONTINUATION",
+                                      "blocks_snipe_contextually": False,
+                                      "monthly_bias": "BULLISH"}
+    live = lad.classify_snipe_ladder(tr)
+    assert live["internal_ladder_tier"] in ("SNIPER_A", "SNIPER_A_PLUS")
+
+    row = _flatten_to_persisted_shape(tr)
+    recomputed = lad.classify_snipe_ladder(row)
+
+    assert recomputed["internal_ladder_tier"] == live["internal_ladder_tier"]
+    assert recomputed["internal_ladder_tier"] != "PASS"
+    assert recomputed["existing_final_tier_recommendation"] == "SNIPE_IT"
+
+
+def test_audit_ladder_source_label_recomputed():
+    tr = _wts()
+    row = _flatten_to_persisted_shape(tr)
+    assert "snipe_ladder" not in row
+    text = audit_access.format_row(row)
+    assert "__SNIPE LADDER__" in text
+    assert "Ladder source: recomputed_from_persisted_row" in text
+
+
+def test_audit_ladder_source_label_stored():
+    tr = _wts()
+    live_ladder = lad.classify_snipe_ladder(tr)
+    row = _flatten_to_persisted_shape(tr)
+    row["snipe_ladder"] = live_ladder  # simulate a future scan-time-persisted row
+    text = audit_access.format_row(row)
+    assert "Ladder source: stored_scan_time" in text
+    assert f"Internal ladder tier: {live_ladder['internal_ladder_tier']}" in text
+
+
+def test_recompute_does_not_change_live_arbitration_contract():
+    """Phase 14S.1 is a display/recompute-only patch — apply_ladder_arbitration's
+    promotion rules, hard-failure blocking, and downgrade-only seal contract
+    are unchanged."""
+    # NEAR_ENTRY + live STARTER_A recommendation promotes only to STARTER.
+    wts = _wts()
+    assert wts["final_tier"] == "NEAR_ENTRY"
+    _arb(wts)
+    assert wts["final_tier"] == "STARTER"
+    assert wts["capital_action"] == "starter_only"
+
+    # STARTER + live SNIPER_A/A+ recommendation promotes only to SNIPE_IT.
+    one = _oh(trigger_state="TRIGGER_LIVE", alert_truth_label="CONFIRMED_TRIGGER",
+              pullback_retest_hold={"retest_truth": "RETEST_CORE_VALID",
+                                    "hold_truth": "HOLD_CONFIRMED"},
+              candle_truth={"event_type": "REJECTION", "closed_candle_confirms": False})
+    starter_row = _tr(sig=_signal(tier="STARTER"), one=one, tf=_TF_FULL,
+                      final_tier="STARTER", capital="starter_only", channel="#starter-signals")
+    _arb(starter_row)
+    assert starter_row["final_tier"] == "SNIPE_IT"
+    assert starter_row["capital_action"] == "full_quality_allowed"
+
+    # WAIT is never promoted.
+    wait_row = _wts()
+    wait_row.update({"final_tier": "WAIT", "capital_action": "no_trade",
+                     "final_discord_channel": "none", "safe_for_alert": False})
+    wait_row["final_signal"]["tier"] = "WAIT"
+    _arb(wait_row)
+    assert wait_row["final_tier"] == "WAIT"
+
+    # Hard failure still blocks all capital.
+    hard_fail = _tr(sig=_signal(scan_price=95.0))  # accepted below invalidation
+    ladder = lad.classify_snipe_ladder(hard_fail)
+    assert ladder["internal_ladder_tier"] in ("PASS", "WATCH_C")
+    _arb(hard_fail)
+    assert hard_fail["capital_action"] in ("wait_no_capital", "no_trade")
+    assert hard_fail["final_tier"] not in ("STARTER", "SNIPE_IT")
