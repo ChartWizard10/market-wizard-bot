@@ -439,14 +439,20 @@ def _format_ladder_lines(row: dict) -> list:
     Source priority: the stored snipe_ladder object (live results carry it from
     arbitration). Persisted rows recompute deterministically from the 14O
     evidence — same read-only pattern as the reconciliation section.
+
+    Phase 14S.1: the source is now labeled explicitly (stored_scan_time vs
+    recomputed_from_persisted_row) — display-only, does not affect
+    classification. state_store.record_alert does not currently persist
+    snipe_ladder, so today every row recomputes; the label keeps that honest.
     """
     from src import snipe_ladder_judgment as ladder_mod  # local import (pure helper)
 
-    ladder = row.get("snipe_ladder") if isinstance(row.get("snipe_ladder"), dict) else None
-    if ladder is None:
-        ladder = ladder_mod.classify_snipe_ladder(row)
+    stored = row.get("snipe_ladder") if isinstance(row.get("snipe_ladder"), dict) else None
+    ladder = stored if stored is not None else ladder_mod.classify_snipe_ladder(row)
+    ladder_source = "stored_scan_time" if stored is not None else "recomputed_from_persisted_row"
     return [
         "__SNIPE LADDER__",
+        f"Ladder source: {_fmt(ladder_source)}",
         f"Internal ladder tier: {_fmt(ladder.get('internal_ladder_tier'))}",
         f"Public signal tier: {_fmt(ladder.get('public_signal_tier'))}",
         f"Opportunity lane: {_fmt(ladder.get('opportunity_lane'))}",

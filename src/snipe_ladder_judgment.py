@@ -146,6 +146,20 @@ def _num(value):
 # Evidence card (normalized view over a live tiering_result OR persisted row)
 # ---------------------------------------------------------------------------
 
+def _signal_or_row(obj, signal, key, default=None):
+    """Phase 14S.1 — persisted alert_history rows flatten final_signal fields
+    onto the row's top level (state_store.record_alert never persists a nested
+    final_signal dict). A live tiering_result always has the nested signal.
+    Prefer the live signal's value; fall back to the row's top-level field so
+    a recompute on a persisted row reads the same evidence a live
+    tiering_result would have provided. Audit-render parity only — does not
+    change ladder thresholds, promotion rules, or any live classification.
+    """
+    if isinstance(signal, dict) and signal.get(key) is not None:
+        return signal.get(key)
+    return obj.get(key, default)
+
+
 def _card(obj) -> dict:
     if not isinstance(obj, dict):
         obj = {}
@@ -163,16 +177,16 @@ def _card(obj) -> dict:
     retest_status = _low(signal.get("retest_status") if signal else obj.get("retest_status"))
     hold_status = _low(signal.get("hold_status") if signal else obj.get("hold_status"))
 
-    rr = _num(signal.get("risk_reward"))
-    inval_level = _num(signal.get("invalidation_level"))
-    price = _num(signal.get("scan_price"))
+    rr = _num(_signal_or_row(obj, signal, "risk_reward"))
+    inval_level = _num(_signal_or_row(obj, signal, "invalidation_level"))
+    price = _num(_signal_or_row(obj, signal, "scan_price"))
     if price is None:
-        price = _num(signal.get("current_price"))
+        price = _num(_signal_or_row(obj, signal, "current_price"))
     inval_clear = bool(
-        (inval_level is not None and str(signal.get("invalidation_condition") or "").strip())
+        (inval_level is not None and str(_signal_or_row(obj, signal, "invalidation_condition") or "").strip())
         or oh_inval.get("clear") is True
     )
-    overhead = _low(signal.get("overhead_status"))
+    overhead = _low(_signal_or_row(obj, signal, "overhead_status"))
     path_label = _s(path.get("path_label"))
     path_ok = (
         path_label in ("CLEAN", "ACCEPTABLE")
@@ -186,7 +200,7 @@ def _card(obj) -> dict:
 
     return {
         "signal": signal, "oh": oh, "tf": tf, "htf": htf, "tl": tl,
-        "structure": _s(signal.get("structure_event")),
+        "structure": _s(_signal_or_row(obj, signal, "structure_event")),
         "retest_status": retest_status, "hold_status": hold_status,
         "retest_truth": _s(prh.get("retest_truth")),
         "hold_truth": _s(prh.get("hold_truth")),
@@ -555,7 +569,7 @@ def _classify(obj) -> dict:
     next_proofs = []
     if tier in (WATCH_C, STARTER_B, STARTER_A):
         if c["trigger"] not in _CONFIRMED_TRIGGERS:
-            trig_level = _num(c["signal"].get("trigger_level"))
+            trig_level = _num(_signal_or_row(obj, c["signal"], "trigger_level"))
             next_proofs.append(
                 f"1H closed hold above {trig_level:.2f}" if trig_level is not None
                 else "1H closed-hold confirmation")
