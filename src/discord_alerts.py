@@ -14,6 +14,7 @@ import re
 from src import higher_timeframe_context as _htf_context
 from src import snipe_gate_audit as _snipe_audit
 from src import timeframe_alignment as _tf_alignment
+from src.display_formatting import format_usd_price
 
 log = logging.getLogger(__name__)
 
@@ -618,9 +619,9 @@ def _derive_upgrade_trigger(
         if source == "zone_low":
             return (
                 f"Retest the active zone and close back above "
-                f"{level:.2f} with hold confirmation."
+                f"{format_usd_price(level)} with hold confirmation."
             )
-        return f"Body close / acceptance above {level:.2f} with hold confirmation."
+        return f"Body close / acceptance above {format_usd_price(level)} with hold confirmation."
 
     if candle:
         veto = str(candle.get("candle_veto", "NONE")).strip().upper()
@@ -2361,10 +2362,14 @@ def _render_overhead_label(
 # ---------------------------------------------------------------------------
 
 def _fmt_level(v) -> str:
+    """Phase 14S.2 — every human-facing equity price gets a leading '$'.
+    Display-only: never mutates the underlying numeric value; the '—'
+    placeholder and non-numeric string fallback are unchanged.
+    """
     if v is None:
         return "—"
     try:
-        return f"{float(v):.2f}"
+        return format_usd_price(float(v))
     except (TypeError, ValueError):
         return str(v)
 
@@ -2691,8 +2696,11 @@ def format_alert(
     )
 
     # Phase 14C.1: location-aware confirmation string.
+    # Phase 14S.2: a real level renders as a dollar price; the "zone mid"
+    # fallback (used when no numeric confirmation level exists) stays bare —
+    # it is a location label, not a price.
     try:
-        _tl_conf_str = f"{float(_tl_conf):.2f}" if _tl_conf is not None else "zone mid"
+        _tl_conf_str = format_usd_price(float(_tl_conf)) if _tl_conf is not None else "zone mid"
     except (TypeError, ValueError):
         _tl_conf_str = "zone mid"
 

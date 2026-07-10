@@ -155,9 +155,10 @@ class TestRetestHoldCooling:
     def test_structured_execution_fields_unchanged(self):
         body = da.format_alert(_tiering(one_hour=_one_hour()))
         # Trigger / invalidation / target levels survive the cooling pass.
-        assert "Trigger:      102.00" in body
-        assert "99.50" in body
-        assert "T1: 108.00" in body
+        # Phase 14S.2: whole-dollar prices render without a forced ".00".
+        assert "Trigger:      $102" in body
+        assert "$99.50" in body
+        assert "T1: $108" in body
 
 
 # ===========================================================================

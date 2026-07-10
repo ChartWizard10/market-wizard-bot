@@ -292,9 +292,10 @@ class TestCRNTRegressionExact:
         )
 
     def test_upgrade_trigger_uses_3_02_not_3_29(self):
-        """Core regression: synthesized trigger must be 3.02, never 3.29."""
+        """Core regression: synthesized trigger must be 3.02, never 3.29.
+        Phase 14S.2: the price renders with a leading '$'."""
         body = format_alert(self._crnt_tr())
-        assert "Upgrade trigger:    Body close / acceptance above 3.02" in body
+        assert "Upgrade trigger:    Body close / acceptance above $3.02" in body
 
     def test_upgrade_trigger_does_not_use_t1(self):
         """T1 (3.29) must not appear in the Upgrade trigger line."""
@@ -503,7 +504,10 @@ class TestExistingLiveCases:
                          if l.strip().startswith("Upgrade trigger:")]
         assert upgrade_lines
         assert "123.41" not in upgrade_lines[0]
-        assert "124.00" in upgrade_lines[0]
+        # Phase 14S.2: 124.0 is a whole-dollar price, so it renders as "$124"
+        # (no forced ".00"), not "124.00".
+        assert "$124" in upgrade_lines[0]
+        assert "$123.41" not in upgrade_lines[0]
 
     def test_no_upgrade_trigger_none_in_any_case(self):
         """Upgrade trigger must never render as 'none' for any of these cases."""
