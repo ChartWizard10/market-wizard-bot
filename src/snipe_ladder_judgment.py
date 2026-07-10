@@ -35,6 +35,7 @@ tier; WAIT is the existing suppression tier):
 """
 
 from src import snipe_blocker_taxonomy as tax
+from src.display_formatting import format_usd_price
 
 # ---------------------------------------------------------------------------
 # Ladder vocabulary
@@ -571,7 +572,7 @@ def _classify(obj) -> dict:
         if c["trigger"] not in _CONFIRMED_TRIGGERS:
             trig_level = _num(_signal_or_row(obj, c["signal"], "trigger_level"))
             next_proofs.append(
-                f"1H closed hold above {trig_level:.2f}" if trig_level is not None
+                f"1H closed hold above {format_usd_price(trig_level)}" if trig_level is not None
                 else "1H closed-hold confirmation")
         if c["hold_truth"] != "HOLD_CONFIRMED":
             next_proofs.append("closed 1H hold_truth confirmation")
@@ -589,7 +590,7 @@ def _classify(obj) -> dict:
 
     failure_conditions = []
     if c["inval_level"] is not None:
-        failure_conditions.append(f"body close below invalidation {c['inval_level']:.2f}")
+        failure_conditions.append(f"body close below invalidation {format_usd_price(c['inval_level'])}")
     failure_conditions.append("accepted failure of the defended zone")
 
     why_not_higher = {

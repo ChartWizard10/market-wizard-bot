@@ -256,12 +256,13 @@ class TestDeriveMissingConditions:
 class TestDeriveUpgradeTrigger:
     def test_confirmation_level_preferred(self):
         result = _derive_upgrade_trigger({}, {"confirmation_level": 49.0}, {})
-        assert "49.00" in result
+        # Phase 14S.2: whole-dollar prices render as "$49" (no forced ".00").
+        assert "$49" in result
         assert "hold confirmation" in result.lower()
 
     def test_zone_low_fallback(self):
         result = _derive_upgrade_trigger({}, {"zone_low": 44.0}, {})
-        assert "44.00" in result
+        assert "$44" in result
         assert "hold confirmation" in result.lower()
 
     def test_candle_veto_fallback(self):
@@ -428,7 +429,7 @@ class TestEmptyBlockerIntelligence:
             near_entry_blocker_note="",
         )
         body = format_alert(tr)
-        assert "49.00" in body
+        assert "$49" in body
 
     def test_near_entry_blocker_note_is_primary_missing_condition(self):
         """If blocker note is present, it becomes the missing condition."""

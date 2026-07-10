@@ -225,10 +225,11 @@ class TestInvalidationSeparation:
         loc = _loc(location_state="lower_zone_defense", zone_low=19.10)
         tr = _tr(invalidation_level=21.94, trade_location=loc)
         body = format_alert(tr)
-        assert "Deep FVG failure: 19.10" in body
+        # Phase 14S.2: operator-facing prices render with a leading '$'.
+        assert "Deep FVG failure: $19.10" in body
         # Risk invalidation line still names its own level.
         assert "Invalidation:" in body
-        assert "21.94" in body
+        assert "$21.94" in body
 
     def test_levels_not_conflated_on_one_line(self):
         loc = _loc(location_state="lower_zone_defense", zone_low=19.10)
@@ -294,7 +295,8 @@ class TestLocationProofConsistency:
         )
         tr = _tr(final_tier="SNIPE_IT", trade_location=loc)
         body = format_alert(tr)
-        assert "acceptance above 53.47" in body
+        # Phase 14S.2: operator-facing prices render with a leading '$'.
+        assert "acceptance above $53.47" in body
         assert "next proof above" in body.lower()
 
     def test_mid_zone_does_not_imply_add_before_proof(self):
@@ -317,7 +319,8 @@ class TestLocationProofConsistency:
         )
         tr = _tr(final_tier="STARTER", trade_location=loc)
         body = format_alert(tr)
-        assert "add waits for acceptance above 53.47" in body
+        # Phase 14S.2: operator-facing prices render with a leading '$'.
+        assert "add waits for acceptance above $53.47" in body
 
     def test_proof_note_absent_when_confirmation_below_price(self):
         loc = _loc(

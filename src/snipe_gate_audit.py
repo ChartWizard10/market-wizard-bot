@@ -16,6 +16,8 @@ Doctrine (permanent):
 No new indicators. No RSI/MACD/Bollinger/Stochastic. No SMA10 dependency.
 """
 
+from src.display_formatting import format_usd_price
+
 # ---------------------------------------------------------------------------
 # Canonical enums
 # ---------------------------------------------------------------------------
@@ -512,7 +514,7 @@ def _promotion_triggers(signal, oh, status_by_gate) -> list:
 
     if status_by_gate.get("ONE_H_TRIGGER_CONFIRMED") != "PASS" or status_by_gate.get("HOLD_CONFIRMED") != "PASS":
         if trigger_level is not None:
-            triggers.append(f"1H closed hold above {trigger_level:.2f}")
+            triggers.append(f"1H closed hold above {format_usd_price(trigger_level)}")
         else:
             triggers.append("1H closed-hold confirmation")
     if status_by_gate.get("OVERHEAD_CLEAR") == "BLOCK":
@@ -533,7 +535,7 @@ def _survival_conditions(signal) -> list:
     conditions = []
     inval_level = _f(signal.get("invalidation_level"))
     if inval_level is not None:
-        conditions.append(f"avoid body close below invalidation {inval_level:.2f}")
+        conditions.append(f"avoid body close below invalidation {format_usd_price(inval_level)}")
     return conditions
 
 

@@ -199,10 +199,12 @@ def test_alert_fields_from_json_only():
     assert "90" in text
     assert "MSS" in text
     assert "continuation" in text
-    assert "182.50" in text
-    assert "178.20" in text
+    # Phase 14S.2: operator-facing prices render with a leading '$'; a
+    # whole-dollar target (195.00) trims its trailing ".00".
+    assert "$182.50" in text
+    assert "$178.20" in text
     assert "T1" in text
-    assert "195.00" in text
+    assert "$195" in text
 
 
 # ---------------------------------------------------------------------------
