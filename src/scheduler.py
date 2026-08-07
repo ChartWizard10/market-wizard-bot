@@ -5,8 +5,11 @@ Pipeline order (enforced — no shortcuts):
   → indicators.enrich
   → prefilter.prefilter (score + veto + cap)
   → claude_client.async_claude_scan (capped candidates only)
-  → tiering.validate (final tier authority)
-  → state_store.check_alert (dedup)
+  → tiering.validate
+  → evidence organs + SNIPE audit
+  → SNIPE ladder arbitration
+  → SNIPE confirmed seal
+  → state_store.check_alert (dedup on final tier)
   → discord_alerts.send_alert (route + post)
   → state_store.record_alert + save
 
@@ -284,7 +287,7 @@ async def run_scan_pipeline(
     log.info("claude_complete: %d results", len(claude_results))
 
     # ------------------------------------------------------------------
-    # Steps 5–8: Per-result: tiering → dedup → alert → record
+    # Steps 5–8: Per-result: tiering → evidence → final dedup → alert → record
     # ------------------------------------------------------------------
     for cr in claude_results:
         ticker = cr.get("ticker", "UNKNOWN")
@@ -310,7 +313,7 @@ async def run_scan_pipeline(
         total_claude_success += 1
         pf_res = pf_map.get(ticker, {})
 
-        # Step 5: Tiering validation (sole final authority — cannot be bypassed)
+        # Step 5: Tiering validation (base authority; Phase 14S may arbitrate later)
         try:
             tiering_result = tiering.validate(cr["signal"], pf_res, config)
         except Exception as exc:
@@ -320,21 +323,16 @@ async def run_scan_pipeline(
             continue
 
         final_tier = tiering_result.get("final_tier", "WAIT")
-        final_tier_counts[final_tier] = final_tier_counts.get(final_tier, 0) + 1
 
-        # Step 6: Dedup check
+        # Step 6.5: Trajectory (informational — never affects tier, capital, or routing).
+        # Phase 14S.4: trajectory only needs the prior ticker state. Dedup itself is
+        # intentionally deferred until AFTER the ladder + seal so cooldown/tier-
+        # improvement truth is evaluated against the final executable tier.
         try:
-            dedup_decision = state_store.check_alert(
-                tiering_result, state, config, manual_override=is_manual
-            )
-        except Exception as exc:
-            log.warning("DEDUP_ERROR: %s: %s", ticker, exc)
-            dedup_decision = {"should_alert": False, "reason": "dedup_error"}
-
-        # Step 6.5: Trajectory (informational — never affects tier, capital, or routing)
-        try:
+            _ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
+            _previous_state = _ticker_states.get(ticker) if isinstance(_ticker_states, dict) else None
             tiering_result["trajectory"] = trajectory_mod.compute(
-                tiering_result, dedup_decision.get("previous_state")
+                tiering_result, _previous_state
             )
         except Exception as exc:
             log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
@@ -489,6 +487,23 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("CALIBRATION_ERROR: %s: %s", ticker, exc)
             tiering_result["calibration"] = None
+
+        # Step 6.7: FINAL-tier truth + dedup reconciliation (Phase 14S.4).
+        # This is deliberately downstream from every tier-mutating organ. A
+        # preliminary STARTER can legitimately become SNIPER_A/SNIPE_IT here;
+        # cooldown must not suppress that promotion using the stale pre-ladder
+        # tier. The inverse is equally important: a sealed-down SNIPE must not
+        # inherit a stale pre-seal tier-improvement decision. check_alert is
+        # read-only, so moving it here changes no state schema or cooldown law.
+        final_tier = tiering_result.get("final_tier", final_tier)
+        final_tier_counts[final_tier] = final_tier_counts.get(final_tier, 0) + 1
+        try:
+            dedup_decision = state_store.check_alert(
+                tiering_result, state, config, manual_override=is_manual
+            )
+        except Exception as exc:
+            log.warning("DEDUP_ERROR: %s: %s", ticker, exc)
+            dedup_decision = {"should_alert": False, "reason": "dedup_error"}
 
         # Step 7: Discord alert
         try:
