@@ -502,7 +502,7 @@ class TestExistingTierContractUnaffected:
         tr = _tr("SNIPE_IT", reason="Clean structure with confirmed retest and hold.")
         text = format_alert(tr)
         assert "SNIPE_IT conditions met." in text
-        assert "FULL QUALITY" in text
+        assert "FULL-SIZE AUTHORIZED" in text
         assert "NO CAPITAL" not in text
 
     def test_starter_contract_intact(self):

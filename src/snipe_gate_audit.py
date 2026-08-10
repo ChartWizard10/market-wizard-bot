@@ -581,6 +581,148 @@ def _promotion_state(
     return "UNKNOWN"
 
 
+_SNIPER_A_PLUS_SENTENCE = (
+    "SNIPE audit: SNIPE_IT authorized — SNIPER_A_PLUS; complete sequence with "
+    "pristine supporting context."
+)
+_SNIPER_A_SENTENCE = (
+    "SNIPE audit: SNIPE_IT authorized — SNIPER_A; complete executable sequence "
+    "with non-blocking soft caps disclosed."
+)
+_SNIPER_UNGRADED_SENTENCE = (
+    "SNIPE audit: SNIPE_IT authorized; complete executable sequence, capital-ready."
+)
+
+
+def _stale_snipe_label_for_tier(final_tier: str, capital_action) -> str:
+    """Map a non-SNIPE final tier onto the audit label _classify_audit_label
+    would already have chosen for it. Uses ONLY existing enum values and mirrors
+    that function's own tier branches — it re-runs no gate and invents nothing.
+    """
+    cap = str(capital_action or "").strip()
+    if final_tier == "STARTER" and cap == "starter_only":
+        return "STARTER_ONLY_VALID"
+    if final_tier == "NEAR_ENTRY" and cap in ("wait_no_capital", "no_capital", "none", ""):
+        return "NEAR_ENTRY_PENDING"
+    # WAIT / PASS / anything else with capital disabled.
+    return "WATCH_ONLY_BLOCKED"
+
+
+def reconcile_final_snipe_audit_state(tiering_result) -> dict | None:
+    """Phase 14S.5 — FINAL audit-truth reconciliation (diagnostic fields ONLY).
+
+    The gate audit is built at Step 6.59, BEFORE the Phase 14S ladder has the
+    authority to promote STARTER -> SNIPE_IT (Step 6.592) and before the
+    downgrade-only seal (Step 6.595). A legitimate SNIPER_A could therefore
+    finish with final_tier=SNIPE_IT while the stored audit still described the
+    older STARTER state — an audit contradiction, not a trading defect.
+
+    This runs AFTER the seal and repairs only the audit's description of the
+    final state:
+
+      - always mirrors current_final_tier / current_capital_action
+      - when the final post-seal tier is SNIPE_IT and the seal did NOT
+        downgrade: audit_label=SNIPE_CONFIRMED, promotion_state=ALREADY_SNIPE,
+        and a diagnostic that names the internal sniper grade (SNIPER_A vs
+        SNIPER_A_PLUS) without calling SNIPER_A incomplete.
+
+    Seal sovereignty: when the Phase 14M/14Q seal actually applied a downgrade,
+    it owns the contradiction verdict — audit_label, promotion_state, and the
+    seal diagnostic/blocker evidence are left exactly as the seal set them.
+
+    NEVER touches: final_tier, capital_action, routing, safe_for_alert, score,
+    raw/effective SNIPE score, score caps, snipe_grade, the ladder result, any
+    gate/blocker/missing-proof evidence, suppression, or dedup. Never raises.
+    """
+    try:
+        if not isinstance(tiering_result, dict):
+            return None
+        audit = tiering_result.get("snipe_gate_audit")
+        if not isinstance(audit, dict):
+            return None
+        if audit.get("enabled") is False or str(audit.get("status", "")) == "DISABLED":
+            return audit
+
+        final_tier = str(tiering_result.get("final_tier") or "").upper().strip()
+        capital_action = tiering_result.get("capital_action")
+
+        # The current_* fields are pure mirrors of the final decision — always
+        # resynchronize them so the audit never describes a stale tier.
+        audit["current_final_tier"] = tiering_result.get("final_tier")
+        audit["current_capital_action"] = capital_action
+
+        seal = tiering_result.get("snipe_confirmed_seal")
+        seal_applied = isinstance(seal, dict) and seal.get("applied") is True
+
+        ladder = tiering_result.get("snipe_ladder")
+        ladder = ladder if isinstance(ladder, dict) else {}
+        sniper_grade = str(ladder.get("sniper_grade") or "").upper().strip()
+
+        marker = {
+            "applied": False,
+            "reason": None,
+            "seal_authoritative": bool(seal_applied),
+            "sniper_grade": sniper_grade or None,
+            "final_tier": tiering_result.get("final_tier"),
+            "phase": "14S.5",
+        }
+
+        if seal_applied:
+            # A real false-SNIPE contradiction was caught downstream. The seal's
+            # SNIPE_CONFIRMATION_BLOCKED / PROMOTION_BLOCKED verdict, diagnostic
+            # and blocker evidence remain authoritative and untouched.
+            marker["reason"] = "seal downgrade authoritative; audit verdict preserved"
+            audit["final_audit_reconciliation"] = marker
+            return audit
+
+        if final_tier != "SNIPE_IT":
+            # The audit may still carry a SNIPE_CONFIRMED / ALREADY_SNIPE claim it
+            # made at Step 6.59 while the tier was still SNIPE_IT — e.g. when the
+            # LADDER itself (6.592), not the seal, downgraded on a hard failure.
+            # Both values are defined as "final_tier == SNIPE_IT", so on a
+            # non-SNIPE final tier they are provably stale and must not ship.
+            # Corrected using existing enum values only — no gate is re-run, no
+            # evidence is touched, and no new verdict is invented.
+            stale_label = audit.get("audit_label") == "SNIPE_CONFIRMED"
+            stale_promo = audit.get("promotion_state") == "ALREADY_SNIPE"
+            if stale_label:
+                audit["audit_label"] = _stale_snipe_label_for_tier(final_tier, capital_action)
+                audit["diagnostic_sentence"] = _sentence(audit["audit_label"])
+            if stale_promo:
+                audit["promotion_state"] = (
+                    "PROMOTION_BLOCKED"
+                    if (audit.get("blocked_gates") or audit.get("missing_proofs"))
+                    else "PROMOTION_PENDING"
+                )
+            marker["applied"] = bool(stale_label or stale_promo)
+            marker["reason"] = (
+                "stale SNIPE claim corrected for non-SNIPE final tier"
+                if (stale_label or stale_promo)
+                else "final tier is not SNIPE_IT; label left as built"
+            )
+            audit["final_audit_reconciliation"] = marker
+            return audit
+
+        # Final tier is a genuine, unsealed SNIPE_IT — the audit must say so.
+        if sniper_grade == "SNIPER_A_PLUS":
+            sentence = _SNIPER_A_PLUS_SENTENCE
+        elif sniper_grade == "SNIPER_A":
+            sentence = _SNIPER_A_SENTENCE
+        else:
+            sentence = _SNIPER_UNGRADED_SENTENCE
+
+        audit["audit_label"] = "SNIPE_CONFIRMED"
+        audit["promotion_state"] = "ALREADY_SNIPE"
+        audit["diagnostic_sentence"] = sentence
+
+        marker["applied"] = True
+        marker["reason"] = "final SNIPE_IT synchronized to audit truth"
+        audit["final_audit_reconciliation"] = marker
+        return audit
+    except Exception:  # pragma: no cover - defensive; audit truth never breaks a scan
+        return tiering_result.get("snipe_gate_audit") if isinstance(tiering_result, dict) else None
+
+
 def _seal_promotion_state(obj: dict) -> str:
     """Phase 14K consistency seal: PROMOTION_READY may never coexist with an
     active blocker. blocked_gates/missing_proofs already reflect the FULL
@@ -694,7 +836,15 @@ def _grade(score) -> str:
 
 def _sentence(label) -> str:
     return {
-        "SNIPE_CONFIRMED": "SNIPE audit: all critical gates confirm; setup is already SNIPE_IT.",
+        # Phase 14S.5: SNIPE_IT is execution authorization, not a claim that every
+        # proof dimension is pristine. A valid SNIPER_A may carry disclosed,
+        # non-blocking soft caps. The internal sniper grade (SNIPER_A vs
+        # SNIPER_A_PLUS) carries the quality distinction — see
+        # reconcile_final_snipe_audit_state().
+        "SNIPE_CONFIRMED": (
+            "SNIPE audit: critical gates confirm; SNIPE_IT authorized "
+            "(see sniper grade for A vs A+ quality)."
+        ),
         "STARTER_ONLY_VALID": (
             "SNIPE audit: starter valid, but SNIPE promotion waits for 1H closed-hold "
             "proof and cleaner full-size confirmation."

@@ -489,7 +489,7 @@ class TestFormatAlertQualityNoSideEffects:
     def test_capital_label_unchanged_snipe_it(self):
         result = format_alert(_tiering_result("SNIPE_IT"))
         assert "SNIPE_IT conditions met." in result
-        assert "FULL QUALITY" in result
+        assert "FULL-SIZE AUTHORIZED" in result
 
     def test_capital_label_unchanged_starter(self):
         result = format_alert(_tiering_result("STARTER"))
@@ -590,7 +590,7 @@ class TestFormatAlertQualityRegressionGuards:
     def test_quality_line_between_sizing_and_next(self):
         """Quality read line is sandwiched between sizing and Next in ACTION."""
         result = self._render_snipe()
-        sizing_pos  = result.find("FULL QUALITY")
+        sizing_pos  = result.find("FULL-SIZE AUTHORIZED")
         quality_pos = result.find("Quality read:")
         next_pos    = result.find("  Next:")
         assert sizing_pos  != -1

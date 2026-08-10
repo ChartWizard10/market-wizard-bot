@@ -568,7 +568,7 @@ class TestAPlusEliteNoSideEffects:
 
     def test_elite_does_not_change_capital_action_snipe(self):
         result = format_alert(_tiering_result("SNIPE_IT"))
-        assert "FULL QUALITY" in result
+        assert "FULL-SIZE AUTHORIZED" in result
         assert "SNIPE_IT conditions met." in result
 
     def test_elite_does_not_change_capital_action_starter(self):
@@ -579,7 +579,7 @@ class TestAPlusEliteNoSideEffects:
         result = format_alert(
             _tiering_result("SNIPE_IT", trend_state="mature_continuation")
         )
-        assert "FULL QUALITY" in result
+        assert "FULL-SIZE AUTHORIZED" in result
 
     def test_elite_label_does_not_affect_tiering_result_dict(self):
         """The tiering_result dict is not mutated by quality evaluation."""

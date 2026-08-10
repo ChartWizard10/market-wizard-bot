@@ -203,8 +203,11 @@ def test_no_match_friendly_error(tmp_path):
 def test_output_includes_snipe_gate_audit_fields(tmp_path):
     cfg = _write_state(tmp_path, _state(_row("HAE", "scan_20260622_164918_4fc48e")))
     text = "\n".join(audit_access.run_audit(cfg, "HAE", **_AUTH)["messages"])
-    for label in ("SNIPE GATE AUDIT", "Audit label", "Promotion state", "SNIPE score",
-                  "SNIPE grade", "Eligible for SNIPE review", "Blocked gates",
+    # Phase 14S.5: the gate-audit diagnostic score/grade are labeled
+    # "Gate-audit …" so they cannot be confused with the Phase 14S ladder's
+    # sniper grade (SNIPER_A / SNIPER_A_PLUS). Schema keys are unchanged.
+    for label in ("SNIPE GATE AUDIT", "Audit label", "Promotion state", "Gate-audit score",
+                  "Gate-audit grade", "Eligible for SNIPE review", "Blocked gates",
                   "Missing proofs", "Promotion triggers", "Blocking reasons", "Diagnostic"):
         assert label in text
 

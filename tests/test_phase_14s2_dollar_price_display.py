@@ -288,7 +288,9 @@ def test_snipe_score_does_not_receive_dollar_sign():
     row = dict(tr)
     row["tier"] = "NEAR_ENTRY"
     text = audit_access.format_row(row)
-    line = [l for l in text.splitlines() if l.startswith("SNIPE score:")][0]
+    # Phase 14S.5 renamed the human label to "Gate-audit score:" (schema key
+    # snipe_score unchanged); the no-dollar-sign guarantee is unchanged.
+    line = [l for l in text.splitlines() if l.startswith("Gate-audit score:")][0]
     assert "$" not in line
 
 

@@ -546,7 +546,7 @@ class TestCapitalContractUnchangedByHumanization:
         )
         text = format_alert(tr)
         assert "SNIPE_IT conditions met." in text
-        assert "FULL QUALITY" in text
+        assert "FULL-SIZE AUTHORIZED" in text
         assert "NO CAPITAL" not in text
 
 

@@ -480,6 +480,22 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("SNIPE_CONFIRMED_SEAL_ERROR: %s: %s", ticker, exc)
 
+        # Step 6.596: FINAL SNIPE audit-truth reconciliation (Phase 14S.5).
+        # The gate audit was built at Step 6.59 — BEFORE the ladder could promote
+        # STARTER -> SNIPE_IT (6.592) and before the seal (6.595). A legitimate
+        # SNIPER_A could therefore finish SNIPE_IT while the stored audit still
+        # described the older tier. This repairs the audit's DESCRIPTION of the
+        # final state only (current_final_tier/current_capital_action, and — when
+        # the seal did not downgrade — audit_label/promotion_state plus a
+        # grade-aware diagnostic naming SNIPER_A vs SNIPER_A_PLUS). It runs AFTER
+        # the seal, so it can never influence the seal decision, and it never
+        # touches tier, capital, routing, score, or any blocker evidence. When the
+        # seal DID downgrade, its SNIPE_CONFIRMATION_BLOCKED verdict is preserved.
+        try:
+            snipe_gate_audit.reconcile_final_snipe_audit_state(tiering_result)
+        except Exception as exc:
+            log.warning("SNIPE_AUDIT_RECONCILE_ERROR: %s: %s", ticker, exc)
+
         # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
         # capital_action, discord_channel, safe_for_alert, suppression, or dedup)
         try:
