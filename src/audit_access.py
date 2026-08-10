@@ -548,8 +548,12 @@ def format_row(row: dict) -> str:
         "__SNIPE GATE AUDIT__",
         f"Audit label: {_fmt(sga.get('audit_label'))}",
         f"Promotion state: {_fmt(sga.get('promotion_state'))}",
-        f"SNIPE score: {_fmt(sga.get('snipe_score'))}{_score_label_suffix(sga)}",
-        f"SNIPE grade: {_fmt(sga.get('snipe_grade'))}",
+        # Phase 14S.5: label these as the GATE-AUDIT diagnostic score/grade so the
+        # operator cannot confuse them with the Phase 14S ladder's sniper grade
+        # (SNIPER_A / SNIPER_A_PLUS), which is rendered in the __SNIPE LADDER__
+        # section. Schema keys (snipe_score / snipe_grade) are unchanged.
+        f"Gate-audit score: {_fmt(sga.get('snipe_score'))}{_score_label_suffix(sga)}",
+        f"Gate-audit grade: {_fmt(sga.get('snipe_grade'))}",
         f"Eligible for SNIPE review: {_fmt(sga.get('eligible_for_snipe_review'))}",
         f"Blocked gates: {_fmt(sga.get('blocked_gate_names'))}",
         f"Missing proofs: {_fmt(sga.get('missing_proofs'))}",
@@ -1044,8 +1048,8 @@ def _render_candidate(idx: int, row: dict, why: list) -> str:
         f"Final tier: {_fmt(tier)}",
         f"Capital action: {_fmt(row.get('capital_action'))}",
         f"Score: {_fmt(row.get('score'))}",
-        f"SNIPE score: {_fmt_score_line(row)}",
-        f"SNIPE grade: {_fmt(sga.get('snipe_grade'))}",
+        f"Gate-audit score: {_fmt_score_line(row)}",
+        f"Gate-audit grade: {_fmt(sga.get('snipe_grade'))}",
         f"Promotion state: {_fmt(sga.get('promotion_state'))}",
         f"Audit label: {_fmt(sga.get('audit_label'))}",
         f"HTF context: {htf_ctx}",

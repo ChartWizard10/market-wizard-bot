@@ -362,8 +362,8 @@ class TestCapitalContractInvariantUnderVix:
     def test_snipe_it_capital_invariant(self):
         text_base = _format(_snipe_signal())
         text_vix  = _format(_snipe_signal(vix_level=80, vix_regime="extreme"))
-        assert "FULL QUALITY" in text_base
-        assert "FULL QUALITY" in text_vix
+        assert "FULL-SIZE AUTHORIZED" in text_base
+        assert "FULL-SIZE AUTHORIZED" in text_vix
         assert text_base == text_vix  # entire alert body identical
 
     def test_starter_capital_invariant(self):

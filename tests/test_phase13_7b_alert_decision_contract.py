@@ -120,7 +120,7 @@ def test_snipe_it_contract_blocks_no_capital_language():
 
     # Contract headline and sizing must appear
     assert "SNIPE_IT conditions met." in text
-    assert "FULL QUALITY" in text
+    assert "FULL-SIZE AUTHORIZED" in text
     assert "capital authorized after live-chart verification" in text.lower()
 
 
@@ -134,7 +134,7 @@ def test_snipe_it_contract_blocks_starter_size_only_language():
     text = format_alert(tr)
     assert "starter size only" not in text.lower()
     # Still has the SNIPE_IT contract sizing
-    assert "FULL QUALITY" in text
+    assert "FULL-SIZE AUTHORIZED" in text
 
 
 def test_snipe_it_contract_blocks_no_capital_yet():
@@ -488,7 +488,7 @@ def test_contract_guard_snipe_it_cleans_near_entry_language_from_reason():
     assert "blocker resolves" not in text.lower()
     # SNIPE_IT contract intact
     assert "SNIPE_IT conditions met." in text
-    assert "FULL QUALITY" in text
+    assert "FULL-SIZE AUTHORIZED" in text
 
 
 # ===========================================================================
@@ -523,7 +523,7 @@ def test_capital_contract_headlines_per_tier():
 
 
 def test_capital_contract_sizing_contains_key_phrases():
-    assert "FULL QUALITY" in CAPITAL_CONTRACT["SNIPE_IT"]["sizing"]
+    assert "FULL-SIZE AUTHORIZED" in CAPITAL_CONTRACT["SNIPE_IT"]["sizing"]
     assert "capital authorized" in CAPITAL_CONTRACT["SNIPE_IT"]["sizing"]
     assert "STARTER SIZE ONLY" in CAPITAL_CONTRACT["STARTER"]["sizing"]
     assert "reduced-size" in CAPITAL_CONTRACT["STARTER"]["sizing"]

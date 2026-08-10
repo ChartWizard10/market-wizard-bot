@@ -56,7 +56,11 @@ _TIER_BADGE = {
 }
 
 _CAPITAL_LABEL = {
-    "full_quality_allowed": "FULL QUALITY",
+    # Phase 14S.5: SNIPE_IT is execution authorization for full size — not a
+    # claim that every SNIPE is A+ / pristine. The internal ladder grade
+    # (Lane: SNIPER_ENTRY | SNIPER_A vs SNIPER_A_PLUS) carries the quality
+    # distinction. The structured capital_action enum is unchanged.
+    "full_quality_allowed": "FULL-SIZE AUTHORIZED",
     "starter_only":         "STARTER SIZE ONLY",
     "wait_no_capital":      "NO CAPITAL — WATCH ONLY",
     "no_trade":             "NO TRADE",
@@ -83,7 +87,7 @@ _CAPITAL_LABEL = {
 CAPITAL_CONTRACT: dict[str, dict] = {
     "SNIPE_IT": {
         "headline": "SNIPE_IT conditions met.",
-        "sizing": "FULL QUALITY — capital authorized after live-chart verification.",
+        "sizing": "FULL-SIZE AUTHORIZED — capital authorized after live-chart verification.",
         "capital_state": "capital_authorized",
         # Forbidden in SNIPE_IT alert text — longest first within each group.
         "forbidden": [
@@ -156,13 +160,17 @@ CAPITAL_CONTRACT: dict[str, dict] = {
             ("full-size allowed",                   "STARTER SIZE ONLY"),
             # 17
             ("full size allowed",                   "STARTER SIZE ONLY"),
+            # 20 — Phase 14S.5 SNIPE sizing phrase; must never leak into STARTER.
+            ("full-size authorized",                "STARTER SIZE ONLY"),
             # 18
             ("capital authorized",                  "reduced-size capital allocated"),
             # 12
             ("full quality",                        "STARTER SIZE ONLY"),
             # "full-size" / "full size" intentionally excluded — "full-size confirmation
             # not granted" is legitimate STARTER denial language; the bare substring
-            # would produce false positives. "full quality" catches the real risk.
+            # would produce false positives. "full quality" and the specific
+            # "full-size authorized" phrase catch the real risk without that
+            # false-positive exposure.
             # 10
             ("enter long",                          "Monitor entry conditions."),
             # 10
@@ -219,6 +227,8 @@ CAPITAL_CONTRACT: dict[str, dict] = {
             ("snipe_it to starter",               "Watch-only; no capital."),
             # 21 — must precede shorter "capital authorized" (18 chars)
             ("capital is authorized",             "no capital"),
+            # 20 — Phase 14S.5 SNIPE sizing phrase; must never leak into NEAR_ENTRY.
+            ("full-size authorized",              "no capital"),
             # 18
             ("capital authorized",                "no capital"),
             # 17

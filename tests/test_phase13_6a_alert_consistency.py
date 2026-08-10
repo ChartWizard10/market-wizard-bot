@@ -282,7 +282,7 @@ def test_snipe_it_capital_and_action_language_correct():
     assert "SNIPE_IT conditions met." in text
 
     # Must say FULL QUALITY capital label
-    assert "FULL QUALITY" in text
+    assert "FULL-SIZE AUTHORIZED" in text
 
     # Must NOT say NO CAPITAL or WATCH ONLY
     assert "NO CAPITAL" not in text
