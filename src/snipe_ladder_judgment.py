@@ -694,11 +694,216 @@ _ALLOWED_PROMOTIONS = {
 
 _TIER_ORDER = {"WAIT": 0, "PASS": 0, "NEAR_ENTRY": 1, "WATCHLIST": 1, "STARTER": 2, "SNIPE_IT": 3}
 
+# Phase 14S.7 — diagnostic reasons for the direct NEAR_ENTRY -> SNIPE_IT path.
+DIRECT_SNIPE_ALLOWED_REASON = "DIRECT_NEAR_ENTRY_TO_SNIPE_ALLOWED_BY_COMPLETE_SNIPER_PROOF"
+DIRECT_SNIPE_BLOCKED_REASON = "DIRECT_SNIPE_BLOCKED_BY_INCOMPLETE_CAPITAL_PROOF"
+
+# Phase 14S.7B — doctrine floor mirrored from config
+# tiers.snipe_it.min_risk_distance_pct. A stop tighter than this is fake
+# asymmetry: it INFLATES R:R rather than earning it, so it must never
+# authorize SNIPE capital on the direct promotion path.
+_DEFAULT_MIN_RISK_DISTANCE_PCT = 0.35
+
+
+def _min_risk_distance_pct(config) -> float:
+    try:
+        tier_cfg = ((config or {}).get("tiers") or {}).get("snipe_it") or {}
+        return float(tier_cfg.get("min_risk_distance_pct", _DEFAULT_MIN_RISK_DISTANCE_PCT))
+    except (TypeError, ValueError, AttributeError):
+        return _DEFAULT_MIN_RISK_DISTANCE_PCT
+
+
+def allow_direct_near_entry_to_snipe_when_sniper_complete(obj, ladder, config=None):
+    """Phase 14S.7 — may a NEAR_ENTRY baseline jump straight to SNIPE_IT?
+
+    The Phase 14S one-rung cap made a complete, pristine sniper wait an extra
+    scan purely because the Claude/tiering baseline label arrived as
+    NEAR_ENTRY. When the full sniper proof is already complete, hard failures
+    are absent, and the downgrade-only seal still runs afterwards, the scanner
+    should tell that truth now rather than a scan later.
+
+    This gate is deliberately STRICTER than SNIPER_A alone. A SNIPER_A grade
+    can be reached on a still-open bar via the Phase 14Q defensive-rejection
+    rule; doctrine forbids an open candle from creating SNIPE authority, so the
+    two-rung jump additionally demands EXPLICIT closed-candle confirmation.
+    A defensive-but-unclosed candidate keeps the existing behavior (one rung to
+    STARTER, and it may earn SNIPE on a later scan) — the extra rung costs a
+    higher bar, never a lower one.
+
+    Returns (allowed: bool, reason: str). Never raises.
+    """
+    try:
+        grade = str((ladder or {}).get("internal_ladder_tier") or "").upper()
+        if grade not in (SNIPER_A, SNIPER_A_PLUS):
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: ladder grade {grade or 'UNKNOWN'} is not a sniper grade"
+        if (ladder or {}).get("hard_failures"):
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: hard failure present"
+        if (ladder or {}).get("starter_blockers"):
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: starter blocker present"
+
+        c = _card(obj)
+
+        # Closed proof is mandatory for the direct jump — never an open bar alone.
+        if c["closed_confirms"] is not True:
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: no closed-candle confirmation"
+        if c["cc"].get("candle_context") in (tax.CC_HOSTILE, tax.CC_UNRESOLVED, tax.CC_UNKNOWN):
+            return False, (f"{DIRECT_SNIPE_BLOCKED_REASON}: candle context "
+                           f"{c['cc'].get('candle_context')}")
+        # Closed retest + closed hold defense.
+        if c["retest_truth"] not in _REAL_RETEST_TRUTHS:
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: retest truth {c['retest_truth'] or 'NONE'} not real"
+        if c["hold_truth"] != "HOLD_CONFIRMED":
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: hold truth {c['hold_truth'] or 'NONE'} not confirmed"
+        if c["trigger"] not in _CONFIRMED_TRIGGERS:
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: 1H trigger {c['trigger'] or 'NONE'} not confirmed"
+        if c["alert_truth"] in tax._NON_CONFIRMED_ALERT_TRUTHS:
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: alert truth {c['alert_truth']}"
+
+        # Risk contract must be real and numeric.
+        if c["inval_level"] is None or not c["inval_clear"]:
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: invalidation missing or unclear"
+        if c["price"] is not None and c["price"] < c["inval_level"]:
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: price accepted below invalidation"
+        if c["rr"] is None or c["rr"] < _SNIPE_MIN_RR:
+            return False, (f"{DIRECT_SNIPE_BLOCKED_REASON}: R:R "
+                           f"{c['rr'] if c['rr'] is not None else 'missing'} below SNIPE threshold {_SNIPE_MIN_RR}")
+        signal = obj.get("final_signal") if isinstance(obj, dict) else {}
+        signal = signal if isinstance(signal, dict) else {}
+        if not signal.get("targets"):
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: no target path"
+
+        # Fake tight stop: a sub-floor risk distance inflates R:R instead of
+        # earning it. Prefer the already-computed signal field; fall back to
+        # deriving it from price/invalidation.
+        min_rd = _min_risk_distance_pct(config)
+        risk_dist_pct = _num(signal.get("risk_distance_pct"))
+        if risk_dist_pct is None and c["price"] and c["inval_level"] is not None:
+            try:
+                risk_dist_pct = abs(c["price"] - c["inval_level"]) / c["price"] * 100.0
+            except (TypeError, ZeroDivisionError):
+                risk_dist_pct = None
+        if risk_dist_pct is not None and risk_dist_pct < min_rd:
+            return False, (f"{DIRECT_SNIPE_BLOCKED_REASON}: fake tight stop — risk distance "
+                           f"{risk_dist_pct:.3f}% below floor {min_rd}%")
+
+        # Path / location / data quality.
+        if c["path_blocked"] or not c["path_ok"]:
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: path or overhead blocked"
+        if c["freshness"] == "STALE":
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: stale 1H data"
+        if c["htf_blocks"]:
+            return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: HTF context blocks full size"
+
+        return True, f"{DIRECT_SNIPE_ALLOWED_REASON}: {grade} complete closed sniper proof"
+    except Exception:  # pragma: no cover - defensive; never break a scan
+        return False, f"{DIRECT_SNIPE_BLOCKED_REASON}: evaluation error"
+
+
+def snipe_capital_floor_violation(obj, config=None):
+    """Phase 14S.7B — capital-grade floor every SNIPE_IT outcome must clear.
+
+    Returns a reason string when a SNIPE_IT result must NOT stand, else None.
+
+    This is deliberately path-independent. The risk-distance floor is doctrine
+    (`tiers.snipe_it.min_risk_distance_pct`, default 0.35): a stop tighter than
+    the floor INFLATES R:R rather than earning it, so it is fake asymmetry.
+    tiering.py already blocks both SNIPE_IT and STARTER on that condition, so
+    the ladder must not be able to hand back SNIPE capital through ANY route —
+    the SNIPE_IT baseline pass-through, the STARTER->SNIPE_IT single rung, or
+    the NEAR_ENTRY->SNIPE_IT direct jump.
+
+    Risk distance is checked on every basis that is computable: an explicit
+    risk_distance_pct field, trigger-vs-invalidation (tiering.py's own
+    convention), and price-vs-invalidation. If ANY computable basis is below
+    the floor the setup is blocked — a genuine setup has a real stop on both.
+    Never raises.
+    """
+    try:
+        if not isinstance(obj, dict):
+            return None
+        signal = obj.get("final_signal")
+        signal = signal if isinstance(signal, dict) else {}
+
+        inval = _num(signal.get("invalidation_level"))
+        if inval is None:
+            return "no numeric invalidation"
+        if not signal.get("targets"):
+            return "no target path"
+        rr = _num(signal.get("risk_reward"))
+        if rr is None or rr < _SNIPE_MIN_RR:
+            return f"R:R {rr if rr is not None else 'missing'} below SNIPE threshold {_SNIPE_MIN_RR}"
+
+        floor = _min_risk_distance_pct(config)
+        price = _num(signal.get("scan_price")) or _num(signal.get("current_price"))
+        trigger = _num(signal.get("trigger_level"))
+
+        bases = []
+        explicit = _num(signal.get("risk_distance_pct"))
+        if explicit is not None:
+            bases.append(("risk_distance_pct", explicit))
+        # tiering.py convention: (trigger - invalidation) / |trigger| * 100
+        if trigger is not None and trigger != 0:
+            dist = (trigger - inval) / abs(trigger) * 100.0
+            if dist > 0:
+                bases.append(("trigger-vs-invalidation", dist))
+        if price is not None and price != 0:
+            dist = (price - inval) / abs(price) * 100.0
+            if dist > 0:
+                bases.append(("price-vs-invalidation", dist))
+
+        for name, dist in bases:
+            if dist < floor:
+                return (f"fake tight stop — risk distance {dist:.3f}% ({name}) "
+                        f"below floor {floor}%")
+        return None
+    except Exception:  # pragma: no cover - defensive; never break a scan
+        return None
+
+
+def _enforce_snipe_capital_floor(tiering_result, ladder, config=None) -> None:
+    """If the arbitrated result is SNIPE_IT but fails the capital floor, take
+    the capital away. Because tiering.py blocks STARTER on the same fake-
+    asymmetry condition, granting starter capital here would contradict
+    doctrine — the truthful landing is NEAR_ENTRY (no capital). Runs BEFORE the
+    downgrade-only seal, which still runs afterwards and can downgrade further.
+    """
+    try:
+        if _s(tiering_result.get("final_tier")) != "SNIPE_IT":
+            return
+        reason = snipe_capital_floor_violation(tiering_result, config)
+        if not reason:
+            return
+        if isinstance(ladder, dict):
+            ladder["snipe_capital_floor_violation"] = reason
+        _apply_tier(tiering_result, "NEAR_ENTRY", ladder, promoted=False)
+        notes = tiering_result.get("downgrades")
+        if isinstance(notes, list):
+            notes.append(f"SNIPE capital floor: {reason}")
+    except Exception:  # pragma: no cover - defensive; never break a scan
+        return
+
 
 def apply_ladder_arbitration(tiering_result, config=None):
     """Run the ladder judgment and let it govern the final tier. Returns the
     same tiering_result. Never raises. Promotion only NEAR_ENTRY->STARTER or
-    STARTER->SNIPE_IT; WAIT is never promoted; the seal still runs after."""
+    STARTER->SNIPE_IT (plus the 14S.7B direct NEAR_ENTRY->SNIPE_IT jump behind
+    a stricter gate); WAIT is never promoted; the seal still runs after.
+
+    Every SNIPE_IT outcome — however it was reached, including an untouched
+    SNIPE_IT baseline — must clear the capital floor before this returns.
+    """
+    try:
+        _arbitrate_tier(tiering_result, config)
+        if isinstance(tiering_result, dict):
+            _enforce_snipe_capital_floor(
+                tiering_result, tiering_result.get("snipe_ladder"), config
+            )
+        return tiering_result
+    except Exception:  # pragma: no cover - defensive; never break a scan
+        return tiering_result
+
+
+def _arbitrate_tier(tiering_result, config=None):
     try:
         if not isinstance(tiering_result, dict):
             return tiering_result
@@ -718,10 +923,37 @@ def apply_ladder_arbitration(tiering_result, config=None):
         if rec_rank > cur_rank:
             # Promotion path — strictly whitelisted, never from WAIT, one rung.
             if (current, recommended) not in _ALLOWED_PROMOTIONS:
+                # Phase 14S.7: a NEAR_ENTRY baseline whose ladder evidence is a
+                # COMPLETE, closed-proof SNIPER_A/A_PLUS may jump both rungs
+                # rather than wait a scan. The gate below is stricter than the
+                # SNIPER grade alone (it demands explicit closed-candle proof),
+                # WAIT is still never promoted, and the downgrade-only seal
+                # still runs afterwards and can veto a false promotion.
+                if current == "NEAR_ENTRY" and recommended == "SNIPE_IT":
+                    allowed, reason = allow_direct_near_entry_to_snipe_when_sniper_complete(
+                        tiering_result, ladder, config
+                    )
+                    ladder["direct_snipe_decision"] = reason
+                    if allowed:
+                        _apply_tier(tiering_result, "SNIPE_IT", ladder, promoted=True)
+                        return tiering_result
                 # Two-rung recommendation (e.g. NEAR_ENTRY -> SNIPE_IT) promotes
-                # a single rung only; the next scan can earn the rest.
+                # a single rung only; the next scan can earn the rest. The
+                # ladder may not hand out starter capital on a card that fails
+                # the capital floor either — tiering.py blocks STARTER on the
+                # same fake-asymmetry condition, so promoting into it here
+                # would contradict doctrine. (This never DEMOTES a tier that
+                # tiering itself assigned; it only declines to promote.)
                 if (current, "STARTER") in _ALLOWED_PROMOTIONS and rec_rank > _TIER_ORDER["STARTER"]:
+                    floor_reason = snipe_capital_floor_violation(tiering_result, config)
+                    if floor_reason:
+                        ladder["snipe_capital_floor_violation"] = floor_reason
+                        return tiering_result
                     _apply_tier(tiering_result, "STARTER", ladder, promoted=True)
+                return tiering_result
+            floor_reason = snipe_capital_floor_violation(tiering_result, config)
+            if floor_reason and _TIER_ORDER.get(recommended, 0) >= _TIER_ORDER["STARTER"]:
+                ladder["snipe_capital_floor_violation"] = floor_reason
                 return tiering_result
             _apply_tier(tiering_result, recommended, ladder, promoted=True)
             return tiering_result
