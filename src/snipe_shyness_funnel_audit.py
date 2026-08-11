@@ -760,6 +760,33 @@ def _run(rows, state, config, limit, telemetry=None) -> dict:
 
     analyzed = [classify_row(r, config) for r in rows]
 
+    # ---- Phase 14V.1: consume Layer-2 decision traces --------------------
+    # Attach scan-time provenance to rows that already exist in alert_history
+    # (never double-counted), then surface telemetry-ONLY judged rows the
+    # history can never contain: WAIT, cooldown-suppressed, routing-none,
+    # delivery-failed. Analysis failures are Stage-5 facts, not judgments,
+    # and are counted separately rather than forced into an undercall class.
+    backed_ids = _telemetry_scan_ids(telemetry)
+    traces = telemetry_traces_by_scan(telemetry)
+    seen_keys = set()
+    backed_rows = legacy_rows = 0
+    for a in analyzed:
+        key = (str(a.get("scan_id") or ""), str(a.get("ticker") or ""))
+        seen_keys.add(key)
+        t = traces.get(key)
+        if t is not None or key[0] in backed_ids:
+            backed_rows += 1
+            a["telemetry_backed"] = True
+            if isinstance(t, dict):
+                a["telemetry"] = _attach_telemetry_facts(t)
+        else:
+            legacy_rows += 1
+            a["telemetry_backed"] = False
+
+    telemetry_only, analysis_outcomes = _telemetry_only_rows(traces, seen_keys)
+    analyzed.extend(telemetry_only)
+    backed_rows += len(telemetry_only)
+
     tier_counts, class_counts, stage_counts = {}, {}, {}
     low_conf = 0
     above_ceiling = 0
@@ -792,6 +819,9 @@ def _run(rows, state, config, limit, telemetry=None) -> dict:
     return {
         "error": None,
         "source": source,
+        "telemetry_backed_rows": backed_rows,
+        "legacy_rows": legacy_rows,
+        "telemetry_analysis_outcomes": analysis_outcomes,
         "total_rows": len(analyzed),
         "shy_rows": len(shy),
         "no_finding_rows": no_finding,
@@ -800,14 +830,14 @@ def _run(rows, state, config, limit, telemetry=None) -> dict:
         "tier_counts": tier_counts,
         "class_counts": class_counts,
         "stage_counts": stage_counts,
-        "telemetry_scans": _telemetry_scan_count(telemetry),
-        "stages": _stage_rows(stage_counts, _telemetry_scan_count(telemetry)),
+        "telemetry_scans": len(backed_ids),
+        "stages": _stage_rows(stage_counts, len(backed_ids), backed_rows, legacy_rows),
         "top_shyness_stages": [{"stage": s, "count": n} for s, n in top_stages],
         "examples": examples,
         "blind_spots": _blind_spots(config),
-        "persistence_gaps": _persistence_gaps(),
-        "observability_note": _observability_note(),
-        "recommended_next_probes": _next_probes(),
+        "persistence_gaps": _persistence_gaps(backed_rows),
+        "observability_note": _observability_note(backed_rows, legacy_rows),
+        "recommended_next_probes": _next_probes(backed_rows),
         "newest": (analyzed[0].get("alerted_at") if analyzed else None),
         "oldest": (analyzed[-1].get("alerted_at") if analyzed else None),
     }
@@ -823,38 +853,138 @@ TELEMETRY_BACKED_STAGES = {
 }
 
 
-def _telemetry_scan_count(telemetry) -> int:
-    """How many Phase 14V scan summaries are available. Zero means every stage
-    keeps its legacy observability."""
+def _telemetry_scan_ids(telemetry) -> set:
+    """scan_ids for which Phase 14V actually recorded a funnel summary."""
+    out = set()
     if not isinstance(telemetry, dict):
-        return 0
-    items = telemetry.get("scan_summaries")
-    return len(items) if isinstance(items, list) else 0
+        return out
+    for s in telemetry.get("scan_summaries") or []:
+        if isinstance(s, dict) and s.get("scan_id"):
+            out.add(str(s["scan_id"]))
+    return out
 
 
-def _stage_rows(stage_counts, telemetry_scans=0) -> list:
-    """Per-stage observability.
+def telemetry_traces_by_scan(telemetry) -> dict:
+    """Layer-2 decision traces indexed by (scan_id, ticker).
 
-    `telemetry_scans` is the number of Phase 14V scan summaries available. It
-    upgrades stages 1-5 and 12 from NOT_PERSISTED to OBSERVABLE *for
-    telemetry-backed scans only*, and the row says so explicitly. With no
-    telemetry the output is byte-identical to the legacy behavior: null
-    counts, never zero.
+    Phase 14V.1: the audit must actually CONSUME decision traces, not merely
+    count summaries. near_cut / analysis_failed / rate_limited / tiering_failed
+    are kept distinct — a near-cut row is not an analyzed trade, and an
+    analysis failure is not a market judgment.
     """
-    backed = bool(telemetry_scans)
+    out = {}
+    if not isinstance(telemetry, dict):
+        return out
+    for t in telemetry.get("decision_traces") or []:
+        if not isinstance(t, dict):
+            continue
+        sid, tkr = t.get("scan_id"), t.get("ticker")
+        if sid and tkr:
+            out[(str(sid), str(tkr))] = t
+    return out
+
+
+def _telemetry_scan_count(telemetry) -> int:
+    """Retained for compatibility: number of 14V scan summaries available."""
+    return len(_telemetry_scan_ids(telemetry))
+
+
+_TELEMETRY_FACT_KEYS = ("trace_kind", "snipe_ladder", "ladder_source", "judgment",
+                        "suppression", "delivery", "pipeline")
+
+
+def _attach_telemetry_facts(trace) -> dict:
+    """Whitelisted scan-time facts attached to an existing alert_history row.
+    The persisted row remains the classification source — this only adds
+    provenance, so a sent alert is never counted twice."""
+    return {k: trace.get(k) for k in _TELEMETRY_FACT_KEYS if k in trace}
+
+
+def _telemetry_only_row(trace) -> dict:
+    """A judged candidate that alert_history can never contain."""
+    j = trace.get("judgment") if isinstance(trace.get("judgment"), dict) else {}
+    sup = trace.get("suppression") if isinstance(trace.get("suppression"), dict) else {}
+    dlv = trace.get("delivery") if isinstance(trace.get("delivery"), dict) else {}
+    tier = _s(j.get("final_tier")) or "UNKNOWN"
+    ladder = trace.get("snipe_ladder") if isinstance(trace.get("snipe_ladder"), dict) else {}
+
+    classes = []
+    if sup.get("cooldown_suppressed") is True:
+        classes.append(COOLDOWN_SUPPRESSED)
+    elif _s(dlv.get("state")) == "SKIPPED" and dlv.get("skipped_reason"):
+        classes.append(ROUTING_SUPPRESSED if "channel" in str(dlv.get("skipped_reason"))
+                       else CORRECTLY_WAITING_FOR_PROOF)
+    primary = classes[0] if classes else None
+    return {
+        "ticker": trace.get("ticker"), "scan_id": trace.get("scan_id"),
+        "alerted_at": None, "tier": tier,
+        "capital_action": j.get("capital_action"), "score": j.get("score"),
+        "ceiling_tier": tier, "floor_tier": tier,
+        "ladder_tier": ladder.get("internal_ladder_tier"),
+        "ladder_source": trace.get("ladder_source"),
+        "ladder_attribution": (ATTRIBUTION_STORED
+                               if trace.get("ladder_source") == "stored_scan_time"
+                               else ATTRIBUTION_RECONSTRUCTED),
+        "sniper_grade": ladder.get("sniper_grade"),
+        "starter_grade": ladder.get("starter_grade"),
+        "seal_applied": None, "promotion_state": None,
+        "primary_class": primary,
+        "stage": CLASS_STAGE.get(primary) if primary else None,
+        "classes": classes, "is_shy": bool(primary),
+        "ceiling_vs_served": "AT_CEILING",
+        "recompute_confidence": HIGH_CONFIDENCE, "recompute_gaps": [],
+        "blocking_codes": [], "soft_cap_codes": [],
+        "telemetry_backed": True, "telemetry_only": True,
+        "telemetry": _attach_telemetry_facts(trace),
+        "why": ("telemetry-only row: judged at scan time but never written to "
+                "alert_history (delivery state "
+                f"{dlv.get('state')}, check_alert {sup.get('check_alert_reason')})."),
+    }
+
+
+def _telemetry_only_rows(traces, seen_keys) -> tuple:
+    """Judged telemetry rows absent from history, plus Stage-5 outcome counts.
+    Analysis failures never become market judgments."""
+    rows, outcomes = [], {}
+    for key, t in (traces or {}).items():
+        kind = t.get("trace_kind")
+        if kind != "analyzed":
+            if kind:
+                outcomes[str(kind)] = outcomes.get(str(kind), 0) + 1
+            continue
+        if key in seen_keys:
+            continue                       # already in alert_history — no double count
+        rows.append(_telemetry_only_row(t))
+    return rows, outcomes
+
+
+def _stage_rows(stage_counts, telemetry_scans=0, backed_rows=0, legacy_rows=0) -> list:
+    """Per-stage observability, gated on ACTUAL row/scan intersection.
+
+    Phase 14V.1 (H3): a stage is upgraded only when at least one row IN THIS
+    WINDOW came from a scan that recorded telemetry. An unrelated telemetry
+    scan can no longer upgrade 300 legacy rows. A mixed window is reported as
+    PARTIAL, never OBSERVABLE, and the row carries the exact split. With no
+    telemetry-backed rows the output is byte-identical to legacy behavior:
+    null counts, never zero.
+    """
+    backed = bool(backed_rows)
+    mixed = bool(backed_rows and legacy_rows)
     rows = []
     for s in STAGES:
         observability = s["observability"]
         note = s["note"]
         if backed and s["id"] in TELEMETRY_BACKED_STAGES:
-            observability = OBSERVABLE
-            note = (f"{note} Phase 14V telemetry observes this stage for the "
-                    f"{telemetry_scans} scan(s) that recorded it; scans without "
-                    f"telemetry remain unobservable.")
+            observability = PARTIAL if mixed else OBSERVABLE
+            note = (f"{note} Phase 14V telemetry observes this stage for "
+                    f"{backed_rows} telemetry-backed row(s) in this window; "
+                    f"{legacy_rows} legacy row(s) remain unobservable.")
         rows.append({
             "n": s["n"], "stage": s["id"], "scheduler_step": s["scheduler_step"],
             "observability": observability, "note": note,
             "telemetry_backed": bool(backed and s["id"] in TELEMETRY_BACKED_STAGES),
+            "telemetry_backed_rows": backed_rows if s["id"] in TELEMETRY_BACKED_STAGES else None,
+            "legacy_rows": legacy_rows if s["id"] in TELEMETRY_BACKED_STAGES else None,
             "shy_rows_attributed": (
                 stage_counts.get(s["id"], 0) if s["observability"] != NOT_PERSISTED else None
             ),
@@ -881,27 +1011,42 @@ def _blind_spots(config=None) -> list:
     ]
 
 
-def _persistence_gaps() -> list:
-    """Fields the recompute needs that record_alert does not persist. These
-    degrade stages 6 and 10 without any scanner defect being present."""
+def _persistence_gaps(backed_rows=0) -> list:
+    """Fields the recompute needs. Phase 14V closed all three PROSPECTIVELY:
+    record_alert now persists snipe_ladder, invalidation_condition, and
+    candle_evidence. The gaps below are therefore HISTORICAL — they describe
+    legacy rows only, and are stated that way once telemetry-backed rows
+    exist. Historical gaps stay historical; prospective gaps are closed."""
+    scope = ("LEGACY ROWS ONLY — closed prospectively by Phase 14V: "
+             if backed_rows else "")
     return [
         {"field": "final_signal.invalidation_condition",
-         "effect": "The ladder derives inval_clear from the condition text or "
+         "effect": scope + "The ladder derives inval_clear from the condition text or "
                    "one_hour_entry.invalidation.clear. Rows carrying neither "
                    "recompute as a false 'invalidation missing or unclear' hard "
                    "failure; this audit marks them UNCLASSIFIED instead."},
         {"field": "snipe_ladder",
-         "effect": "Stage 10 (ladder arbitration) is always a recompute, so a "
+         "effect": scope + "For a legacy row stage 10 is a recompute, so a "
                    "served tier can legitimately sit ABOVE the recomputed ceiling. "
                    "It also means a below-ceiling row cannot be causally attributed "
                    "to a ladder cap: such rows are reported as POSSIBLE_*_UNDERCALL "
                    "(evidence for review), never as a proven LADDER_CAPPED event."},
         {"field": "candle_evidence",
-         "effect": "Open-bar/candle-veto truth seen at scan time is not replayable."},
+         "effect": scope + "Open-bar/candle-veto truth seen at scan time is not replayable."},
     ]
 
 
-def _observability_note() -> str:
+def _observability_note(backed_rows=0, legacy_rows=0) -> str:
+    if backed_rows:
+        return (
+            f"MIXED WINDOW: {backed_rows} row(s) are Phase 14V telemetry-backed and "
+            f"{legacy_rows} are legacy. For telemetry-backed scans the funnel stages "
+            "14V records are observed directly and the scan-time snipe_ladder is "
+            "stored, so stage 10 is causally attributable. Legacy rows keep their "
+            "original limits: alert_history holds SENT ALERTS ONLY, their ladder is "
+            "a recompute, and their unobserved stages report null — never zero. "
+            "Historical truth is never retroactively upgraded."
+        )
     return (
         "Persisted alert_history contains SENT ALERTS ONLY (state_store.record_alert "
         "is called from scheduler Step 8 only when send_alert returns sent=True), and "
@@ -913,7 +1058,19 @@ def _observability_note() -> str:
     )
 
 
-def _next_probes() -> list:
+def _next_probes(backed_rows=0) -> list:
+    if backed_rows:
+        return [
+            "Phase 14V telemetry is live: the scan funnel, the scan-time ladder, "
+            "invalidation_condition and candle_evidence are now persisted for new "
+            "scans. Remaining work is historical only — legacy rows can never be "
+            "back-filled.",
+            "Measure how often check_alert evaluates a pre-ladder tier that later "
+            "differs from the served tier (check_alert_evaluated_tier vs final_tier). "
+            "That ordering is recorded, not changed, by Phase 14V.",
+            "Measure basket progression inside one public tier (STARTER_B->STARTER_A, "
+            "SNIPER_A->SNIPER_A_PLUS), which dedup remains blind to.",
+        ]
     return [
         "Persist a per-scan funnel ledger (input -> prefilter pass -> capped candidates -> "
         "claude analyzed -> tier counts -> suppressed) so stages 1-5 and 12 become observable.",
@@ -955,6 +1112,10 @@ def shyness_json(report) -> dict:
         "total_rows": report.get("total_rows", 0),
         "shy_rows": report.get("shy_rows", 0),
         "no_finding_rows": report.get("no_finding_rows", 0),
+        "telemetry_scans": report.get("telemetry_scans", 0),
+        "telemetry_backed_rows": report.get("telemetry_backed_rows", 0),
+        "legacy_rows": report.get("legacy_rows", 0),
+        "telemetry_analysis_outcomes": dict(report.get("telemetry_analysis_outcomes") or {}),
         "low_confidence_rows": report.get("low_confidence_rows", 0),
         "above_recomputed_ceiling_rows": report.get("above_recomputed_ceiling_rows", 0),
         "newest": report.get("newest"),

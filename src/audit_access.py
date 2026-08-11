@@ -1226,6 +1226,7 @@ _AUDITSHY_MAX_SCAN_ROWS = 300
 def build_auditshy_report(config: dict, limit: int = _AUDITSHY_DEFAULT_SCAN_ROWS,
                           json_mode: bool = False) -> dict:
     """Build and render the Phase 14U shyness funnel report. READ-ONLY."""
+    from src import scan_telemetry                       # local import (pure helper)
     from src import snipe_shyness_funnel_audit as ssfa   # local import (pure helper)
 
     loaded = load_state_readonly(config)
@@ -1245,8 +1246,12 @@ def build_auditshy_report(config: dict, limit: int = _AUDITSHY_DEFAULT_SCAN_ROWS
             msg = f"AUDITSHY unavailable — {loaded['message']}"
         return _err(loaded["error"], msg)
 
+    # Phase 14V.1 (B4): the telemetry ledger must actually reach the audit.
+    # STRICTLY the read-only loader — !auditshy never writes, renames,
+    # quarantines, or repairs anything.
     report = ssfa.run_shyness_funnel_audit(
-        state=loaded["state"], config=config, limit=limit
+        state=loaded["state"], config=config, limit=limit,
+        telemetry=scan_telemetry.load_ledger_readonly(config),
     )
 
     if json_mode:

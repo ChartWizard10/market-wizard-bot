@@ -21,6 +21,7 @@ import copy
 import json
 from pathlib import Path
 
+from src import audit_access
 from src import scan_telemetry as tlm
 from src import snipe_confirmed_seal as seal_mod
 from src import snipe_gate_audit as sga_mod
@@ -37,7 +38,7 @@ def _cfg(tmp_path, **over):
         "prefilter": {"max_claude_candidates_per_scan": 30, "prefilter_min_score": 55},
         "state": {"max_memory_entries": 500, "cooldown_minutes": 60,
                   "state_file": str(tmp_path / "alert_history.json")},
-        "telemetry": {"max_scan_summaries": 300, "max_decision_traces": 16000},
+        "telemetry": {"max_scan_summaries": 300, "max_decision_traces": 9000},
         "discord": {"snipe_channel_id": 1497532086335311883},
     }
     cfg.update(over)
@@ -70,13 +71,14 @@ def _summary(tmp_path, **over):
     cfg = _cfg(tmp_path)
     kw = dict(scan_id="scan_20260811_120000_aaaaaa", scan_timestamp="2026-08-11T12:00:00",
               tickers_input=814, data_failures=14, pf_result=_pf_result(), config=cfg,
-              tier_counts={"SNIPE_IT": 2, "STARTER": 5, "NEAR_ENTRY": 9, "WAIT": 14},
+              final_tier_counts={"SNIPE_IT": 2, "STARTER": 5, "NEAR_ENTRY": 9, "WAIT": 14},
               ladder_counts={"SNIPER_A": 2, "STARTER_A": 5, "WATCH_C": 9, "PASS": 14},
               base_tier_counts={"NEAR_ENTRY": 16, "STARTER": 4, "WAIT": 10},
               check_alert_reason_counts={"new_signal": 6, "duplicate_suppressed": 3,
                                          "wait_no_alert": 14},
-              delivery={"attempted": 16, "sent": 6, "failed": 10},
-              claude_analyzed=30, claude_failed=0)
+              delivery={"send_alert_called": 16, "sent": 6, "skipped": 9, "failed": 1},
+              analysis={"admitted": 30, "claude_success": 30, "claude_failed": 0,
+                        "claude_rate_limited": 0, "tiering_failed": 0, "judged": 30})
     kw.update(over)
     return tlm.build_scan_summary(**kw)
 
@@ -114,6 +116,21 @@ def _live_result(tier="NEAR_ENTRY"):
                                 "level_reaction": "HELD"}}
 
 
+def _row_for_scan(scan_id, ticker="AAA"):
+    """A persisted alert_history row belonging to a specific scan."""
+    live = _live_result()
+    return {"ticker": ticker, "scan_id": scan_id, "alerted_at": "2026-08-11T12:00:00",
+            "tier": "STARTER", "capital_action": "starter_only", "score": 88,
+            "trigger_level": 100.0, "invalidation_level": 96.5, "risk_reward": 3.4,
+            "scan_price": 101.0, "targets": [108, 115], "risk_distance_pct": 3.5,
+            "invalidation_condition": "1H close below 96.5",
+            "structure_event": "bos", "retest_status": "confirmed",
+            "hold_status": "confirmed", "overhead_status": "clear",
+            "one_hour_entry": live["one_hour_entry"],
+            "timeframe_alignment": live["timeframe_alignment"],
+            "higher_timeframe_context": live["higher_timeframe_context"]}
+
+
 def _piped(tr, cfg):
     tr["snipe_gate_audit"] = sga_mod.build_snipe_gate_audit("EEE", tr, {}, cfg)
     lad.apply_ladder_arbitration(tr, cfg)
@@ -128,17 +145,20 @@ def _piped(tr, cfg):
 def test_1_scan_summary_records_universe_input_count(tmp_path):
     s = _summary(tmp_path)
     assert s["universe"]["input_count"] == 814
-    assert s["universe"]["market_data_failure"] == 14
-    assert s["universe"]["market_data_success"] == 800
+    assert s["universe"]["data_stage_failure"] == 14
+    assert s["universe"]["data_stage_success"] == 800
 
 
 def test_2_prefilter_rejection_histogram_persists(tmp_path):
     s = _summary(tmp_path)
-    hist = s["prefilter"]["rejection_reason_counts"]
+    hist = s["prefilter"]["primary_rejection_reason_counts"]
     assert hist["hard_veto"] == 20
     assert hist["score_below_floor"] == 20
-    assert hist["veto:VETO_NO_CLEAR_STRUCTURE"] == 20
+    assert s["prefilter"]["veto_flag_counts"]["VETO_NO_CLEAR_STRUCTURE"] == 20
     assert s["prefilter"]["rejected_count"] == 40
+    # the primary histogram reconciles against rejected_count; the multi-label
+    # veto histogram is deliberately kept separate
+    assert sum(hist.values()) == s["prefilter"]["rejected_count"]
 
 
 def test_3_top30_admitted_count_and_cutoff_persist(tmp_path):
@@ -150,11 +170,15 @@ def test_3_top30_admitted_count_and_cutoff_persist(tmp_path):
 
 
 def test_3b_cutoff_is_null_when_the_cap_did_not_bind(tmp_path):
-    """No fake cutoff when fewer than `cap` candidates existed."""
+    """No fake cutoff when the cap excluded nothing — including ranked == cap."""
     s = _summary(tmp_path, pf_result=_pf_result(n_eligible=12, cap=12))
     assert s["prefilter"]["admitted_count"] == 12
     assert s["prefilter"]["cutoff_rank"] is None
     assert s["prefilter"]["cutoff_score"] is None
+    # M3: ranked == cap excluded nothing, so there is no cutoff either
+    exact = _summary(tmp_path, pf_result=_pf_result(n_eligible=30, n_rejected=0, cap=30))
+    assert exact["prefilter"]["cutoff_rank"] is None
+    assert exact["prefilter"]["cutoff_score"] is None
 
 
 def test_4_near_cut_sample_is_ranks_31_to_60_and_bounded():
@@ -417,9 +441,9 @@ def test_retention_defaults_match_the_approved_policy(tmp_path):
     import yaml
     cfg = yaml.safe_load(open("config/doctrine_config.yaml"))
     assert cfg["telemetry"]["max_scan_summaries"] == 300
-    assert cfg["telemetry"]["max_decision_traces"] == 16000
+    assert cfg["telemetry"]["max_decision_traces"] == 9000
     assert tlm._DEFAULT_MAX_SCAN_SUMMARIES == 300
-    assert tlm._DEFAULT_MAX_DECISION_TRACES == 16000
+    assert tlm._DEFAULT_MAX_DECISION_TRACES == 9000
 
 
 def test_malformed_historical_items_are_dropped_not_fatal(tmp_path):
@@ -549,11 +573,15 @@ def test_44_and_45_stage_12_observability_is_telemetry_backed_only():
     assert by_id["DEDUP_AND_COOLDOWN"]["shy_rows_attributed"] is None
     assert legacy["telemetry_scans"] == 0
 
+    # H3: a telemetry summary alone no longer upgrades anything — a row from
+    # that scan must actually be present in the window.
+    row = _row_for_scan("s1")
     backed = ssfa.run_shyness_funnel_audit(
-        rows=[], config={}, telemetry={"scan_summaries": [{"scan_id": "s1"}],
-                                       "decision_traces": []})
+        rows=[row], config={},
+        telemetry={"scan_summaries": [{"scan_id": "s1"}], "decision_traces": []})
     b = {s["stage"]: s for s in backed["stages"]}
     assert backed["telemetry_scans"] == 1
+    assert backed["telemetry_backed_rows"] == 1 and backed["legacy_rows"] == 0
     for stage in ssfa.TELEMETRY_BACKED_STAGES:
         assert b[stage]["observability"] == ssfa.OBSERVABLE, stage
         assert b[stage]["telemetry_backed"] is True
@@ -713,20 +741,20 @@ def test_end_to_end_scan_path_is_reconstructible_from_telemetry(tmp_path):
         {"sent": True}, base_final_tier="NEAR_ENTRY"))
     summary = tlm.build_scan_summary(
         "scan_e2e", "2026-08-11T12:00:00", 814, 14, pf, cfg,
-        tier_counts={"SNIPE_IT": 1}, ladder_counts={"SNIPER_A_PLUS": 1},
+        final_tier_counts={"SNIPE_IT": 1}, ladder_counts={"SNIPER_A_PLUS": 1},
         base_tier_counts={"NEAR_ENTRY": 1},
         check_alert_reason_counts={"new_signal": 1},
-        delivery={"attempted": 1, "sent": 1, "failed": 0},
-        claude_analyzed=30, claude_failed=0)
+        delivery={"send_alert_called": 1, "sent": 1, "skipped": 0, "failed": 0},
+        analysis={"admitted": 30, "claude_success": 30, "judged": 1})
     assert tlm.write_scan_telemetry(cfg, summary, traces) is True
 
     led = tlm.load_ledger(cfg)
     s = led["scan_summaries"][-1]
     assert s["universe"]["input_count"] == 814                      # stage 1
-    assert s["universe"]["market_data_success"] == 800              # stage 2
-    assert s["prefilter"]["rejection_reason_counts"]["hard_veto"] == 20   # stage 3
+    assert s["universe"]["data_stage_success"] == 800               # stage 2
+    assert s["prefilter"]["primary_rejection_reason_counts"]["hard_veto"] == 20   # stage 3
     assert s["prefilter"]["cutoff_rank"] == 30                      # stage 4
-    assert s["analysis"]["claude_analyzed_count"] == 30             # stage 5
+    assert s["analysis"]["claude_success"] == 30                    # stage 5
     assert s["base_tiers"] == {"NEAR_ENTRY": 1}                     # stage 6
     assert s["ladder_baskets"] == {"SNIPER_A_PLUS": 1}              # stage 10
     assert s["suppression"]["check_alert_reason_counts"] == {"new_signal": 1}  # stage 12
@@ -743,3 +771,506 @@ def test_end_to_end_scan_path_is_reconstructible_from_telemetry(tmp_path):
 
     # The scan it observed was never touched.
     assert _strategy_fingerprint(tr) == fingerprint
+
+
+# ===========================================================================
+# PHASE 14V.1 — TELEMETRY TRUTH RECONCILIATION
+# ===========================================================================
+#
+# Every test below closes a defect the adversarial review PROVED. The law:
+#   BASE tier is BASE tier. FINAL tier is FINAL tier.
+#   CHECK_ALERT basis is the state check_alert actually saw.
+#   A skipped message is not a failed message; a failed message must not vanish.
+#   An analysis failure is not a market WAIT.
+#   A legacy row is not telemetry-backed because some unrelated scan has telemetry.
+
+
+def _served(tr, cfg):
+    """The tier actually served, after ladder + capital floor + seal."""
+    return _piped(tr, cfg)["final_tier"]
+
+
+# ---- B1: base tier vs FINAL SERVED tier -----------------------------------
+
+def test_v1_b1_base_near_entry_promoted_to_snipe_is_counted_as_final_snipe(tmp_path):
+    cfg = _cfg(tmp_path)
+    tr = _live_result("NEAR_ENTRY")
+    base = tr["final_tier"]                      # scheduler :353
+    served = _served(tr, cfg)                    # scheduler :592, post-seal
+    assert base == "NEAR_ENTRY" and served == "SNIPE_IT"
+    s = _summary(tmp_path, base_tier_counts={base: 1}, final_tier_counts={served: 1})
+    assert s["base_tiers"] == {"NEAR_ENTRY": 1}
+    assert s["final_tiers"] == {"SNIPE_IT": 1}
+    assert s["final_tiers"] != s["base_tiers"]
+
+
+def test_v1_b1_seal_downgrade_is_reflected_in_final_tiers(tmp_path):
+    cfg = _cfg(tmp_path)
+    tr = _live_result("SNIPE_IT")
+    tr["capital_action"] = "full_quality_allowed"
+    tr["final_signal"]["tier"] = "SNIPE_IT"
+    base = tr["final_tier"]
+    tr["snipe_gate_audit"] = sga_mod.build_snipe_gate_audit("EEE", tr, {}, cfg)
+    lad.apply_ladder_arbitration(tr, cfg)
+    tr["snipe_gate_audit"].update({"promotion_state": "PROMOTION_BLOCKED",
+                                   "eligible_for_snipe_review": False,
+                                   "blocked_gate_names": ["HOLD_CONFIRMED"],
+                                   "blocking_reasons": ["hold failed on closed 1H bar"]})
+    seal_mod.seal_snipe_confirmed_consistency(tr, cfg)
+    served = tr["final_tier"]
+    assert base == "SNIPE_IT" and served != "SNIPE_IT"
+    s = _summary(tmp_path, base_tier_counts={base: 1}, final_tier_counts={served: 1})
+    assert s["base_tiers"] == {"SNIPE_IT": 1}
+    assert s["final_tiers"] == {served: 1}
+
+
+def test_v1_analysis_failures_are_never_counted_as_final_wait(tmp_path):
+    """3, 4, 5 — Claude failure / rate limit / tiering exception are Stage-5
+    outcomes, not market judgments."""
+    s = _summary(tmp_path, final_tier_counts={"SNIPE_IT": 1},
+                 analysis={"admitted": 4, "claude_success": 2, "claude_failed": 1,
+                           "claude_rate_limited": 1, "tiering_failed": 1, "judged": 1})
+    assert s["final_tiers"] == {"SNIPE_IT": 1}
+    assert "WAIT" not in s["final_tiers"]
+    assert s["analysis"]["claude_rate_limited"] == 1
+    assert s["analysis"]["tiering_failed"] == 1
+
+
+def test_v1_analysis_outcome_conservation(tmp_path):
+    """6 — admitted == success + failed + rate_limited; success == judged + tiering_failed."""
+    a = {"admitted": 30, "claude_success": 27, "claude_failed": 2,
+         "claude_rate_limited": 1, "tiering_failed": 3, "judged": 24}
+    s = _summary(tmp_path, analysis=a)["analysis"]
+    assert s["admitted"] == s["claude_success"] + s["claude_failed"] + s["claude_rate_limited"]
+    assert s["claude_success"] == s["judged"] + s["tiering_failed"]
+
+
+def test_v1_analysis_failure_traces_invent_no_judgment():
+    """26 — a Stage-5 failure trace must not fabricate a tier or basket."""
+    for kind in (tlm.TRACE_ANALYSIS_FAILED, tlm.TRACE_RATE_LIMITED, tlm.TRACE_TIERING_FAILED):
+        t = tlm.build_analysis_failure_trace("s", "EEE", _pf_row("EEE", 90), 5, kind,
+                                             failure_code="claude_rate_limited")
+        assert t["trace_kind"] == kind
+        assert t["pipeline"]["admitted_to_deep_analysis"] is True
+        for forbidden in ("judgment", "snipe_ladder", "suppression", "delivery"):
+            assert forbidden not in t, forbidden
+
+
+# ---- B2 / B3 / H4: delivery state machine ---------------------------------
+
+_SEND_SHAPES = {
+    "sent":        {"ok": True,  "sent": True,  "channel_id": 1, "skipped_reason": None,
+                    "error_type": None},
+    "cooldown":    {"ok": True,  "sent": False, "channel_id": None,
+                    "skipped_reason": "duplicate_suppressed", "error_type": None},
+    "wait":        {"ok": True,  "sent": False, "channel_id": None,
+                    "skipped_reason": "wait_no_alert", "error_type": None},
+    "routing":     {"ok": True,  "sent": False, "channel_id": None,
+                    "skipped_reason": "channel_not_configured",
+                    "error_type": "routing_failure"},
+    "send_error":  {"ok": False, "sent": False, "channel_id": 1, "skipped_reason": None,
+                    "error_type": "discord_send_error"},
+}
+
+
+def test_v1_b3_delivery_state_machine_separates_skipped_from_failed():
+    """9, 10, 11, 12, 13 — an intentional non-send is SKIPPED, never FAILED."""
+    assert tlm.delivery_state(_SEND_SHAPES["sent"]) == tlm.DELIVERY_SENT
+    for skip in ("cooldown", "wait", "routing"):
+        assert tlm.delivery_state(_SEND_SHAPES[skip]) == tlm.DELIVERY_SKIPPED, skip
+    assert tlm.delivery_state(_SEND_SHAPES["send_error"]) == tlm.DELIVERY_FAILED
+
+
+def test_v1_b2_discord_exception_produces_a_failed_trace():
+    """7, 8 — a raised send_alert must still be recorded, as FAILED."""
+    synth = tlm.exception_send_result(RuntimeError("boom"))
+    assert tlm.delivery_state(synth) == tlm.DELIVERY_FAILED
+    assert synth["error_type"] == tlm.DISCORD_EXCEPTION_ERROR
+    assert synth["telemetry_synthesized"] is True
+    assert "boom" not in json.dumps(synth)          # exception text not persisted
+    t = tlm.build_decision_trace("s", "EEE", {}, 1, _live_result(), None, synth)
+    assert t["delivery"]["state"] == tlm.DELIVERY_FAILED
+    assert t["delivery"]["sent"] is False
+
+
+def test_v1_h4_send_alert_called_is_distinct_from_network_attempted():
+    """14 — calling send_alert is not the same as touching the network."""
+    for name, sr in _SEND_SHAPES.items():
+        t = tlm.build_decision_trace("s", "EEE", {}, 1, _live_result(), None, sr)
+        assert t["delivery"]["send_alert_called"] is True, name
+        assert t["delivery"]["network_attempted"] is (sr["channel_id"] is not None), name
+    # unprovable -> None, never a fabricated False
+    assert tlm.network_attempted({"ok": True, "sent": False}) is None
+
+
+def test_v1_scheduler_records_delivery_by_state_not_by_sent_flag():
+    src = Path("src/scheduler.py").read_text(encoding="utf-8")
+    assert 'scan_telemetry.exception_send_result(exc)' in src
+    assert 'scan_telemetry.delivery_state(send_result)' in src
+    assert '_tlm_delivery["skipped"] += 1' in src
+    assert '_tlm_delivery["attempted"]' not in src        # old ambiguous counter gone
+
+
+# ---- M1: check_alert decision basis ---------------------------------------
+
+def test_v1_m1_check_alert_evaluated_tier_is_the_pre_ladder_tier(tmp_path):
+    """15, 16 — the ledger must never imply the FINAL tier was the basis."""
+    cfg = _cfg(tmp_path)
+    tr = _live_result("NEAR_ENTRY")
+    ca_tier, ca_cap = tr["final_tier"], tr["capital_action"]      # scheduler :392
+    dd = {"should_alert": False, "reason": "duplicate_suppressed",
+          "dedup_key": "EEE|NEAR_ENTRY|100.00|96.50"}
+    _piped(tr, cfg)                                              # ladder promotes
+    t = tlm.build_decision_trace("s", "EEE", {}, 1, tr, dd,
+                                 _SEND_SHAPES["cooldown"],
+                                 base_final_tier=ca_tier,
+                                 check_alert_evaluated_tier=ca_tier,
+                                 check_alert_evaluated_capital_action=ca_cap)
+    assert t["suppression"]["check_alert_evaluated_tier"] == "NEAR_ENTRY"
+    assert t["suppression"]["check_alert_evaluated_capital_action"] == "wait_no_capital"
+    assert t["judgment"]["final_tier"] == "SNIPE_IT"      # differs, and is not rewritten
+    assert t["suppression"]["check_alert_reason"] == "duplicate_suppressed"
+    assert t["suppression"]["cooldown_suppressed"] is True
+
+
+def test_v1_check_alert_timing_was_not_changed():
+    """The ordering is MEASURED, not fixed. check_alert must still run before
+    the ladder, and must not be re-run afterwards."""
+    src = Path("src/scheduler.py").read_text(encoding="utf-8")
+    scan = src[src.index("async def run_scan_pipeline"):src.index("async def run_full_scan")]
+    assert scan.count("state_store.check_alert(") == 1
+    assert scan.index("state_store.check_alert(") < scan.index("apply_ladder_arbitration")
+
+
+# ---- H1: state_store must never depend on telemetry -----------------------
+
+def test_v1_h1_record_alert_survives_a_telemetry_projection_fault(tmp_path):
+    """17, 18, 19, 37 — cooldown continuity must survive absurd telemetry input."""
+    assert tlm._num(10 ** 400) is None                    # no OverflowError
+    cfg = _cfg(tmp_path)
+    tr = _piped(_live_result(), cfg)
+    tr["snipe_ladder"]["starter_grade"] = 10 ** 400       # poison the projection
+    state = {"tickers": {}, "meta": {}}
+    state_store.record_alert("EEE", tr, state, cfg, "scan_x")
+    tkr = state["tickers"]["EEE"]
+    assert tkr["last_alerted_at"] is not None             # alert recorded
+    assert tkr["alert_history"]                           # history appended
+    assert tkr["last_alerted_tier"] == tr["final_tier"]   # cooldown armed
+    decision = state_store.check_alert(tr, state, cfg)
+    assert decision["reason"] == "duplicate_suppressed"   # cooldown works
+
+
+# ---- B4 + Layer-2 consumption ---------------------------------------------
+
+def _write_ledger(cfg, summary, traces):
+    assert tlm.write_scan_telemetry(cfg, summary, traces) is True
+
+
+def test_v1_b4_auditshy_actually_loads_the_telemetry_ledger(tmp_path):
+    """20 — the ledger must reach the production command."""
+    cfg = _cfg(tmp_path, audit_access={"enabled": True, "allowed_user_ids": ["4242"]})
+    Path(cfg["state"]["state_file"]).write_text(json.dumps(
+        {"tickers": {"AAA": {"alert_history": [_row_for_scan("scan_backed")]}},
+         "meta": {}}), encoding="utf-8")
+    _write_ledger(cfg, {"scan_id": "scan_backed"},
+                  [tlm.build_decision_trace("scan_backed", "AAA", {}, 1,
+                                            _piped(_live_result(), cfg), None,
+                                            _SEND_SHAPES["sent"])])
+    out = audit_access.run_auditshy(cfg, "json", user_id="4242")
+    assert out["ok"] is True
+    assert out["json"]["telemetry_scans"] == 1
+    src = Path("src/audit_access.py").read_text(encoding="utf-8")
+    assert "load_ledger_readonly" in src
+
+
+def test_v1_auditshy_ledger_access_is_strictly_read_only(tmp_path):
+    """35 — the audit loader must never write, rename, or quarantine."""
+    cfg = _cfg(tmp_path)
+    p = tlm.telemetry_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{corrupt", encoding="utf-8")
+    before = sorted(x.name for x in p.parent.iterdir())
+    assert tlm.load_ledger_readonly(cfg)["scan_summaries"] == []
+    assert sorted(x.name for x in p.parent.iterdir()) == before
+    assert p.read_text(encoding="utf-8") == "{corrupt"     # untouched
+
+
+def test_v1_layer2_traces_are_consumed_without_double_counting(tmp_path):
+    """21, 22, 23, 24, 25 — telemetry-only rows surface; sent alerts do not duplicate."""
+    cfg = _cfg(tmp_path)
+    tr = _piped(_live_result(), cfg)
+    history_row = _row_for_scan("scan_backed", ticker="AAA")
+    traces = {
+        "AAA": tlm.build_decision_trace("scan_backed", "AAA", {}, 1, tr, None,
+                                        _SEND_SHAPES["sent"]),
+        "WWW": tlm.build_decision_trace("scan_backed", "WWW", {}, 2, tr,
+                                        {"reason": "wait_no_alert", "should_alert": False},
+                                        _SEND_SHAPES["wait"]),
+        "CCC": tlm.build_decision_trace("scan_backed", "CCC", {}, 3, tr,
+                                        {"reason": "duplicate_suppressed",
+                                         "should_alert": False},
+                                        _SEND_SHAPES["cooldown"]),
+        "RRR": tlm.build_decision_trace("scan_backed", "RRR", {}, 4, tr,
+                                        {"reason": "new_signal", "should_alert": True},
+                                        _SEND_SHAPES["routing"]),
+    }
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[history_row], config=cfg,
+        telemetry={"scan_summaries": [{"scan_id": "scan_backed"}],
+                   "decision_traces": list(traces.values())})
+    tickers = [r["ticker"] for r in rep["examples"]] + \
+              [r.get("ticker") for r in (rep.get("examples") or [])]
+    assert rep["total_rows"] == 4          # 1 history + 3 telemetry-only, AAA not doubled
+    assert sum(1 for _ in [t for t in traces if t == "AAA"]) == 1
+    assert rep["telemetry_backed_rows"] == 4
+    assert rep["legacy_rows"] == 0
+
+
+def test_v1_cooldown_and_routing_suppression_become_emittable(tmp_path):
+    """Newly observable classes — and DEDUP_SUPPRESSED still is not (53)."""
+    cfg = _cfg(tmp_path)
+    tr = _piped(_live_result(), cfg)
+    cool = tlm.build_decision_trace("s1", "CCC", {}, 1, tr,
+                                    {"reason": "duplicate_suppressed", "should_alert": False},
+                                    _SEND_SHAPES["cooldown"])
+    rout = tlm.build_decision_trace("s1", "RRR", {}, 2, tr,
+                                    {"reason": "new_signal", "should_alert": True},
+                                    _SEND_SHAPES["routing"])
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[], config=cfg,
+        telemetry={"scan_summaries": [{"scan_id": "s1"}], "decision_traces": [cool, rout]})
+    assert rep["class_counts"].get(ssfa.COOLDOWN_SUPPRESSED) == 1
+    assert rep["class_counts"].get(ssfa.ROUTING_SUPPRESSED) == 1
+    assert ssfa.DEDUP_SUPPRESSED not in rep["class_counts"]
+
+
+def test_v1_analysis_failure_traces_are_not_market_judgments(tmp_path):
+    """26 — Stage-5 failures are counted as outcomes, not undercalls."""
+    cfg = _cfg(tmp_path)
+    fails = [tlm.build_analysis_failure_trace("s1", "F1", {}, 40, tlm.TRACE_RATE_LIMITED),
+             tlm.build_analysis_failure_trace("s1", "F2", {}, 41, tlm.TRACE_ANALYSIS_FAILED)]
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[], config=cfg,
+        telemetry={"scan_summaries": [{"scan_id": "s1"}], "decision_traces": fails})
+    assert rep["telemetry_analysis_outcomes"] == {tlm.TRACE_RATE_LIMITED: 1,
+                                                  tlm.TRACE_ANALYSIS_FAILED: 1}
+    for cls in rep["class_counts"]:
+        assert "UNDERCALL" not in cls
+
+
+# ---- H3: per-scan observability -------------------------------------------
+
+def test_v1_h3_unrelated_telemetry_scan_does_not_upgrade_legacy_rows():
+    """27 — 300 legacy rows + 1 unrelated telemetry scan must stay legacy."""
+    legacy = [_row_for_scan(f"scan-legacy-{i}", ticker=f"L{i}") for i in range(300)]
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=legacy, config={}, limit=300,
+        telemetry={"scan_summaries": [{"scan_id": "unrelated"}], "decision_traces": []})
+    by_id = {s["stage"]: s for s in rep["stages"]}
+    assert rep["telemetry_backed_rows"] == 0
+    assert rep["legacy_rows"] == 300
+    for stage in ssfa.TELEMETRY_BACKED_STAGES:
+        assert by_id[stage]["observability"] == ssfa.NOT_PERSISTED, stage
+        assert by_id[stage]["shy_rows_attributed"] is None
+
+
+def test_v1_h3_mixed_window_is_partial_not_observable():
+    """28 — matching scan_id upgrades only that evidence; a mix reports PARTIAL."""
+    rows = [_row_for_scan("scan-backed", ticker="B1"),
+            _row_for_scan("scan-legacy", ticker="L1")]
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=rows, config={},
+        telemetry={"scan_summaries": [{"scan_id": "scan-backed"}], "decision_traces": []})
+    by_id = {s["stage"]: s for s in rep["stages"]}
+    assert rep["telemetry_backed_rows"] == 1 and rep["legacy_rows"] == 1
+    assert by_id["DEDUP_AND_COOLDOWN"]["observability"] == ssfa.PARTIAL
+    assert by_id["DEDUP_AND_COOLDOWN"]["telemetry_backed_rows"] == 1
+    assert by_id["DEDUP_AND_COOLDOWN"]["legacy_rows"] == 1
+
+
+# ---- M5: stale honesty text ------------------------------------------------
+
+def test_v1_m5_stale_ladder_never_persisted_text_is_conditional():
+    """31 — the note must not globally claim the ladder is never persisted."""
+    backed = ssfa.run_shyness_funnel_audit(
+        rows=[_row_for_scan("s1")], config={},
+        telemetry={"scan_summaries": [{"scan_id": "s1"}], "decision_traces": []})
+    note = backed["observability_note"]
+    assert "is not persisted and is recomputed here" not in note
+    assert "MIXED WINDOW" in note or "telemetry-backed" in note
+    gaps = " ".join(g["effect"] for g in backed["persistence_gaps"])
+    assert "always a recompute" not in gaps
+    assert "LEGACY ROWS ONLY" in gaps
+    probes = " ".join(backed["recommended_next_probes"])
+    assert "Persist the Phase 14S snipe_ladder object" not in probes
+    # legacy-only report keeps the original honest text
+    legacy = ssfa.run_shyness_funnel_audit(rows=[], config={})
+    assert "SENT ALERTS ONLY" in legacy["observability_note"]
+
+
+# ---- M6 / M7 / M8: path collision, schema, corruption ---------------------
+
+def test_v1_m6_telemetry_path_collision_fails_closed(tmp_path):
+    """32, 33 — telemetry unavailable is safer than telemetry destroying state."""
+    hist = tmp_path / "alert_history.json"
+    cfg = {"state": {"state_file": str(hist)},
+           "telemetry": {"telemetry_file": str(hist)}}
+    payload = json.dumps({"tickers": {"AAPL": {"last_alerted_at": "2026-01-01T00:00:00",
+                                               "alert_history": []}}, "meta": {}})
+    hist.write_text(payload, encoding="utf-8")
+    assert tlm.telemetry_path_collides(cfg) is True
+    assert tlm.write_scan_telemetry(cfg, {"scan_id": "s"}, []) is False
+    assert hist.read_text(encoding="utf-8") == payload          # byte-identical
+    assert tlm.load_ledger_readonly(cfg)["scan_summaries"] == []
+
+
+def test_v1_m7_schema_mismatch_is_quarantined_not_relabelled(tmp_path):
+    """34 — an old schema must not be silently stamped as the new one."""
+    cfg = _cfg(tmp_path)
+    p = tlm.telemetry_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"schema_version": "14V.1",
+                             "scan_summaries": [{"old": 1}],
+                             "decision_traces": []}), encoding="utf-8")
+    tlm.write_scan_telemetry(cfg, {"scan_id": "new"}, [])
+    after = json.loads(p.read_text(encoding="utf-8"))
+    assert after["schema_version"] == tlm.SCHEMA_VERSION == "14V.2"
+    assert {"old": 1} not in after["scan_summaries"]            # not relabelled
+    assert list(p.parent.glob("*.corrupt.*"))                   # preserved instead
+
+
+def test_v1_m8_corrupt_telemetry_is_preserved_before_starting_fresh(tmp_path):
+    """36 — a transient read failure must not silently destroy the ledger."""
+    cfg = _cfg(tmp_path)
+    tlm.write_scan_telemetry(cfg, {"scan_id": "good"}, [{"ticker": "T1"}, {"ticker": "T2"}])
+    p = tlm.telemetry_path(cfg)
+    p.write_text("{truncated", encoding="utf-8")
+    tlm.write_scan_telemetry(cfg, {"scan_id": "new"}, [])
+    backups = list(p.parent.glob("*.corrupt.*"))
+    assert backups, "corrupt telemetry was destroyed without a backup"
+    assert backups[0].read_text(encoding="utf-8") == "{truncated"
+    hist = Path(cfg["state"]["state_file"])
+    assert not hist.exists() or "scan_summaries" not in hist.read_text(encoding="utf-8")
+
+
+def test_v1_temp_reaping_is_scoped_to_telemetry_only(tmp_path):
+    """48 — stale temps are reaped; unrelated files are never touched."""
+    cfg = _cfg(tmp_path)
+    p = tlm.telemetry_path(cfg)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    stale = p.with_name(p.name + ".tmp.999999")
+    stale.write_text("stale", encoding="utf-8")
+    bystander = p.parent / "alert_history.json"
+    bystander.write_text("{}", encoding="utf-8")
+    tlm.write_scan_telemetry(cfg, {"scan_id": "s"}, [])
+    assert not stale.exists()
+    assert bystander.read_text(encoding="utf-8") == "{}"
+
+
+# ---- M10: bounded free text ------------------------------------------------
+
+def test_v1_m10_free_text_is_bounded_and_source_is_unmutated(tmp_path):
+    """38, 39 — telemetry caps strings; the scanner object is untouched."""
+    cfg = _cfg(tmp_path)
+    tr = _piped(_live_result(), cfg)
+    huge = "X" * 8000
+    tr["final_signal"]["invalidation_condition"] = huge
+    before = copy.deepcopy(tr)
+    t = tlm.build_decision_trace("s", "EEE", {}, 1, tr)
+    assert len(t["risk"]["invalidation_condition"]) == tlm._MAX_TEXT
+    assert tr == before                                   # source unmutated
+    assert tr["final_signal"]["invalidation_condition"] == huge
+
+
+def test_v1_scalar_never_stringifies_containers():
+    assert tlm._scalar({"a": 1}) is None
+    assert tlm._scalar([1, 2]) is None
+    assert tlm._scalar("ok") == "ok"
+    assert tlm._scalar(True) is True
+
+
+# ---- M3 / M4: cutoff + near-cut --------------------------------------------
+
+def test_v1_m3_cutoff_only_when_the_cap_actually_bound(tmp_path):
+    """40, 41."""
+    exact = _summary(tmp_path, pf_result=_pf_result(n_eligible=30, n_rejected=0, cap=30))
+    assert exact["prefilter"]["cutoff_rank"] is None
+    over = _summary(tmp_path, pf_result=_pf_result(n_eligible=31, n_rejected=0, cap=30))
+    assert over["prefilter"]["cutoff_rank"] == 30
+    assert over["prefilter"]["cutoff_score"] == 71
+
+
+def test_v1_m4_near_cut_window_derives_from_the_configured_cap(tmp_path):
+    """42, 43 — and the cap itself is unchanged."""
+    ranked = _pf_result(n_eligible=90)["ranked_results"]
+    default = tlm.near_cut_slice(ranked, _cfg(tmp_path))
+    assert [r for _, r in default] == list(range(31, 61))
+    raised = tlm.near_cut_slice(ranked, {"prefilter": {"max_claude_candidates_per_scan": 40}})
+    assert [r for _, r in raised] == list(range(41, 71))
+    import yaml
+    assert yaml.safe_load(open("config/doctrine_config.yaml"))[
+        "prefilter"]["max_claude_candidates_per_scan"] == 30
+
+
+# ---- M9 / M11 / footprint / parity ----------------------------------------
+
+def test_v1_m9_data_stage_names_reflect_fetch_plus_enrich(tmp_path):
+    """46."""
+    s = _summary(tmp_path)
+    assert "data_stage_success" in s["universe"] and "data_stage_failure" in s["universe"]
+    assert "market_data_success" not in s["universe"]
+
+
+def test_v1_m11_final_write_is_off_the_event_loop():
+    """51."""
+    src = Path("src/scheduler.py").read_text(encoding="utf-8")
+    assert "await asyncio.to_thread(" in src
+    assert "asyncio.to_thread(\n            scan_telemetry.write_scan_telemetry" in src
+
+
+def test_v1_h2_footprint_all_three_mixes_under_bound(tmp_path):
+    """50 — measured with the EXACT production serializer, not a compact proxy."""
+    cfg = _cfg(tmp_path)
+    tr = _piped(_live_result(), cfg)
+    S = _summary(tmp_path)
+    A = tlm.build_decision_trace("scan_20260811_120000_aaaaaa", "EEE",
+                                 _pf_row("EEE", 90), 7, tr,
+                                 {"should_alert": True, "reason": "new_signal",
+                                  "dedup_key": "EEE|SNIPE_IT|100.00|96.50"},
+                                 _SEND_SHAPES["sent"], base_final_tier="NEAR_ENTRY",
+                                 check_alert_evaluated_tier="NEAR_ENTRY")
+    N = tlm.build_near_cut_trace("scan_20260811_120000_aaaaaa", _pf_row("T030", 70), 31)
+    n_sum, n_tr = 300, 9000
+    for frac in (0.0, 0.5, 1.0):
+        na = int(n_tr * frac)
+        ledger = {"schema_version": tlm.SCHEMA_VERSION,
+                  "scan_summaries": [S] * n_sum,
+                  "decision_traces": [A] * na + [N] * (n_tr - na)}
+        p = tmp_path / f"probe_{int(frac * 100)}.json"
+        p.write_text(json.dumps(ledger, allow_nan=False, separators=(",", ":")),
+                     encoding="utf-8")
+        mb = p.stat().st_size / (1024 * 1024)
+        assert mb < 25.0, f"mix {frac}: {mb:.2f} MB exceeds the 25 MB bound"
+
+
+def test_v1_observed_zero_cooldown_suppression_is_allowed(tmp_path):
+    """54 — UNOBSERVABLE != 0, but an OBSERVED count may legitimately be 0."""
+    s = _summary(tmp_path, check_alert_reason_counts={"new_signal": 5})
+    assert s["suppression"]["cooldown_suppressed"] == 0
+    assert s["suppression"]["check_alert_reason_counts"] == {"new_signal": 5}
+
+
+def test_v1_strategy_parity_telemetry_on_versus_off(tmp_path):
+    """49 — every strategy field identical with telemetry exercised."""
+    cfg = _cfg(tmp_path)
+    for mutate in (lambda t: t,
+                   lambda t: (t["one_hour_entry"].__setitem__("trigger_state",
+                                                              "RETEST_IN_PROGRESS"), t)[1]):
+        off = _piped(mutate(_live_result()), cfg)
+        on = _piped(mutate(_live_result()), cfg)
+        tlm.build_decision_trace("s", "EEE", _pf_row("EEE", 90), 3, on,
+                                 {"should_alert": True, "reason": "new_signal"},
+                                 _SEND_SHAPES["sent"], base_final_tier="NEAR_ENTRY",
+                                 check_alert_evaluated_tier="NEAR_ENTRY")
+        tlm.write_scan_telemetry(cfg, _summary(tmp_path), [])
+        assert _strategy_fingerprint(on) == _strategy_fingerprint(off)
