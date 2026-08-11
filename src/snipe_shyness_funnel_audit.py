@@ -313,6 +313,39 @@ def _collect_rows_from_state(state, limit) -> list:
 HIGH_CONFIDENCE = "HIGH"
 LOW_CONFIDENCE = "LOW"
 
+# ---------------------------------------------------------------------------
+# Phase 14U.1 — recompute attribution provenance
+# ---------------------------------------------------------------------------
+#
+# There are TWO different confidence questions, and conflating them is a lie:
+#
+#   1. Can we recompute a plausible CURRENT ladder from the persisted evidence?
+#      -> answered by recompute_confidence (HIGH / LOW)
+#   2. Can we prove this was the ladder/arbitration decision AT SCAN TIME?
+#      -> answered by ladder_attribution
+#
+# A row can be HIGH confidence on (1) and still unproven on (2), because
+# `state_store.record_alert` does not persist `snipe_ladder`. Recomputation is
+# evidence RECONSTRUCTION; it is not scan-time causality.
+#
+# Consequence: LADDER_CAPPED is a causal claim about what the scanner did at
+# stage 10. It may only be asserted when scan-time ladder evidence actually
+# exists. A reconstruction may still surface POSSIBLE_SNIPE_UNDERCALL /
+# POSSIBLE_STARTER_UNDERCALL — useful review evidence, not proven causality.
+#
+# No calendar inference is used anywhere: no merge timestamp, no deploy date,
+# no scanner version guessed from alerted_at. Provenance comes only from
+# whether the row itself carries the ladder object.
+
+ATTRIBUTION_STORED = "STORED_SCAN_TIME"
+ATTRIBUTION_RECONSTRUCTED = "RECONSTRUCTED_NOT_PROVEN"
+
+_RECONSTRUCTION_CAVEAT = (
+    "Current-code recomputation places this row above the served tier, but the "
+    "scan-time snipe_ladder was not persisted, so ladder arbitration cannot be "
+    "causally attributed for this historical row."
+)
+
 
 def recompute_confidence(row) -> dict:
     """How much the recomputed ladder for this persisted row can be trusted.
@@ -454,6 +487,7 @@ def classify_row(row, config=None) -> dict:
             "recompute_confidence": LOW_CONFIDENCE,
             "recompute_gaps": [f"classification error: {exc}"],
             "ladder_source": "error", "ladder_tier": None,
+            "ladder_attribution": ATTRIBUTION_RECONSTRUCTED,
             "sniper_grade": None, "starter_grade": None,
             "seal_applied": False, "promotion_state": None,
             "blocking_codes": [], "soft_cap_codes": [],
@@ -489,6 +523,8 @@ def _classify_row(row, config) -> dict:
     base_ok = clazz.get("base_sequence_confirmed") is True
 
     conf = recompute_confidence(row)
+    attribution = (ATTRIBUTION_STORED if ec["ladder_source"] == "stored_scan_time"
+                   else ATTRIBUTION_RECONSTRUCTED)
 
     classes = []
 
@@ -514,9 +550,19 @@ def _classify_row(row, config) -> dict:
                            blocking_codes, soft_codes, why, conf)
 
     # -- 2. Tier sits BELOW the ceiling this row's own evidence supports ------
+    #
+    # Phase 14U.1 provenance rule. SEAL_DOWNGRADED stays definitive: the seal
+    # marker IS persisted, so the claim rests on scan-time evidence.
+    # LADDER_CAPPED is a causal claim about stage 10 and may only be asserted
+    # when the scan-time ladder itself was persisted. On a reconstruction the
+    # useful signal survives as POSSIBLE_*_UNDERCALL below — evidence for
+    # review, never proven historical causality.
     below_ceiling = _rank(ceiling) > _rank(tier) >= 0
     if below_ceiling:
-        add(SEAL_DOWNGRADED if seal_applied else LADDER_CAPPED)
+        if seal_applied:
+            add(SEAL_DOWNGRADED)
+        elif attribution == ATTRIBUTION_STORED:
+            add(LADDER_CAPPED)
 
     # -- 3. Which stage family holds the row under SNIPE_IT? -----------------
     if _rank(tier) < _rank("SNIPE_IT"):
@@ -568,7 +614,8 @@ def _classify_row(row, config) -> dict:
         elif _rank(tier) < _rank("SNIPE_IT"):
             add(CORRECTLY_WAITING_FOR_PROOF)
 
-    why = _why_sentence(tier, ceiling, floor, classes, blocking_codes, soft_codes, note)
+    why = _why_sentence(tier, ceiling, floor, classes, blocking_codes, soft_codes,
+                        note, attribution, below_ceiling)
     return _row_result(row, ec, tier, ceiling, floor, classes,
                        blocking_codes, soft_codes, why, conf)
 
@@ -586,7 +633,8 @@ def _ceiling_vs_served(tier, ceiling) -> str:
     return "AT_CEILING"
 
 
-def _why_sentence(tier, ceiling, floor, classes, blocking_codes, soft_codes, note) -> str:
+def _why_sentence(tier, ceiling, floor, classes, blocking_codes, soft_codes, note,
+                  attribution=ATTRIBUTION_RECONSTRUCTED, below_ceiling=False) -> str:
     if not classes:
         rel = _ceiling_vs_served(tier, ceiling)
         if rel == "ABOVE_RECOMPUTED_CEILING":
@@ -611,7 +659,10 @@ def _why_sentence(tier, ceiling, floor, classes, blocking_codes, soft_codes, not
         parts.append("soft caps: " + ", ".join(dict.fromkeys(soft_codes)))
     if note:
         parts.append(note)
-    return "; ".join(parts) + "."
+    sentence = "; ".join(parts) + "."
+    if below_ceiling and attribution == ATTRIBUTION_RECONSTRUCTED:
+        sentence += " " + _RECONSTRUCTION_CAVEAT
+    return sentence
 
 
 def _row_result(row, ec, tier, ceiling, floor, classes, blocking_codes,
@@ -632,6 +683,11 @@ def _row_result(row, ec, tier, ceiling, floor, classes, blocking_codes,
         "floor_tier": floor,
         "ladder_tier": ladder.get("internal_ladder_tier"),
         "ladder_source": ec["ladder_source"],
+        # Phase 14U.1 — can the scan-time ladder DECISION be attributed, as
+        # opposed to merely reconstructed? Distinct from recompute_confidence.
+        "ladder_attribution": (ATTRIBUTION_STORED
+                               if ec["ladder_source"] == "stored_scan_time"
+                               else ATTRIBUTION_RECONSTRUCTED),
         "sniper_grade": ladder.get("sniper_grade"),
         "starter_grade": ladder.get("starter_grade"),
         "seal_applied": _d(row, "snipe_confirmed_seal").get("applied") is True,
@@ -792,7 +848,10 @@ def _persistence_gaps() -> list:
                    "failure; this audit marks them UNCLASSIFIED instead."},
         {"field": "snipe_ladder",
          "effect": "Stage 10 (ladder arbitration) is always a recompute, so a "
-                   "served tier can legitimately sit ABOVE the recomputed ceiling."},
+                   "served tier can legitimately sit ABOVE the recomputed ceiling. "
+                   "It also means a below-ceiling row cannot be causally attributed "
+                   "to a ladder cap: such rows are reported as POSSIBLE_*_UNDERCALL "
+                   "(evidence for review), never as a proven LADDER_CAPPED event."},
         {"field": "candle_evidence",
          "effect": "Open-bar/candle-veto truth seen at scan time is not replayable."},
     ]
@@ -830,6 +889,7 @@ def _next_probes() -> list:
 _EXAMPLE_JSON_KEYS = (
     "ticker", "scan_id", "alerted_at", "tier", "capital_action", "score",
     "ceiling_tier", "floor_tier", "ladder_tier", "ladder_source",
+    "ladder_attribution",
     "sniper_grade", "starter_grade", "seal_applied", "promotion_state",
     "primary_class", "stage", "classes", "is_shy", "ceiling_vs_served",
     "recompute_confidence", "recompute_gaps", "blocking_codes",

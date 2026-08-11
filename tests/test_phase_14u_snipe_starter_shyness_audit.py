@@ -252,11 +252,15 @@ def test_never_raises_on_garbage_input():
 # C — classification correctness
 # ===========================================================================
 
-def test_ladder_capped_when_tier_sits_below_its_evidence_ceiling():
+def test_below_ceiling_on_a_recompute_is_a_possible_undercall_not_a_proven_cap():
+    """Phase 14U.1: a below-ceiling row whose scan-time ladder was never
+    persisted is evidence for review, not a proven stage-10 cap."""
     out = ssfa.classify_row(_row(sga=_SGA_CLEAN), CFG)
     assert out["ceiling_tier"] == "SNIPE_IT"
     assert out["tier"] == "STARTER"
-    assert out["primary_class"] == ssfa.LADDER_CAPPED
+    assert out["ladder_attribution"] == ssfa.ATTRIBUTION_RECONSTRUCTED
+    assert ssfa.LADDER_CAPPED not in out["classes"]
+    assert out["primary_class"] == ssfa.POSSIBLE_SNIPE_UNDERCALL
     assert out["stage"] == "LADDER_ARBITRATION"
     assert out["is_shy"] is True
 
@@ -571,3 +575,211 @@ def test_render_emits_every_report_section():
     assert "Read-only diagnostic." in text
     for stage in ssfa.STAGE_IDS:
         assert stage in text
+
+
+# ===========================================================================
+# Phase 14U.1 — recompute attribution truth
+# ===========================================================================
+#
+# LAW: recomputation is evidence RECONSTRUCTION, not scan-time causality.
+#
+#   stored_scan_time ladder            -> may support causal ladder attribution
+#   recomputed_from_persisted_row      -> evidence reconstruction only
+#
+# A reconstruction may say POSSIBLE_SNIPE_UNDERCALL / POSSIBLE_STARTER_UNDERCALL.
+# It may NOT say the historical scanner definitely LADDER_CAPPED the row.
+#
+# No merge timestamp, deploy date, or scanner version inferred from alerted_at
+# is used anywhere — provenance comes only from whether the row itself carries
+# the ladder object.
+
+
+def _stored_ladder(recommendation="SNIPE_IT", rung="SNIPER_A_PLUS"):
+    """A scan-time snipe_ladder object as a future telemetry phase would persist."""
+    return {
+        "internal_ladder_tier": rung,
+        "public_signal_tier": "SNIPER_ENTRY",
+        "existing_final_tier_recommendation": recommendation,
+        "capital_action_recommendation": "full_quality_allowed",
+        "opportunity_lane": rung,
+        "starter_grade": "NONE",
+        "sniper_grade": rung,
+        "base_alive": True,
+        "proof_state": "PRISTINE",
+        "hard_failures": [],
+        "starter_blockers": [],
+        "sniper_only_blockers": [],
+        "soft_caps": [],
+        "info_notes": [],
+        "why_this_ladder_tier": "complete sequence",
+    }
+
+
+def test_u1_historical_starter_recomputing_sniper_is_not_a_proven_ladder_cap():
+    """1 + 9 — a pre-14S.7B-style row must not be rewritten as if the new
+    mechanism existed at its scan time."""
+    out = ssfa.classify_row(_row(sga=_SGA_CLEAN), CFG)
+    assert out["ladder_source"] == "recomputed_from_persisted_row"
+    assert out["ladder_attribution"] == ssfa.ATTRIBUTION_RECONSTRUCTED
+    assert ssfa.LADDER_CAPPED not in out["classes"]
+    assert "cannot be causally attributed" in out["why"]
+
+
+def test_u1_historical_starter_retains_the_possible_snipe_undercall_signal():
+    """2 — the useful review signal is preserved, not thrown away."""
+    out = ssfa.classify_row(_row(sga=_SGA_CLEAN), CFG)
+    assert ssfa.POSSIBLE_SNIPE_UNDERCALL in out["classes"]
+    assert out["is_shy"] is True
+
+
+def test_u1_historical_near_entry_recomputing_starter_is_not_a_proven_cap():
+    """3 + 4 — same rule one rung down: no proven cap, undercall retained."""
+    tf = {**copy.deepcopy(_TF_OK), "alignment_label": "PARTIAL",
+          "operational_timeframe": {"state": "REPAIRING_IN_ZONE"}}
+    out = ssfa.classify_row(
+        _row(tier="NEAR_ENTRY", capital="wait_no_capital", score=80,
+             tf=tf, sga=_SGA_CLEAN), CFG)
+    assert out["tier"] == "NEAR_ENTRY"
+    assert ssfa._rank(out["ceiling_tier"]) > ssfa._rank("NEAR_ENTRY")
+    assert ssfa.LADDER_CAPPED not in out["classes"]
+    assert (ssfa.POSSIBLE_STARTER_UNDERCALL in out["classes"]
+            or ssfa.POSSIBLE_SNIPE_UNDERCALL in out["classes"])
+
+
+def test_u1_stored_scan_time_ladder_may_emit_a_definitive_ladder_cap():
+    """5 — we are fixing epistemology, not disabling the class. With real
+    scan-time ladder evidence the causal attribution is legitimate."""
+    row = _row(sga=_SGA_CLEAN, snipe_ladder=_stored_ladder())
+    out = ssfa.classify_row(row, CFG)
+    assert out["ladder_source"] == "stored_scan_time"
+    assert out["ladder_attribution"] == ssfa.ATTRIBUTION_STORED
+    assert out["primary_class"] == ssfa.LADDER_CAPPED
+    assert out["stage"] == "LADDER_ARBITRATION"
+    assert "cannot be causally attributed" not in out["why"]
+
+
+def test_u1_stored_ladder_seal_downgrade_still_wins_over_ladder_cap():
+    """SEAL_DOWNGRADED stays definitive either way — the seal marker IS
+    persisted, so that attribution always rests on scan-time evidence."""
+    for ladder in (None, _stored_ladder()):
+        kwargs = {"sga": _SGA_CLEAN, "seal": {"applied": True, "reason": "downgrade"}}
+        if ladder is not None:
+            kwargs["snipe_ladder"] = ladder
+        out = ssfa.classify_row(_row(**kwargs), CFG)
+        assert out["primary_class"] == ssfa.SEAL_DOWNGRADED
+        assert out["stage"] == "DOWNGRADE_ONLY_SEAL"
+
+
+def test_u1_clean_snipe_row_is_still_a_no_finding():
+    """6 — no regression on a row sitting at its ceiling."""
+    out = ssfa.classify_row(
+        _row(tier="SNIPE_IT", capital="full_quality_allowed", score=92,
+             sga=_SGA_CLEAN), CFG)
+    assert out["classes"] == []
+    assert out["primary_class"] is None
+    assert out["is_shy"] is False
+
+
+def test_u1_above_recomputed_ceiling_still_a_recompute_limitation():
+    """7 — unchanged: not over-promotion, not shyness."""
+    htf = {**copy.deepcopy(_HTF_OK), "campaign_location_label": "EXTENDED_ABOVE_VALUE",
+           "context_grade": "C", "context_score": 55, "weakens_long_setup": True}
+    out = ssfa.classify_row(
+        _row(tier="SNIPE_IT", capital="full_quality_allowed", score=92,
+             htf=htf, oh=_oh(candle_truth={"event_type": "REJECTION",
+                                           "closed_candle_confirms": False}),
+             sga=_SGA_CLEAN), CFG)
+    assert out["ceiling_vs_served"] == "ABOVE_RECOMPUTED_CEILING"
+    assert out["is_shy"] is False
+    assert "does not persist" in out["why"]
+
+
+def test_u1_missing_floor_cleared_is_never_read_as_a_floor_failure():
+    """8 — the Phase 14S.7C field did not exist on historical scans. Its
+    absence must never be interpreted as a capital-floor failure. Structural
+    proof: this module never inspects the field at all."""
+    src = Path("src/snipe_shyness_funnel_audit.py").read_text(encoding="utf-8")
+    assert "snipe_capital_floor_cleared" not in src
+    out = ssfa.classify_row(_row(sga=_SGA_CLEAN), CFG)
+    assert ssfa.CORRECTLY_BLOCKED_HARD_FAILURE not in out["classes"]
+    # "taxonomy floor" is the TIER floor and is legitimate; what must never
+    # appear is any claim about the CAPITAL floor on a historical row.
+    blob = (" ".join(out["classes"]) + " " + out["why"]).lower()
+    for capital_floor_claim in ("capital floor", "floor_cleared", "floor failed",
+                                "floor violation", "fake tight stop"):
+        assert capital_floor_claim not in blob, capital_floor_claim
+
+
+def test_u1_true_hard_failure_is_still_blocked_not_called_an_undercall():
+    """10 — attribution provenance must not loosen adverse evidence."""
+    row = _row(tier="WAIT", capital="no_trade", score=40,
+               oh=_oh(trigger_state="FAILED_RETEST",
+                      alert_truth_label="FAILED_TRIGGER",
+                      pullback_retest_hold={"retest_truth": "RETEST_FAILED",
+                                            "hold_truth": "HOLD_FAILED"}))
+    out = ssfa.classify_row(row, CFG)
+    assert out["primary_class"] == ssfa.CORRECTLY_BLOCKED_HARD_FAILURE
+    assert out["is_shy"] is False
+    assert not any("UNDERCALL" in c for c in out["classes"])
+
+
+def test_u1_hostile_rejection_remains_adverse():
+    """11 — unchanged."""
+    assert tax.CODE_HOSTILE not in ssfa._CLOSED_BAR_GATES
+    row = _row(sga=_SGA_CLEAN,
+               oh=_oh(candle_truth={"event_type": "REJECTION",
+                                    "closed_candle_confirms": False,
+                                    "wick_rejection": True,
+                                    "body_acceptance": False}),
+               candle_evidence={"candle_veto": "HOSTILE_WICK", "status": "ok"})
+    assert ssfa.ONE_H_PROOF_TOO_STRICT not in _classes(row)
+
+
+def test_u1_definitive_ladder_capped_count_is_not_inflated_by_recomputes():
+    """The aggregate law: class_counts['LADDER_CAPPED'] holds only causally
+    supported rows."""
+    recomputed = [_row(ticker=f"R{i}", sga=_SGA_CLEAN) for i in range(4)]
+    stored = [_row(ticker="S1", sga=_SGA_CLEAN, snipe_ladder=_stored_ladder())]
+    report = ssfa.run_shyness_funnel_audit(rows=recomputed + stored, config=CFG)
+    assert report["class_counts"].get(ssfa.LADDER_CAPPED) == 1
+    assert report["class_counts"].get(ssfa.POSSIBLE_SNIPE_UNDERCALL) == 5
+
+
+def test_u1_blind_stages_and_stage_10_partial_are_unchanged():
+    """12 + 13 — no fake zeroes, and stage 10 is NOT upgraded to OBSERVABLE."""
+    report = ssfa.run_shyness_funnel_audit(rows=[_row(sga=_SGA_CLEAN)], config=CFG)
+    by_id = {s["stage"]: s for s in report["stages"]}
+    assert by_id["LADDER_ARBITRATION"]["observability"] == ssfa.PARTIAL
+    for stage in report["stages"]:
+        if stage["observability"] == ssfa.NOT_PERSISTED:
+            assert stage["shy_rows_attributed"] is None, stage["stage"]
+    assert {b["cls"] for b in report["blind_spots"]} == set(ssfa.UNOBSERVABLE_CLASSES)
+
+
+def test_u1_attribution_is_never_inferred_from_a_calendar():
+    """No merge-time constant, no deploy date, no version guessed from
+    alerted_at. Provenance comes only from the row's own ladder object."""
+    src = Path("src/snipe_shyness_funnel_audit.py").read_text(encoding="utf-8")
+    for forbidden in ("datetime", "merge_", "deployed_at", "release_", "version_boundary"):
+        assert forbidden not in src, forbidden
+    early = ssfa.classify_row(_row(sga=_SGA_CLEAN, alerted_at="2020-01-01T00:00:00"), CFG)
+    late = ssfa.classify_row(_row(sga=_SGA_CLEAN, alerted_at="2099-01-01T00:00:00"), CFG)
+    assert early["ladder_attribution"] == late["ladder_attribution"]
+    assert early["classes"] == late["classes"]
+
+
+def test_u1_json_exposes_attribution_and_stays_sanitized(tmp_path):
+    """15 — the new field is whitelisted; no secrets leak."""
+    state = {"tickers": {"AAA": {"alert_history": [_row(sga=_SGA_CLEAN)]}},
+             "meta": {"total_alerts": 1}}
+    path = tmp_path / "alert_history.json"
+    path.write_text(json.dumps(state), encoding="utf-8")
+    cfg = {**CFG, "state": {**CFG["state"], "state_file": str(path)}}
+    out = audit_access.run_auditshy(cfg, "json", user_id="4242")
+    example = out["json"]["examples"][0]
+    assert example["ladder_attribution"] == ssfa.ATTRIBUTION_RECONSTRUCTED
+    assert set(example) <= set(ssfa._EXAMPLE_JSON_KEYS)
+    blob = json.dumps(out["json"])
+    for secret in ("1497532086335311883", "1497532177359962112", "allowed_user_ids",
+                   str(path)):
+        assert secret not in blob, secret
