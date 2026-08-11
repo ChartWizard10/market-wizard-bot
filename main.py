@@ -196,6 +196,7 @@ def register_commands(
             "`!autoscan stop` — Disable scheduled auto-scan\n"
             "`!audit <scan_id|TICKER> [json]` — Read-only alert_history evidence (operator-gated)\n"
             "`!auditready [rows] [json]` — Radar: recent rows ready for SNIPE review but not promoted (operator-gated)\n"
+            "`!auditshy [rows] [json]` — Funnel: where SNIPE/STARTER opportunity is capped or blocked (operator-gated)\n"
         )
 
     # ------------------------------------------------------------------
@@ -237,6 +238,26 @@ def register_commands(
         except Exception as exc:
             log.error("!auditready error: %s", exc)
             await ctx.send(f"Auditready error: {type(exc).__name__}")
+
+    # ------------------------------------------------------------------
+    # !auditshy  (Phase 14U — read-only SNIPE/STARTER shyness funnel audit)
+    # ------------------------------------------------------------------
+
+    @bot.command(name="auditshy")
+    async def auditshy_cmd(ctx, *, args: str = "") -> None:
+        from src import audit_access
+
+        user_id = getattr(getattr(ctx, "author", None), "id", None)
+        channel_id = getattr(getattr(ctx, "channel", None), "id", None)
+        try:
+            result = audit_access.run_auditshy(
+                config, args, user_id=user_id, channel_id=channel_id
+            )
+            for chunk in result.get("messages", []):
+                await ctx.send(chunk)
+        except Exception as exc:
+            log.error("!auditshy error: %s", exc)
+            await ctx.send(f"Auditshy error: {type(exc).__name__}")
 
     # ------------------------------------------------------------------
     # !scan

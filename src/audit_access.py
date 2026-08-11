@@ -1206,3 +1206,101 @@ def run_auditready(config: dict, args=None, user_id=None, channel_id=None) -> di
     limit = max(_AUDITREADY_MIN_SCAN_ROWS, min(limit, max_rows))
 
     return build_auditready_report(config, limit=limit, json_mode=json_mode)
+
+
+# ===========================================================================
+# Phase 14U — SNIPE / STARTER shyness funnel audit bridge
+# ===========================================================================
+#
+# `!auditshy [rows 10-300] [json]` renders the Phase 14U funnel report over the
+# same read-only state loader and the same permission gate as !audit and
+# !auditready. This bridge adds no new state access, no new configuration
+# surface, and no trading logic — src/snipe_shyness_funnel_audit.py does the
+# classification and is itself read-only. Existing command syntax is unchanged.
+
+_AUDITSHY_DEFAULT_SCAN_ROWS = 100
+_AUDITSHY_MIN_SCAN_ROWS = 10
+_AUDITSHY_MAX_SCAN_ROWS = 300
+
+
+def build_auditshy_report(config: dict, limit: int = _AUDITSHY_DEFAULT_SCAN_ROWS,
+                          json_mode: bool = False) -> dict:
+    """Build and render the Phase 14U shyness funnel report. READ-ONLY."""
+    from src import snipe_shyness_funnel_audit as ssfa   # local import (pure helper)
+
+    loaded = load_state_readonly(config)
+    if not loaded["ok"]:
+        if loaded["error"] == "state_file_not_found":
+            msg = (
+                "AUDITSHY unavailable — alert_history state file not found.\n"
+                "This command must run inside the live production bot container "
+                "with access to `.state/alert_history.json`."
+            )
+        elif loaded["error"] == "state_file_malformed":
+            msg = (
+                "AUDITSHY unavailable — alert_history state file could not be "
+                "parsed.\nNo state was modified."
+            )
+        else:
+            msg = f"AUDITSHY unavailable — {loaded['message']}"
+        return _err(loaded["error"], msg)
+
+    report = ssfa.run_shyness_funnel_audit(
+        state=loaded["state"], config=config, limit=limit
+    )
+
+    if json_mode:
+        payload = ssfa.shyness_json(report)
+        text = "```json\n" + json.dumps(payload, indent=2, default=str) + "\n```"
+        return {"ok": True, "error": None, "match_count": report.get("shy_rows", 0),
+                "json": payload, "messages": _chunk(text)}
+
+    return {"ok": True, "error": None, "match_count": report.get("shy_rows", 0),
+            "json": None, "messages": _chunk(ssfa.render_shyness_funnel_audit(report))}
+
+
+def run_auditshy(config: dict, args=None, user_id=None, channel_id=None) -> dict:
+    """Top-level !auditshy handler. READ-ONLY.
+
+    args: raw string after `!auditshy`, or a token list. Recognizes an optional
+    numeric row-limit (clamped to 10..300) and an optional `json` flag — the
+    same grammar as !auditready, so operators learn one syntax.
+    """
+    auth = is_authorized(config, user_id=user_id, channel_id=channel_id)
+    if not auth["allowed"]:
+        return _err("unauthorized", f"Audit access denied: {auth['reason']}.")
+
+    if isinstance(args, str):
+        tokens = args.split()
+    elif isinstance(args, (list, tuple)):
+        tokens = [str(t) for t in args]
+    else:
+        tokens = []
+
+    json_mode = False
+    limit = None
+    for tok in tokens:
+        t = str(tok).strip().lower()
+        if not t:
+            continue
+        if t == "json":
+            json_mode = True
+        elif t.isdigit():
+            limit = int(t)
+        else:
+            return _err(
+                "usage",
+                "Usage: `!auditshy [rows 10-300] [json]`  e.g. `!auditshy`, "
+                "`!auditshy 50`, `!auditshy json`",
+            )
+
+    cfg = _audit_cfg(config)
+    default_rows = int(cfg.get("auditshy_default_scan_rows", _AUDITSHY_DEFAULT_SCAN_ROWS)
+                       or _AUDITSHY_DEFAULT_SCAN_ROWS)
+    max_rows = int(cfg.get("auditshy_max_scan_rows", _AUDITSHY_MAX_SCAN_ROWS)
+                   or _AUDITSHY_MAX_SCAN_ROWS)
+    if limit is None:
+        limit = default_rows
+    limit = max(_AUDITSHY_MIN_SCAN_ROWS, min(limit, max_rows))
+
+    return build_auditshy_report(config, limit=limit, json_mode=json_mode)
