@@ -875,27 +875,197 @@ def snipe_capital_floor_violation(obj, config=None):
         return f"{FLOOR_EVALUATION_ERROR_REASON}: {type(exc).__name__}"
 
 
-def _enforce_snipe_capital_floor(tiering_result, ladder, config=None) -> None:
+# ---------------------------------------------------------------------------
+# Phase 14S.7C — transactional SNIPE capital safety
+# ---------------------------------------------------------------------------
+#
+# The 14S.7C fault audit proved four injected exception surfaces that could
+# leave SNIPE_IT / full_quality_allowed standing when the universal capital
+# floor had NOT been successfully enforced: a fault during the withdrawal
+# itself, a fault writing the diagnostic marker before the withdrawal, a fault
+# anywhere inside the enforcer, and a fault in the outer wrapper after a SNIPE
+# promotion. The downstream seal cannot rescue any of them (a risk-geometry
+# breach is not a gate blocker, so the seal sees no contradiction).
+#
+# The law: PROVEN FLOOR -> capital may stand. UNPROVEN FLOOR -> full SNIPE
+# capital may not stand. Software failure is not market failure, so the ladder
+# BASKET is preserved as evidence of what the chart graded; only the public
+# capital authorization is withdrawn.
+
+FLOOR_CLEARED_KEY = "snipe_capital_floor_cleared"
+UNPROVEN_FLOOR_REASON = "SNIPE_CAPITAL_FLOOR_NOT_PROVEN"
+EMERGENCY_LANDING_KEY = "snipe_capital_emergency_landing"
+
+
+def _canonical_no_capital_landing() -> dict:
+    """Resolve the canonical NEAR_ENTRY public state ONCE, from the existing
+    tiering maps, BEFORE entering the vulnerable transaction path.
+
+    This is not a second tier system: it is a single fixed state, read from the
+    same CHANNEL_MAP / CAPITAL_MAP `_apply_tier` uses, captured early so the
+    emergency barrier never has to call anything that could itself fail.
+    """
+    channel, capital = "none", "wait_no_capital"
+    try:
+        from src import tiering
+        channel = tiering.CHANNEL_MAP.get("NEAR_ENTRY", "none")
+        capital = tiering.CAPITAL_MAP.get("NEAR_ENTRY", "wait_no_capital")
+    except Exception:  # pragma: no cover - defensive; map import must never bind capital
+        pass
+    return {
+        "final_tier": "NEAR_ENTRY",
+        "capital_action": capital,
+        "final_discord_channel": channel,
+        # governed NEAR_ENTRY value — identical to _apply_tier's rule
+        "safe_for_alert": "NEAR_ENTRY" != "WAIT",
+    }
+
+
+def _snipe_capital_standing(tiering_result) -> bool:
+    """True when public SNIPE capital authorization is still in force. Checked
+    on EITHER field so a half-written hybrid state is caught too."""
+    if not isinstance(tiering_result, dict):
+        return False
+    return (_s(tiering_result.get("final_tier")) == "SNIPE_IT"
+            or str(tiering_result.get("capital_action") or "") == "full_quality_allowed")
+
+
+def _floor_cleared(ladder):
+    """The definitive floor verdict. True = the floor ran and found no
+    violation. False = it ran and found one, or could not be proven. None =
+    it never completed. Only True is permission."""
+    if not isinstance(ladder, dict):
+        return None
+    try:
+        return ladder.get(FLOOR_CLEARED_KEY)
+    except Exception:  # pragma: no cover - hostile mapping
+        return None
+
+
+def _mark_floor_cleared(ladder, cleared) -> None:
+    """Record the verdict. Guarded: a diagnostic write must never be able to
+    block or divert capital safety."""
+    if not isinstance(ladder, dict):
+        return
+    try:
+        ladder[FLOOR_CLEARED_KEY] = cleared
+    except Exception:  # pragma: no cover - hostile mapping
+        return
+
+
+def _record_floor_diagnostics(tiering_result, ladder, reason) -> None:
+    """Diagnostic decoration ONLY. Runs after the capital decision, never
+    before it, and every write is individually guarded."""
+    if not reason:
+        return
+    if isinstance(ladder, dict):
+        try:
+            ladder["snipe_capital_floor_violation"] = reason
+        except Exception:  # pragma: no cover - hostile mapping
+            pass
+    if isinstance(tiering_result, dict):
+        try:
+            notes = tiering_result.get("downgrades")
+            if isinstance(notes, list):
+                notes.append(f"SNIPE capital floor: {reason}")
+        except Exception:  # pragma: no cover - hostile mapping
+            pass
+
+
+def _emergency_no_capital_landing(tiering_result, landing, reason) -> None:
+    """Crash barrier — the last resort when the normal withdrawal machinery
+    faulted while public SNIPE capital was standing and the floor had not
+    definitively cleared.
+
+    Deliberately primitive: every write is a direct dict assignment, each
+    individually guarded, and it never calls _apply_tier (the audit proved
+    _apply_tier can itself fail or partially mutate state). It synchronizes
+    BOTH the top-level fields and final_signal so no hybrid state survives.
+    It does NOT touch internal_ladder_tier — the market judgment stands; only
+    the capital authorization is withdrawn.
+    """
+    if not isinstance(tiering_result, dict):
+        return
+    for key in ("final_tier", "capital_action", "final_discord_channel", "safe_for_alert"):
+        try:
+            tiering_result[key] = landing[key]
+        except Exception:  # pragma: no cover - hostile mapping
+            pass
+    signal = None
+    try:
+        signal = tiering_result.get("final_signal")
+    except Exception:  # pragma: no cover - hostile mapping
+        signal = None
+    if isinstance(signal, dict):
+        for key, value in (("tier", landing["final_tier"]),
+                           ("capital_action", landing["capital_action"]),
+                           ("discord_channel", landing["final_discord_channel"])):
+            try:
+                signal[key] = value
+            except Exception:  # pragma: no cover - hostile mapping
+                pass
+    ladder = None
+    try:
+        ladder = tiering_result.get("snipe_ladder")
+    except Exception:  # pragma: no cover - hostile mapping
+        ladder = None
+    _mark_floor_cleared(ladder, False)
+    if isinstance(ladder, dict):
+        try:
+            ladder[EMERGENCY_LANDING_KEY] = reason
+        except Exception:  # pragma: no cover - hostile mapping
+            pass
+    try:
+        notes = tiering_result.get("downgrades")
+        if isinstance(notes, list):
+            notes.append(f"SNIPE capital withdrawn (fail-closed): {reason}")
+    except Exception:  # pragma: no cover - hostile mapping
+        pass
+
+
+def _enforce_no_unproven_snipe_capital(tiering_result, landing) -> None:
+    """The production invariant: SNIPE capital may only stand on a floor that
+    definitively cleared. Unknown is not permission."""
+    if not _snipe_capital_standing(tiering_result):
+        return
+    ladder = tiering_result.get("snipe_ladder") if isinstance(tiering_result, dict) else None
+    if _floor_cleared(ladder) is True:
+        return
+    _emergency_no_capital_landing(tiering_result, landing, UNPROVEN_FLOOR_REASON)
+
+
+def _enforce_snipe_capital_floor(tiering_result, ladder, config=None, landing=None) -> None:
     """If the arbitrated result is SNIPE_IT but fails the capital floor, take
     the capital away. Because tiering.py blocks STARTER on the same fake-
     asymmetry condition, granting starter capital here would contradict
     doctrine — the truthful landing is NEAR_ENTRY (no capital). Runs BEFORE the
     downgrade-only seal, which still runs afterwards and can downgrade further.
+
+    Phase 14S.7C ordering: capital safety FIRST, diagnostics second. The
+    withdrawal happens before any marker write, and a fault anywhere here lands
+    on the canonical no-capital state instead of returning with SNIPE intact.
     """
+    landing = landing if isinstance(landing, dict) else _canonical_no_capital_landing()
+    reason = None
     try:
         if _s(tiering_result.get("final_tier")) != "SNIPE_IT":
             return
         reason = snipe_capital_floor_violation(tiering_result, config)
         if not reason:
+            _mark_floor_cleared(ladder, True)
             return
-        if isinstance(ladder, dict):
-            ladder["snipe_capital_floor_violation"] = reason
+        _mark_floor_cleared(ladder, False)
+        # SAFETY FIRST: withdraw the capital before decorating anything.
         _apply_tier(tiering_result, "NEAR_ENTRY", ladder, promoted=False)
-        notes = tiering_result.get("downgrades")
-        if isinstance(notes, list):
-            notes.append(f"SNIPE capital floor: {reason}")
-    except Exception:  # pragma: no cover - defensive; never break a scan
-        return
+    except Exception as exc:
+        _mark_floor_cleared(ladder, False)
+        if _snipe_capital_standing(tiering_result):
+            _emergency_no_capital_landing(
+                tiering_result, landing,
+                f"{UNPROVEN_FLOOR_REASON}: enforcement fault {type(exc).__name__}")
+    finally:
+        # Diagnostics are never load-bearing and can never block a withdrawal.
+        _record_floor_diagnostics(tiering_result, ladder, reason)
 
 
 def apply_ladder_arbitration(tiering_result, config=None):
@@ -906,16 +1076,26 @@ def apply_ladder_arbitration(tiering_result, config=None):
 
     Every SNIPE_IT outcome — however it was reached, including an untouched
     SNIPE_IT baseline — must clear the capital floor before this returns.
+
+    Phase 14S.7C: the canonical no-capital landing is resolved BEFORE the
+    vulnerable path, and the invariant guard runs unconditionally on the way
+    out. After this returns, SNIPE_IT + full_quality_allowed implies the floor
+    verdict is definitively True.
     """
+    landing = _canonical_no_capital_landing()
     try:
         _arbitrate_tier(tiering_result, config)
         if isinstance(tiering_result, dict):
             _enforce_snipe_capital_floor(
-                tiering_result, tiering_result.get("snipe_ladder"), config
+                tiering_result, tiering_result.get("snipe_ladder"), config, landing
             )
-        return tiering_result
     except Exception:  # pragma: no cover - defensive; never break a scan
-        return tiering_result
+        pass
+    try:
+        _enforce_no_unproven_snipe_capital(tiering_result, landing)
+    except Exception:  # pragma: no cover - the barrier itself must never raise
+        pass
+    return tiering_result
 
 
 def _arbitrate_tier(tiering_result, config=None):
@@ -950,6 +1130,17 @@ def _arbitrate_tier(tiering_result, config=None):
                     )
                     ladder["direct_snipe_decision"] = reason
                     if allowed:
+                        # Phase 14S.7C — PROVE BEFORE COMMIT. The direct gate
+                        # checks explicit risk_distance_pct and
+                        # price-vs-invalidation; the universal floor adds
+                        # trigger-vs-invalidation (tiering.py's own convention),
+                        # so the two are NOT equivalent. Clear the universal
+                        # floor before writing SNIPE_IT, never after.
+                        floor_reason = snipe_capital_floor_violation(tiering_result, config)
+                        if floor_reason:
+                            _mark_floor_cleared(ladder, False)
+                            _record_floor_diagnostics(tiering_result, ladder, floor_reason)
+                            return tiering_result
                         _apply_tier(tiering_result, "SNIPE_IT", ladder, promoted=True)
                         return tiering_result
                 # Two-rung recommendation (e.g. NEAR_ENTRY -> SNIPE_IT) promotes
