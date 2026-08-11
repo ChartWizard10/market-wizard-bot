@@ -620,3 +620,214 @@ def test_tiering_still_emits_capital_for_a_genuine_risk_distance():
     assert not _fake_asymmetry_reason_present(result), (
         "risk-distance blocker fired on a genuine 4.46% stop")
     assert result["capital_action"] in ("starter_only", "full_quality_allowed")
+
+
+# ===========================================================================
+# 36-51 — Phase 14S.7B hardening: the universal SNIPE capital floor FAILS CLOSED
+# ===========================================================================
+#
+# FAIL-CLOSED LAW: if the scanner cannot prove the SNIPE capital floor is
+# satisfied because the floor evaluator itself errored, it must not authorize
+# SNIPE capital. Unknown safety state is not permission.
+#
+# The exception is injected by monkeypatching _min_risk_distance_pct — an
+# existing pure helper the floor evaluator already depends on. No production
+# code exists solely to make this testable.
+
+
+def _boom(*_a, **_kw):
+    raise RuntimeError("injected floor evaluator fault")
+
+
+def test_floor_evaluation_error_returns_a_violation_not_none(monkeypatch):
+    """1 — an exception inside floor evaluation can never read as 'no violation'."""
+    monkeypatch.setattr(lad, "_min_risk_distance_pct", _boom)
+    reason = lad.snipe_capital_floor_violation(_card("SNIPE_IT"), {})
+    assert reason is not None
+    assert reason.startswith(lad.FLOOR_EVALUATION_ERROR_REASON)
+
+
+def test_floor_evaluation_error_strips_snipe_capital_end_to_end(monkeypatch):
+    """2 — a SNIPE_IT candidate whose floor evaluation errors must not finish
+    SNIPE_IT / full_quality_allowed."""
+    monkeypatch.setattr(lad, "_min_risk_distance_pct", _boom)
+    tr = _full(_card("SNIPE_IT"))
+    assert tr["final_tier"] != "SNIPE_IT"
+    assert tr["capital_action"] != "full_quality_allowed"
+    assert tr["final_discord_channel"] != "#snipe-signals"
+    assert tr["snipe_ladder"]["snipe_capital_floor_violation"].startswith(
+        lad.FLOOR_EVALUATION_ERROR_REASON)
+
+
+def test_floor_evaluation_error_lands_on_the_governed_no_capital_tier(monkeypatch):
+    """2b — the downgrade uses the existing governed floor behavior, inventing
+    no new tier and granting no consolation capital."""
+    monkeypatch.setattr(lad, "_min_risk_distance_pct", _boom)
+    tr = _full(_card("SNIPE_IT"))
+    assert tr["final_tier"] in ("NEAR_ENTRY", "WAIT")
+    assert tr["capital_action"] in ("wait_no_capital", "no_trade")
+    assert tr["final_tier"] in lad._TIER_ORDER
+
+
+def test_floor_evaluation_error_is_deterministic_and_named(monkeypatch):
+    """3 — the failure is deterministic and carries a named violation reason."""
+    monkeypatch.setattr(lad, "_min_risk_distance_pct", _boom)
+    card = _card("SNIPE_IT")
+    first = lad.snipe_capital_floor_violation(card, {})
+    second = lad.snipe_capital_floor_violation(card, {})
+    assert first == second
+    assert lad.FLOOR_EVALUATION_ERROR_REASON == "SNIPE_CAPITAL_FLOOR_EVALUATION_ERROR"
+    assert "RuntimeError" in first          # the cause is named, not swallowed
+
+
+def test_floor_evaluation_error_also_declines_promotion_into_capital(monkeypatch):
+    """3b — fail-closed applies to the promotion branches too: an unprovable
+    floor may not promote a card INTO a capital tier."""
+    monkeypatch.setattr(lad, "_min_risk_distance_pct", _boom)
+    tr = _full(_card("NEAR_ENTRY"))
+    assert tr["final_tier"] != "SNIPE_IT"
+    assert tr["capital_action"] != "full_quality_allowed"
+
+
+def test_floor_still_returns_none_on_a_genuinely_clean_card():
+    """Control: the hardening must not turn every card into a violation."""
+    assert lad.snipe_capital_floor_violation(_card("SNIPE_IT"), {}) is None
+
+
+# ---- 4-8: the basket -> tier matrix survives the hardening unchanged --------
+
+def test_hardened_direct_sniper_a_still_reaches_snipe():
+    """4 — clean SNIPER_A: NEAR_ENTRY -> direct promotion -> SNIPE_IT."""
+    tr = _full(_card("NEAR_ENTRY", mutate=_soft_cap))
+    assert tr["snipe_ladder"]["internal_ladder_tier"] == lad.SNIPER_A
+    assert tr["final_tier"] == "SNIPE_IT"
+    assert tr["capital_action"] == "full_quality_allowed"
+
+
+def test_hardened_sniper_a_plus_still_reaches_snipe():
+    """5 — pristine SNIPER_A_PLUS still reaches SNIPE_IT."""
+    tr = _full(_card("NEAR_ENTRY"))
+    assert tr["snipe_ladder"]["internal_ladder_tier"] == lad.SNIPER_A_PLUS
+    assert tr["final_tier"] == "SNIPE_IT"
+    assert tr["capital_action"] == "full_quality_allowed"
+
+
+def test_hardened_starter_a_remains_starter():
+    """6 — STARTER_A stays STARTER / starter_only."""
+    def _forming(tr):
+        tr["one_hour_entry"]["trigger_state"] = "RETEST_IN_PROGRESS"
+        tr["one_hour_entry"]["alert_truth_label"] = "FORMING_TRIGGER"
+    tr = _full(_card("NEAR_ENTRY", mutate=_forming))
+    assert tr["snipe_ladder"]["internal_ladder_tier"] == lad.STARTER_A
+    assert tr["final_tier"] == "STARTER"
+    assert tr["capital_action"] == "starter_only"
+
+
+def test_hardened_starter_b_remains_starter():
+    """7 — STARTER_B stays STARTER / starter_only."""
+    def _softer(tr):
+        tr["final_signal"]["hold_status"] = "partial"
+        tr["one_hour_entry"]["trigger_state"] = "RETEST_IN_PROGRESS"
+        tr["one_hour_entry"]["alert_truth_label"] = "FORMING_TRIGGER"
+        tr["one_hour_entry"]["pullback_retest_hold"]["hold_truth"] = "HOLD_FORMING"
+    tr = _full(_card("NEAR_ENTRY", mutate=_softer))
+    assert tr["snipe_ladder"]["internal_ladder_tier"] == lad.STARTER_B
+    assert tr["final_tier"] == "STARTER"
+    assert tr["capital_action"] == "starter_only"
+
+
+def test_hardened_watch_c_remains_near_entry():
+    """8 — WATCH_C stays NEAR_ENTRY / wait_no_capital."""
+    def _watch(tr):
+        tr["final_signal"]["retest_status"] = "none"
+        tr["final_signal"]["hold_status"] = "none"
+        tr["one_hour_entry"]["trigger_state"] = "APPROACHING_LOCATION"
+        tr["one_hour_entry"]["alert_truth_label"] = "NO_TRIGGER"
+        tr["one_hour_entry"]["pullback_retest_hold"] = {"retest_truth": "NONE",
+                                                        "hold_truth": "NONE"}
+    tr = _full(_card("NEAR_ENTRY", mutate=_watch))
+    assert tr["snipe_ladder"]["internal_ladder_tier"] == lad.WATCH_C
+    assert tr["final_tier"] == "NEAR_ENTRY"
+    assert tr["capital_action"] == "wait_no_capital"
+
+
+# ---- 9-13: the adverse matrix still blocks SNIPE after the hardening -------
+
+def test_hardened_adverse_matrix_never_reaches_snipe_capital():
+    """9-13 — fake tight stop, missing invalidation, invalid R:R, blocked path,
+    hostile rejection and open-bar-only all stay out of SNIPE capital."""
+    def _fake_stop(tr):
+        tr["final_signal"].update({"invalidation_level": 100.9, "risk_reward": 9.0,
+                                   "risk_distance_pct": 0.099,
+                                   "invalidation_condition": "1H close below 100.9"})
+        tr["one_hour_entry"]["invalidation"] = {"clear": True, "level": 100.9}
+
+    def _no_inval(tr):
+        tr["final_signal"].update({"invalidation_level": None,
+                                   "invalidation_condition": ""})
+        tr["one_hour_entry"]["invalidation"] = {"clear": False, "level": None}
+
+    def _bad_rr(tr):
+        tr["final_signal"]["risk_reward"] = 2.0
+
+    def _blocked(tr):
+        tr["final_signal"]["overhead_status"] = "blocked"
+        tr["one_hour_entry"]["path_quality"] = {"path_label": "HOSTILE",
+                                                "overhead_clear_enough": False}
+
+    def _hostile(tr):
+        tr["one_hour_entry"]["candle_truth"] = {
+            "event_type": "REJECTION", "closed_candle_confirms": False,
+            "wick_rejection": True, "body_acceptance": False}
+        tr["candle_evidence"] = {"status": "ok", "candle_veto": "HOSTILE_WICK",
+                                 "level_reaction": "REJECTED"}
+
+    def _open_bar(tr):
+        tr["one_hour_entry"]["candle_truth"] = {"event_type": "DISPLACEMENT",
+                                                "closed_candle_confirms": False}
+
+    for name, mutate in (("fake tight stop", _fake_stop),
+                         ("missing invalidation", _no_inval),
+                         ("invalid R:R", _bad_rr),
+                         ("path blocked", _blocked),
+                         ("hostile rejection", _hostile),
+                         ("open bar only", _open_bar)):
+        tr = _full(_card("NEAR_ENTRY", mutate=mutate))
+        assert tr["final_tier"] != "SNIPE_IT", name
+        assert tr["capital_action"] != "full_quality_allowed", name
+
+
+# ---- 14-16: seal, WAIT, and vocabulary invariants --------------------------
+
+def test_hardened_seal_remains_downgrade_only():
+    """14 — the seal never raises a tier, before or after the hardening."""
+    tr = _card("NEAR_ENTRY")
+    tr["one_hour_entry"]["trigger_state"] = "RETEST_IN_PROGRESS"
+    tr["one_hour_entry"]["alert_truth_label"] = "FORMING_TRIGGER"
+    tr["snipe_gate_audit"] = sga_mod.build_snipe_gate_audit("T", tr, {}, {})
+    lad.apply_ladder_arbitration(tr, {})
+    before = lad._TIER_ORDER[tr["final_tier"]]
+    seal.seal_snipe_confirmed_consistency(tr, {})
+    assert lad._TIER_ORDER[tr["final_tier"]] <= before
+
+
+def test_hardened_wait_is_never_promoted(monkeypatch):
+    """15 — no direct promotion out of WAIT, with or without a floor fault."""
+    for patch in (False, True):
+        if patch:
+            monkeypatch.setattr(lad, "_min_risk_distance_pct", _boom)
+        tr = _full(_card("WAIT"))
+        assert tr["final_tier"] != "SNIPE_IT"
+        assert tr["capital_action"] != "full_quality_allowed"
+
+
+def test_hardening_added_no_rung_and_no_public_tier():
+    """16 — vocabulary is untouched by the hardening."""
+    assert lad.LADDER_TIERS == (lad.PASS, lad.WATCH_C, lad.STARTER_B,
+                                lad.STARTER_A, lad.SNIPER_A, lad.SNIPER_A_PLUS)
+    assert set(lad._FINAL_TIER_MAP.values()) == {"WAIT", "NEAR_ENTRY",
+                                                 "STARTER", "SNIPE_IT"}
+    assert set(lad._CAPITAL_MAP.values()) == {"no_trade", "wait_no_capital",
+                                              "starter_only", "full_quality_allowed"}
+    assert lad._ALLOWED_PROMOTIONS == {("NEAR_ENTRY", "STARTER"),
+                                       ("STARTER", "SNIPE_IT")}

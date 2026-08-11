@@ -704,6 +704,12 @@ DIRECT_SNIPE_BLOCKED_REASON = "DIRECT_SNIPE_BLOCKED_BY_INCOMPLETE_CAPITAL_PROOF"
 # authorize SNIPE capital on the direct promotion path.
 _DEFAULT_MIN_RISK_DISTANCE_PCT = 0.35
 
+# Phase 14S.7B hardening — the capital floor fails CLOSED. When the floor
+# evaluator cannot complete, this named violation stands in for a proven
+# breach, so SNIPE capital is withdrawn exactly as any other floor breach
+# withdraws it. Unknown safety state is not permission.
+FLOOR_EVALUATION_ERROR_REASON = "SNIPE_CAPITAL_FLOOR_EVALUATION_ERROR"
+
 
 def _min_risk_distance_pct(config) -> float:
     try:
@@ -817,6 +823,11 @@ def snipe_capital_floor_violation(obj, config=None):
     convention), and price-vs-invalidation. If ANY computable basis is below
     the floor the setup is blocked — a genuine setup has a real stop on both.
     Never raises.
+
+    FAIL-CLOSED: an unexpected error inside this evaluator returns
+    FLOOR_EVALUATION_ERROR_REASON — a real violation — not None. A capital
+    floor that cannot prove itself satisfied must not authorize SNIPE capital.
+    Unknown safety state is not permission.
     """
     try:
         if not isinstance(obj, dict):
@@ -856,8 +867,12 @@ def snipe_capital_floor_violation(obj, config=None):
                 return (f"fake tight stop — risk distance {dist:.3f}% ({name}) "
                         f"below floor {floor}%")
         return None
-    except Exception:  # pragma: no cover - defensive; never break a scan
-        return None
+    except Exception as exc:
+        # FAIL CLOSED. Every other defensive handler in this module protects the
+        # scan from crashing; this one additionally protects capital. If the
+        # floor evaluator itself errors we cannot assert the risk contract, so
+        # the only safe answer is a violation.
+        return f"{FLOOR_EVALUATION_ERROR_REASON}: {type(exc).__name__}"
 
 
 def _enforce_snipe_capital_floor(tiering_result, ladder, config=None) -> None:
