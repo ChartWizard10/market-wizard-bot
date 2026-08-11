@@ -11,6 +11,9 @@ build/
 
 # Local runtime/backtest data — never commit
 data/alert_state.json
+data/scan_telemetry.json
+*scan_telemetry.json
+*scan_telemetry.json.tmp.*
 data/backtest_bars.json
 data/backtest_*.json
 data/*_bars.json

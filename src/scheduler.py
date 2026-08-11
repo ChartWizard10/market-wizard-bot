@@ -27,6 +27,7 @@ from src import candle_evidence
 from src import higher_timeframe_context
 from src import one_hour_entry
 from src import prefilter as prefilter_mod
+from src import scan_telemetry
 from src import score_calibration
 from src import snipe_confirmed_seal
 from src import snipe_gate_audit
@@ -165,6 +166,15 @@ async def run_scan_pipeline(
     top_candidates: list     = []
     data_failure_sample: list = []
 
+    # ---- Phase 14V telemetry accumulators (observation only) -------------
+    # Nothing below is read by strategy. Every value is COPIED from an outcome
+    # a production organ already computed.
+    _tlm_traces: list        = []
+    _tlm_base_tiers: dict    = {}
+    _tlm_baskets: dict       = {}
+    _tlm_reasons: dict       = {}
+    _tlm_delivery            = {"attempted": 0, "sent": 0, "failed": 0}
+
     log.info("scan_start: scan_id=%s tickers=%d manual=%s", scan_id, total_tickers_input, is_manual)
 
     # ------------------------------------------------------------------
@@ -259,6 +269,23 @@ async def run_scan_pipeline(
         total_tickers_input, len(pf_result["ranked_results"]), total_claude_candidates,
     )
 
+    # ---- Phase 14V: admission-boundary observation (no API cost) ---------
+    # Rank is simply the position in the EXISTING ranked_results list, so the
+    # near-cut sample (ranks 31-60) is a copy. No Claude call, no market-data
+    # refetch, no strategy evaluation, no promotion, no cap change.
+    _tlm_rank_map: dict = {}
+    try:
+        for _i, _r in enumerate(pf_result.get("ranked_results") or []):
+            if isinstance(_r, dict) and _r.get("ticker"):
+                _tlm_rank_map[_r["ticker"]] = _i + 1
+        for _r, _rank in scan_telemetry.near_cut_slice(pf_result.get("ranked_results")):
+            _tlm_traces.append(scan_telemetry.build_near_cut_trace(scan_id, _r, _rank))
+    except Exception as exc:
+        log.warning("TELEMETRY_NEAR_CUT_ERROR: %s", exc)
+
+    def _tlm_rank_of(_t):
+        return _tlm_rank_map.get(_t)
+
     # ------------------------------------------------------------------
     # Step 4: Claude analysis (capped candidates only)
     # ------------------------------------------------------------------
@@ -322,6 +349,10 @@ async def run_scan_pipeline(
         final_tier = tiering_result.get("final_tier", "WAIT")
         final_tier_counts[final_tier] = final_tier_counts.get(final_tier, 0) + 1
 
+        # Phase 14V: the BASE tier, captured before the ladder can arbitrate it.
+        _tlm_base_tier = final_tier
+        _tlm_base_tiers[final_tier] = _tlm_base_tiers.get(final_tier, 0) + 1
+
         # Step 6: Dedup check
         try:
             dedup_decision = state_store.check_alert(
@@ -330,6 +361,16 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("DEDUP_ERROR: %s: %s", ticker, exc)
             dedup_decision = {"should_alert": False, "reason": "dedup_error"}
+        try:
+            # Phase 14V: raw check_alert vocabulary, stored verbatim. This
+            # scanner's only same-signal suppression is `duplicate_suppressed`
+            # (the cooldown path); a dedup_key match is never a suppression
+            # event, so none is ever counted as one.
+            _tlm_reason = (dedup_decision or {}).get("reason")
+            if _tlm_reason:
+                _tlm_reasons[_tlm_reason] = _tlm_reasons.get(_tlm_reason, 0) + 1
+        except Exception:
+            pass
 
         # Step 6.5: Trajectory (informational — never affects tier, capital, or routing)
         try:
@@ -456,6 +497,12 @@ async def run_scan_pipeline(
                 )
         except Exception as exc:
             log.warning("SNIPE_LADDER_ERROR: %s: %s", ticker, exc)
+        try:
+            _tlm_basket = (tiering_result.get("snipe_ladder") or {}).get("internal_ladder_tier")
+            if _tlm_basket:
+                _tlm_baskets[_tlm_basket] = _tlm_baskets.get(_tlm_basket, 0) + 1
+        except Exception:
+            pass
 
         # Step 6.595: SNIPE_CONFIRMED consistency seal (Phase 14M — TRUTH SEAL).
         # Runs AFTER snipe_gate_audit so it can read the authoritative blocker
@@ -527,6 +574,26 @@ async def run_scan_pipeline(
             if dedup_decision and not dedup_decision.get("should_alert", True):
                 alerts_suppressed += 1
 
+        # ---- Phase 14V: capture the decision trace (observation only) -----
+        # Runs after the alert decision so it sees the FINAL state, including
+        # rows whose delivery path disappears (cooldown-suppressed, routed to
+        # none, send failure). Fully guarded: a telemetry fault here cannot
+        # change tier, capital, routing, suppression, or delivery — all of
+        # which already happened above.
+        try:
+            _tlm_delivery["attempted"] += 1
+            if send_result.get("sent"):
+                _tlm_delivery["sent"] += 1
+            else:
+                _tlm_delivery["failed"] += 1
+            _tlm_traces.append(scan_telemetry.build_decision_trace(
+                scan_id, ticker, pf_res, _tlm_rank_of(ticker),
+                tiering_result, dedup_decision, send_result,
+                claude_analyzed=True, base_final_tier=_tlm_base_tier,
+            ))
+        except Exception as exc:
+            log.warning("TELEMETRY_TRACE_ERROR: %s: %s", ticker, exc)
+
     # ------------------------------------------------------------------
     # Save state after full cycle
     # ------------------------------------------------------------------
@@ -534,6 +601,28 @@ async def run_scan_pipeline(
         state_store.save(state, config)
     except Exception as exc:
         log.critical("CRITICAL: state write failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Phase 14V: persist scan-time funnel telemetry (observation only).
+    # Isolated file, atomic write. A failure here logs and continues: the
+    # scan, its judgments, and its alerts are already complete and immutable
+    # at this point. Observability failure is not market failure.
+    # ------------------------------------------------------------------
+    try:
+        _tlm_summary = scan_telemetry.build_scan_summary(
+            scan_id, started_at, total_tickers_input, total_data_failures,
+            pf_result, config,
+            tier_counts=final_tier_counts,
+            ladder_counts=_tlm_baskets,
+            base_tier_counts=_tlm_base_tiers,
+            check_alert_reason_counts=_tlm_reasons,
+            delivery=_tlm_delivery,
+            claude_analyzed=total_claude_success,
+            claude_failed=total_claude_failed,
+        )
+        scan_telemetry.write_scan_telemetry(config, _tlm_summary, _tlm_traces)
+    except Exception as exc:
+        log.warning("TELEMETRY_WRITE_ERROR: %s", exc)
 
     ended_at         = datetime.utcnow().isoformat()
     duration_seconds = (datetime.utcnow() - start_ts).total_seconds()

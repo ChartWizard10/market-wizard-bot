@@ -366,9 +366,11 @@ def recompute_confidence(row) -> dict:
     oh = _d(row, "one_hour_entry")
     if not oh:
         gaps.append("one_hour_entry not persisted on this row (pre-Phase-14O history)")
-    if _d(oh, "invalidation").get("clear") is not True:
-        # invalidation_condition is never persisted by record_alert, so the only
-        # surviving proof of a clear invalidation is the 1H snapshot.
+    if (_d(oh, "invalidation").get("clear") is not True
+            and not str(row.get("invalidation_condition") or "").strip()):
+        # Phase 14V persists final_signal.invalidation_condition, so a 14V-backed
+        # row proves invalidation clarity directly. Legacy rows carry neither
+        # that field nor a 1H invalidation snapshot, and stay unprovable.
         if _num(row.get("invalidation_level")) is not None:
             gaps.append(
                 "invalidation_condition is not persisted by state_store.record_alert "
@@ -711,10 +713,15 @@ def _row_result(row, ec, tier, ceiling, floor, classes, blocking_codes,
 # ---------------------------------------------------------------------------
 
 def run_shyness_funnel_audit(rows=None, state=None, config=None,
-                             limit=_DEFAULT_LIMIT) -> dict:
-    """Build the shyness funnel report. READ-ONLY. Never raises."""
+                             limit=_DEFAULT_LIMIT, telemetry=None) -> dict:
+    """Build the shyness funnel report. READ-ONLY. Never raises.
+
+    `telemetry` is an optional Phase 14V ledger. When present, the stages 14V
+    records become OBSERVABLE for telemetry-backed scans; legacy history is
+    never retroactively upgraded.
+    """
     try:
-        return _run(rows, state, config, limit)
+        return _run(rows, state, config, limit, telemetry)
     except Exception as exc:  # pragma: no cover - defensive catch-all
         return {
             "error": f"snipe_shyness_funnel_audit_error: {exc}",
@@ -726,7 +733,7 @@ def run_shyness_funnel_audit(rows=None, state=None, config=None,
         }
 
 
-def _run(rows, state, config, limit) -> dict:
+def _run(rows, state, config, limit, telemetry=None) -> dict:
     source = "provided-rows"
     if rows is None:
         if state is None:
@@ -793,7 +800,8 @@ def _run(rows, state, config, limit) -> dict:
         "tier_counts": tier_counts,
         "class_counts": class_counts,
         "stage_counts": stage_counts,
-        "stages": _stage_rows(stage_counts),
+        "telemetry_scans": _telemetry_scan_count(telemetry),
+        "stages": _stage_rows(stage_counts, _telemetry_scan_count(telemetry)),
         "top_shyness_stages": [{"stage": s, "count": n} for s, n in top_stages],
         "examples": examples,
         "blind_spots": _blind_spots(config),
@@ -805,17 +813,53 @@ def _run(rows, state, config, limit) -> dict:
     }
 
 
-def _stage_rows(stage_counts) -> list:
-    return [
-        {
+# Stages that Phase 14V scan-time telemetry makes observable. They stay
+# NOT_PERSISTED for legacy history: a stage is only observable for scans that
+# actually wrote a telemetry summary. Historical rows are never retroactively
+# upgraded.
+TELEMETRY_BACKED_STAGES = {
+    "UNIVERSE_ADMISSION", "MARKET_DATA_ENRICHMENT", "PREFILTER_SCORE_VETO",
+    "CANDIDATE_CAP_TOP_N", "CLAUDE_ANALYSIS", "DEDUP_AND_COOLDOWN",
+}
+
+
+def _telemetry_scan_count(telemetry) -> int:
+    """How many Phase 14V scan summaries are available. Zero means every stage
+    keeps its legacy observability."""
+    if not isinstance(telemetry, dict):
+        return 0
+    items = telemetry.get("scan_summaries")
+    return len(items) if isinstance(items, list) else 0
+
+
+def _stage_rows(stage_counts, telemetry_scans=0) -> list:
+    """Per-stage observability.
+
+    `telemetry_scans` is the number of Phase 14V scan summaries available. It
+    upgrades stages 1-5 and 12 from NOT_PERSISTED to OBSERVABLE *for
+    telemetry-backed scans only*, and the row says so explicitly. With no
+    telemetry the output is byte-identical to the legacy behavior: null
+    counts, never zero.
+    """
+    backed = bool(telemetry_scans)
+    rows = []
+    for s in STAGES:
+        observability = s["observability"]
+        note = s["note"]
+        if backed and s["id"] in TELEMETRY_BACKED_STAGES:
+            observability = OBSERVABLE
+            note = (f"{note} Phase 14V telemetry observes this stage for the "
+                    f"{telemetry_scans} scan(s) that recorded it; scans without "
+                    f"telemetry remain unobservable.")
+        rows.append({
             "n": s["n"], "stage": s["id"], "scheduler_step": s["scheduler_step"],
-            "observability": s["observability"], "note": s["note"],
+            "observability": observability, "note": note,
+            "telemetry_backed": bool(backed and s["id"] in TELEMETRY_BACKED_STAGES),
             "shy_rows_attributed": (
                 stage_counts.get(s["id"], 0) if s["observability"] != NOT_PERSISTED else None
             ),
-        }
-        for s in STAGES
-    ]
+        })
+    return rows
 
 
 def _blind_spots(config=None) -> list:
