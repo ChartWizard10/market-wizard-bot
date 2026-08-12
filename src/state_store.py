@@ -772,6 +772,24 @@ def record_alert(
 
     Returns updated state dict. Does NOT save to disk — caller calls save().
     """
+    from src import scan_telemetry          # Phase 14V compact projections
+
+    # Phase 14V.1 (H1): telemetry projections are decoration. A projection
+    # fault must NEVER prevent the alert record, the last_alerted_at update,
+    # or cooldown continuity. Degrade to None, matching the neighbouring
+    # _compact_* helpers.
+    try:
+        _tlm_ladder = scan_telemetry.compact_ladder(tiering_result.get("snipe_ladder"))
+    except Exception as exc:
+        log.warning("TELEMETRY_LADDER_SNAPSHOT_ERROR: %s", exc)
+        _tlm_ladder = None
+    try:
+        _tlm_candle = scan_telemetry.compact_candle_evidence(
+            tiering_result.get("candle_evidence"))
+    except Exception as exc:
+        log.warning("TELEMETRY_CANDLE_SNAPSHOT_ERROR: %s", exc)
+        _tlm_candle = None
+
     max_entries  = (config or {}).get("state", {}).get("max_memory_entries", 500)
     final_tier   = tiering_result.get("final_tier", "WAIT")
     final_channel = tiering_result.get("final_discord_channel", "none")
@@ -872,6 +890,20 @@ def record_alert(
         "timeframe_alignment":               _compact_timeframe_alignment_snapshot(
             tiering_result.get("timeframe_alignment")
         ),
+
+        # ---- Phase 14V: close the three recompute-gap fields --------------
+        # snipe_ladder is the ACTUAL scan-time ladder (post-arbitration,
+        # post-14S.7C capital floor). Persisting it is what lets the Phase 14U
+        # audit read ladder_source == "stored_scan_time" and make a causal
+        # stage-10 attribution instead of a reconstruction.
+        "snipe_ladder":                      _tlm_ladder,
+        # Without this the ladder recompute derives inval_clear from nothing
+        # and manufactures a false "invalidation missing or unclear" hard
+        # failure on replay.
+        "invalidation_condition":            final_signal.get("invalidation_condition"),
+        # Compact scan-time candle truth: open/live vs closed confirmation,
+        # defensive vs hostile vs unresolved.
+        "candle_evidence":                   _tlm_candle,
     })
     if len(history) > max_entries:
         ticker_state["alert_history"] = history[-max_entries:]

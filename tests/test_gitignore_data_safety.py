@@ -63,3 +63,15 @@ def test_gitignore_protects_backtest_json_patterns():
     assert _check_ignored("data/nvda_bars.json"), (
         "git check-ignore must confirm pattern-matched file data/nvda_bars.json is ignored"
     )
+
+
+def test_gitignore_protects_scan_telemetry(tmp_path):
+    """Phase 14V — the scan telemetry ledger is runtime data and must never be
+    committed. tests/test_scheduler.py runs the real pipeline with
+    state_file="data/alert_state.json", so telemetry lands in data/ during a
+    test run; it has to be ignored exactly like alert_state.json is."""
+    text = _gitignore_text()
+    assert "scan_telemetry.json" in text
+    assert _check_ignored("data/scan_telemetry.json")
+    assert _check_ignored(".state/scan_telemetry.json")
+    assert _check_ignored("data/scan_telemetry.json.tmp.1234")

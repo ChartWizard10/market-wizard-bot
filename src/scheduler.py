@@ -27,6 +27,7 @@ from src import candle_evidence
 from src import higher_timeframe_context
 from src import one_hour_entry
 from src import prefilter as prefilter_mod
+from src import scan_telemetry
 from src import score_calibration
 from src import snipe_confirmed_seal
 from src import snipe_gate_audit
@@ -165,6 +166,20 @@ async def run_scan_pipeline(
     top_candidates: list     = []
     data_failure_sample: list = []
 
+    # ---- Phase 14V telemetry accumulators (observation only) -------------
+    # Nothing below is read by strategy. Every value is COPIED from an outcome
+    # a production organ already computed.
+    _tlm_traces: list        = []
+    _tlm_base_tiers: dict    = {}     # tier right after tiering.validate()
+    _tlm_final_tiers: dict   = {}     # tier actually SERVED (post ladder/floor/seal)
+    _tlm_baskets: dict       = {}
+    _tlm_reasons: dict       = {}
+    _tlm_analysis            = {"admitted": 0, "claude_success": 0,
+                                "claude_failed": 0, "claude_rate_limited": 0,
+                                "tiering_failed": 0, "judged": 0}
+    _tlm_delivery            = {"send_alert_called": 0, "sent": 0,
+                                "skipped": 0, "failed": 0}
+
     log.info("scan_start: scan_id=%s tickers=%d manual=%s", scan_id, total_tickers_input, is_manual)
 
     # ------------------------------------------------------------------
@@ -259,6 +274,23 @@ async def run_scan_pipeline(
         total_tickers_input, len(pf_result["ranked_results"]), total_claude_candidates,
     )
 
+    # ---- Phase 14V: admission-boundary observation (no API cost) ---------
+    # Rank is simply the position in the EXISTING ranked_results list, so the
+    # near-cut sample (ranks 31-60) is a copy. No Claude call, no market-data
+    # refetch, no strategy evaluation, no promotion, no cap change.
+    _tlm_rank_map: dict = {}
+    try:
+        for _i, _r in enumerate(pf_result.get("ranked_results") or []):
+            if isinstance(_r, dict) and _r.get("ticker"):
+                _tlm_rank_map[_r["ticker"]] = _i + 1
+        for _r, _rank in scan_telemetry.near_cut_slice(pf_result.get("ranked_results"), config):
+            _tlm_traces.append(scan_telemetry.build_near_cut_trace(scan_id, _r, _rank))
+    except Exception as exc:
+        log.warning("TELEMETRY_NEAR_CUT_ERROR: %s", exc)
+
+    def _tlm_rank_of(_t):
+        return _tlm_rank_map.get(_t)
+
     # ------------------------------------------------------------------
     # Step 4: Claude analysis (capped candidates only)
     # ------------------------------------------------------------------
@@ -305,10 +337,29 @@ async def run_scan_pipeline(
                 "detail": cr.get("error_message", ""),
             })
             final_tier_counts["WAIT"] = final_tier_counts.get("WAIT", 0) + 1
+            # Phase 14V.1: an analysis failure is NOT a market WAIT. It is
+            # recorded as a Stage-5 outcome with no invented judgment.
+            try:
+                _tlm_analysis["admitted"] += 1
+                _rl = error_type == "claude_rate_limited"
+                _tlm_analysis["claude_rate_limited" if _rl else "claude_failed"] += 1
+                _tlm_traces.append(scan_telemetry.build_analysis_failure_trace(
+                    scan_id, ticker, pf_map.get(ticker, {}), _tlm_rank_of(ticker),
+                    scan_telemetry.TRACE_RATE_LIMITED if _rl
+                    else scan_telemetry.TRACE_ANALYSIS_FAILED,
+                    failure_code=error_type,
+                ))
+            except Exception as exc:
+                log.warning("TELEMETRY_ANALYSIS_TRACE_ERROR: %s: %s", ticker, exc)
             continue
 
         total_claude_success += 1
         pf_res = pf_map.get(ticker, {})
+        try:
+            _tlm_analysis["admitted"] += 1
+            _tlm_analysis["claude_success"] += 1
+        except Exception:
+            pass
 
         # Step 5: Tiering validation (sole final authority — cannot be bypassed)
         try:
@@ -317,10 +368,29 @@ async def run_scan_pipeline(
             log.warning("TIERING_ERROR: %s: %s", ticker, exc)
             failures.append({"ticker": ticker, "type": "TIERING_ERROR", "detail": str(exc)})
             final_tier_counts["WAIT"] = final_tier_counts.get("WAIT", 0) + 1
+            try:
+                _tlm_analysis["tiering_failed"] += 1
+                _tlm_traces.append(scan_telemetry.build_analysis_failure_trace(
+                    scan_id, ticker, pf_res, _tlm_rank_of(ticker),
+                    scan_telemetry.TRACE_TIERING_FAILED, failure_code="TIERING_ERROR",
+                ))
+            except Exception as terr:
+                log.warning("TELEMETRY_TIERING_TRACE_ERROR: %s: %s", ticker, terr)
             continue
 
         final_tier = tiering_result.get("final_tier", "WAIT")
         final_tier_counts[final_tier] = final_tier_counts.get(final_tier, 0) + 1
+
+        # Phase 14V: the BASE tier, captured before the ladder can arbitrate it.
+        _tlm_base_tier = final_tier
+        _tlm_base_tiers[final_tier] = _tlm_base_tiers.get(final_tier, 0) + 1
+
+        # Phase 14V.1 (M1): capture the state check_alert is about to be
+        # evaluated against. check_alert runs HERE, before the ladder (6.592)
+        # and seal (6.595), so the final served tier may differ. The ledger
+        # must never imply the final tier was the decision basis.
+        _tlm_ca_tier = tiering_result.get("final_tier")
+        _tlm_ca_capital = tiering_result.get("capital_action")
 
         # Step 6: Dedup check
         try:
@@ -330,6 +400,16 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("DEDUP_ERROR: %s: %s", ticker, exc)
             dedup_decision = {"should_alert": False, "reason": "dedup_error"}
+        try:
+            # Phase 14V: raw check_alert vocabulary, stored verbatim. This
+            # scanner's only same-signal suppression is `duplicate_suppressed`
+            # (the cooldown path); a dedup_key match is never a suppression
+            # event, so none is ever counted as one.
+            _tlm_reason = (dedup_decision or {}).get("reason")
+            if _tlm_reason:
+                _tlm_reasons[_tlm_reason] = _tlm_reasons.get(_tlm_reason, 0) + 1
+        except Exception:
+            pass
 
         # Step 6.5: Trajectory (informational — never affects tier, capital, or routing)
         try:
@@ -456,6 +536,12 @@ async def run_scan_pipeline(
                 )
         except Exception as exc:
             log.warning("SNIPE_LADDER_ERROR: %s: %s", ticker, exc)
+        try:
+            _tlm_basket = (tiering_result.get("snipe_ladder") or {}).get("internal_ladder_tier")
+            if _tlm_basket:
+                _tlm_baskets[_tlm_basket] = _tlm_baskets.get(_tlm_basket, 0) + 1
+        except Exception:
+            pass
 
         # Step 6.595: SNIPE_CONFIRMED consistency seal (Phase 14M — TRUTH SEAL).
         # Runs AFTER snipe_gate_audit so it can read the authoritative blocker
@@ -496,6 +582,18 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("SNIPE_AUDIT_RECONCILE_ERROR: %s: %s", ticker, exc)
 
+        # Phase 14V.1 (B1): the FINAL served tier — after 1H, HTF, gate,
+        # ladder arbitration, the 14S.7C capital floor, and the seal. Counted
+        # exactly once per candidate that reached a real tiering_result. The
+        # production counter final_tier_counts is left untouched.
+        try:
+            _tlm_served = tiering_result.get("final_tier")
+            if _tlm_served:
+                _tlm_final_tiers[_tlm_served] = _tlm_final_tiers.get(_tlm_served, 0) + 1
+                _tlm_analysis["judged"] += 1
+        except Exception:
+            pass
+
         # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
         # capital_action, discord_channel, safe_for_alert, suppression, or dedup)
         try:
@@ -514,6 +612,23 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.error("DISCORD_SEND_FAILED: %s %s: %s", final_tier, ticker, exc)
             failures.append({"ticker": ticker, "type": "DISCORD_SEND_FAILED", "detail": str(exc)})
+            # Phase 14V.1 (B2): a real delivery failure must not vanish. The
+            # synthetic result below is TELEMETRY-ONLY and is never fed back
+            # into trading logic — no alert record, no suppression increment,
+            # no retry, no routing change. Production behavior is unchanged.
+            try:
+                _tlm_synth = scan_telemetry.exception_send_result(exc)
+                _tlm_delivery["send_alert_called"] += 1
+                _tlm_delivery["failed"] += 1
+                _tlm_traces.append(scan_telemetry.build_decision_trace(
+                    scan_id, ticker, pf_res, _tlm_rank_of(ticker),
+                    tiering_result, dedup_decision, _tlm_synth,
+                    claude_analyzed=True, base_final_tier=_tlm_base_tier,
+                    check_alert_evaluated_tier=_tlm_ca_tier,
+                    check_alert_evaluated_capital_action=_tlm_ca_capital,
+                ))
+            except Exception as terr:
+                log.warning("TELEMETRY_SEND_FAULT_TRACE_ERROR: %s: %s", ticker, terr)
             continue
 
         # Step 8: Record alert to state if sent
@@ -527,6 +642,33 @@ async def run_scan_pipeline(
             if dedup_decision and not dedup_decision.get("should_alert", True):
                 alerts_suppressed += 1
 
+        # ---- Phase 14V: capture the decision trace (observation only) -----
+        # Runs after the alert decision so it sees the FINAL state, including
+        # rows whose delivery path disappears (cooldown-suppressed, routed to
+        # none, send failure). Fully guarded: a telemetry fault here cannot
+        # change tier, capital, routing, suppression, or delivery — all of
+        # which already happened above.
+        try:
+            _tlm_delivery["send_alert_called"] += 1
+            _tlm_state = scan_telemetry.delivery_state(send_result)
+            if _tlm_state == scan_telemetry.DELIVERY_SENT:
+                _tlm_delivery["sent"] += 1
+            elif _tlm_state == scan_telemetry.DELIVERY_FAILED:
+                _tlm_delivery["failed"] += 1
+            else:
+                # Intentional non-send: WAIT, cooldown suppression,
+                # routing-none. A skipped message is not a failed message.
+                _tlm_delivery["skipped"] += 1
+            _tlm_traces.append(scan_telemetry.build_decision_trace(
+                scan_id, ticker, pf_res, _tlm_rank_of(ticker),
+                tiering_result, dedup_decision, send_result,
+                claude_analyzed=True, base_final_tier=_tlm_base_tier,
+                check_alert_evaluated_tier=_tlm_ca_tier,
+                check_alert_evaluated_capital_action=_tlm_ca_capital,
+            ))
+        except Exception as exc:
+            log.warning("TELEMETRY_TRACE_ERROR: %s: %s", ticker, exc)
+
     # ------------------------------------------------------------------
     # Save state after full cycle
     # ------------------------------------------------------------------
@@ -534,6 +676,32 @@ async def run_scan_pipeline(
         state_store.save(state, config)
     except Exception as exc:
         log.critical("CRITICAL: state write failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Phase 14V: persist scan-time funnel telemetry (observation only).
+    # Isolated file, atomic write. A failure here logs and continues: the
+    # scan, its judgments, and its alerts are already complete and immutable
+    # at this point. Observability failure is not market failure.
+    # ------------------------------------------------------------------
+    try:
+        _tlm_summary = scan_telemetry.build_scan_summary(
+            scan_id, started_at, total_tickers_input, total_data_failures,
+            pf_result, config,
+            final_tier_counts=_tlm_final_tiers,
+            ladder_counts=_tlm_baskets,
+            base_tier_counts=_tlm_base_tiers,
+            check_alert_reason_counts=_tlm_reasons,
+            delivery=_tlm_delivery,
+            analysis=_tlm_analysis,
+        )
+        # Serialization of a multi-MB ledger blocks the event loop for ~1s.
+        # Awaited inside the existing scan lock: no new concurrent writer, no
+        # extra overlap, no strategy reordering. Observability I/O only.
+        await asyncio.to_thread(
+            scan_telemetry.write_scan_telemetry, config, _tlm_summary, _tlm_traces
+        )
+    except Exception as exc:
+        log.warning("TELEMETRY_WRITE_ERROR: %s", exc)
 
     ended_at         = datetime.utcnow().isoformat()
     duration_seconds = (datetime.utcnow() - start_ts).total_seconds()

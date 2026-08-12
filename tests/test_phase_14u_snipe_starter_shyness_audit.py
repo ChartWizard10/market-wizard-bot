@@ -551,7 +551,11 @@ def test_end_to_end_real_pipeline_row_classifies_without_contradiction():
 
     out = ssfa.classify_row(row, CFG)
     assert out["ticker"] == "EEE"
-    assert out["ladder_source"] == "recomputed_from_persisted_row"
+    # Phase 14V persists the scan-time snipe_ladder, so a row recorded by the
+    # CURRENT record_alert carries real provenance. The 14U.1 reconstruction
+    # caveat is therefore self-retiring: it applies to legacy rows only.
+    assert out["ladder_source"] == "stored_scan_time"
+    assert out["ladder_attribution"] == ssfa.ATTRIBUTION_STORED
     assert out["ceiling_vs_served"] in (
         "AT_CEILING", "BELOW_CEILING", "ABOVE_RECOMPUTED_CEILING")
     # A row the live pipeline promoted is never reported as a hard failure.

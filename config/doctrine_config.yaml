@@ -129,6 +129,22 @@ claude:
   claude_min_seconds_between_calls: 4
   claude_max_input_tokens_per_minute_budget: 25000
 
+# Phase 14V — scan-time funnel telemetry retention. OBSERVABILITY ONLY:
+# nothing in this block influences tiering, capital, routing, suppression,
+# candidate admission, or cadence. Telemetry lives in its own file
+# (.state/scan_telemetry.json) so a malformed telemetry write can never
+# corrupt alert_history.json.
+#   ~26 scans per 6.5h session at 15-minute cadence.
+#   300 summaries ~= 11.5 trading sessions.
+#   9000 traces: the 16000 default was withdrawn after the adversarial review
+#   measured the documented mix at 25.37 MB on disk, above the 25 MB bound.
+#   With compact serialization, 9000 holds every mix — including an
+#   all-admitted worst case — under bound. Measured horizon is reported in the
+#   PR, not asserted here.
+telemetry:
+  max_scan_summaries: 300
+  max_decision_traces: 9000
+
 state:
   cooldown_minutes: 60
   max_memory_entries: 500
