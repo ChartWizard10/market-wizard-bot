@@ -116,6 +116,28 @@ def _live_result(tier="NEAR_ENTRY"):
                                 "level_reaction": "HELD"}}
 
 
+def _backed_summary(scan_id="s1", **over):
+    """A scan summary carrying real Layer-1 stage evidence.
+
+    Phase 14V.1B: a bare {"scan_id": ...} marker proves nothing about any
+    stage — evidence must belong to the stage it upgrades.
+    """
+    return {
+        "schema_version": tlm.SCHEMA_VERSION, "scan_id": scan_id,
+        "universe": {"input_count": 814, "data_stage_success": 800,
+                     "data_stage_failure": 14},
+        "prefilter": {"eligible_count": 70, "rejected_count": 40,
+                      "primary_rejection_reason_counts": {"hard_veto": 40},
+                      "veto_flag_counts": {}, "candidate_cap": 30,
+                      "admitted_count": 30, "cutoff_rank": 30, "cutoff_score": 71},
+        "analysis": {"admitted": 30, "claude_success": 30, "judged": 24},
+        "suppression": {"check_alert_reason_counts": {"new_signal": 24},
+                        "cooldown_suppressed": 0,
+                        "dedup_key_suppression_supported": False},
+        **over,
+    }
+
+
 def _row_for_scan(scan_id, ticker="AAA"):
     """A persisted alert_history row belonging to a specific scan."""
     live = _live_result()
@@ -578,7 +600,7 @@ def test_44_and_45_stage_12_observability_is_telemetry_backed_only():
     row = _row_for_scan("s1")
     backed = ssfa.run_shyness_funnel_audit(
         rows=[row], config={},
-        telemetry={"scan_summaries": [{"scan_id": "s1"}], "decision_traces": []})
+        telemetry={"scan_summaries": [_backed_summary("s1")], "decision_traces": []})
     b = {s["stage"]: s for s in backed["stages"]}
     assert backed["telemetry_scans"] == 1
     assert backed["telemetry_backed_rows"] == 1 and backed["legacy_rows"] == 0
@@ -1080,7 +1102,8 @@ def test_v1_h3_mixed_window_is_partial_not_observable():
             _row_for_scan("scan-legacy", ticker="L1")]
     rep = ssfa.run_shyness_funnel_audit(
         rows=rows, config={},
-        telemetry={"scan_summaries": [{"scan_id": "scan-backed"}], "decision_traces": []})
+        telemetry={"scan_summaries": [_backed_summary("scan-backed")],
+                   "decision_traces": []})
     by_id = {s["stage"]: s for s in rep["stages"]}
     assert rep["telemetry_backed_rows"] == 1 and rep["legacy_rows"] == 1
     assert by_id["DEDUP_AND_COOLDOWN"]["observability"] == ssfa.PARTIAL
@@ -1466,3 +1489,175 @@ def test_v1a_no_stage_is_ever_observable_while_claiming_not_persisted(tmp_path):
             if st["shy_rows_attributed"] is not None:
                 assert st["observability"] != ssfa.NOT_PERSISTED
                 assert st["shyness_attribution"] != ssfa.ATTR_NOT_DETERMINABLE
+
+
+# ===========================================================================
+# PHASE 14V.1B — EVIDENCE IS ORGAN-SPECIFIC
+# ===========================================================================
+#
+# Stage-5 evidence is not Stage-12 evidence. Near-cut evidence is not
+# check_alert evidence. A scan summary is real evidence and must not vanish
+# because no candidate trace exists. Aggregate observability is not
+# candidate-level causation.
+
+
+def _fail_traces(scan="s1"):
+    return [tlm.build_analysis_failure_trace(scan, "F1", {}, 5, tlm.TRACE_ANALYSIS_FAILED),
+            tlm.build_analysis_failure_trace(scan, "F2", {}, 6, tlm.TRACE_RATE_LIMITED),
+            tlm.build_analysis_failure_trace(scan, "F3", {}, 7, tlm.TRACE_TIERING_FAILED)]
+
+
+def _near_traces(scan="s1", n=3):
+    return [tlm.build_near_cut_trace(scan, _pf_row(f"N{i}", 70 - i), 31 + i) for i in range(n)]
+
+
+def _report(cfg, summaries, traces, rows=None, limit=100):
+    return ssfa.run_shyness_funnel_audit(
+        rows=rows if rows is not None else [], config=cfg, limit=limit,
+        telemetry={"scan_summaries": summaries, "decision_traces": traces})
+
+
+def test_v1b_1_stage5_only_evidence_cannot_observe_stage12(tmp_path):
+    """CASE A — three candidates died at Claude and never reached check_alert."""
+    rep = _report(_cfg(tmp_path), [{"scan_id": "s1"}], _fail_traces())
+    claude = _stage(rep, "CLAUDE_ANALYSIS")
+    dedup = _stage(rep, "DEDUP_AND_COOLDOWN")
+    assert claude["observability"] == ssfa.OBSERVABLE
+    assert claude["events_observed"] == 3
+    assert dedup["observability"] == ssfa.NOT_PERSISTED
+    assert dedup["shyness_attribution"] == ssfa.ATTR_NOT_DETERMINABLE
+    assert dedup["shy_rows_attributed"] is None       # NOT a fake observed zero
+
+
+def test_v1b_2_near_cut_only_evidence_cannot_observe_stage12_or_stage5(tmp_path):
+    """CASE B — ranked outside admission proves nothing downstream."""
+    rep = _report(_cfg(tmp_path), [{"scan_id": "s1"}], _near_traces())
+    assert _stage(rep, "CANDIDATE_CAP_TOP_N")["observability"] == ssfa.OBSERVABLE
+    assert _stage(rep, "CANDIDATE_CAP_TOP_N")["events_observed"] == 3
+    for sid in ("CLAUDE_ANALYSIS", "DEDUP_AND_COOLDOWN"):
+        st = _stage(rep, sid)
+        assert st["observability"] == ssfa.NOT_PERSISTED, sid
+        assert st["shy_rows_attributed"] is None, sid
+
+
+def test_v1b_3_analyzed_sent_trace_gives_stage12_a_real_zero(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = _report(cfg, [{"scan_id": "s1"}], [_sent_trace(cfg, "OK1", 1)])
+    st = _stage(rep, "DEDUP_AND_COOLDOWN")
+    assert st["observability"] == ssfa.OBSERVABLE
+    assert st["shyness_attribution"] == ssfa.ATTR_OBSERVABLE
+    assert st["shy_rows_attributed"] == 0             # reached check_alert, not suppressed
+    assert st["events_observed"] == 1
+
+
+def test_v1b_4_analyzed_cooldown_trace_increments_stage12(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = _report(cfg, [{"scan_id": "s1"}],
+                  [_cool_trace(cfg, "C1", 1), _cool_trace(cfg, "C2", 2)])
+    st = _stage(rep, "DEDUP_AND_COOLDOWN")
+    assert st["observability"] == ssfa.OBSERVABLE
+    assert st["shy_rows_attributed"] == 2
+    assert st["events_observed"] == 2
+
+
+def test_v1b_5_to_9_summary_only_makes_each_stage_outcome_observable(tmp_path):
+    """CASE C — Layer-1 is real evidence. It must not vanish for lack of traces."""
+    rep = _report(_cfg(tmp_path), [_backed_summary("s1")], [])
+    for sid, events in (("UNIVERSE_ADMISSION", 814),
+                        ("MARKET_DATA_ENRICHMENT", 814),
+                        ("PREFILTER_SCORE_VETO", 40),
+                        ("CANDIDATE_CAP_TOP_N", 30),
+                        ("CLAUDE_ANALYSIS", 30)):
+        st = _stage(rep, sid)
+        assert st["observability"] == ssfa.OBSERVABLE, sid
+        assert st["events_observed"] == events, sid
+        # outcome observed, but no candidate was ever market-judged here
+        assert st["shyness_attribution"] == ssfa.ATTR_NOT_DETERMINABLE, sid
+        assert st["shy_rows_attributed"] is None, sid
+
+
+def test_v1b_10_summary_only_stage12_is_aggregate_observable_not_attributable(tmp_path):
+    """A summary proving how check_alert resolved is real aggregate evidence —
+    but aggregate observability is not candidate-level causation."""
+    rep = _report(_cfg(tmp_path), [_backed_summary("s1")], [])
+    st = _stage(rep, "DEDUP_AND_COOLDOWN")
+    assert st["observability"] == ssfa.OBSERVABLE          # aggregate outcome seen
+    assert st["events_observed"] == 24                     # 24 check_alert decisions
+    assert st["shyness_attribution"] == ssfa.ATTR_NOT_DETERMINABLE
+    assert st["shy_rows_attributed"] is None               # no row-level traces
+
+
+def test_v1b_11_unrelated_retained_scan_does_not_upgrade_this_window(tmp_path):
+    """Window matching: an older retained scan is out of scope."""
+    cfg = _cfg(tmp_path)
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[_row_for_scan("current")], config=cfg, limit=1,
+        telemetry={"scan_summaries": [_backed_summary("old"), {"scan_id": "current"}],
+                   "decision_traces": _fail_traces("old")})
+    assert rep["telemetry_window"]["scans_in_window"] == 1
+    assert rep["telemetry_window"]["traces_in_window"] == 0
+    assert _stage(rep, "CLAUDE_ANALYSIS")["observability"] == ssfa.NOT_PERSISTED
+
+
+def test_v1b_12_13_14_cross_stage_contamination_is_impossible(tmp_path):
+    """A trace may only ever upgrade its OWN stage."""
+    cfg = _cfg(tmp_path)
+    # 12: Stage-5 trace cannot upgrade Stage 12
+    r5 = _report(cfg, [{"scan_id": "s1"}], _fail_traces())
+    assert _stage(r5, "DEDUP_AND_COOLDOWN")["observability"] == ssfa.NOT_PERSISTED
+    # 13: Stage-4 trace cannot upgrade Stage 5 or Stage 12
+    r4 = _report(cfg, [{"scan_id": "s1"}], _near_traces())
+    assert _stage(r4, "CLAUDE_ANALYSIS")["observability"] == ssfa.NOT_PERSISTED
+    assert _stage(r4, "DEDUP_AND_COOLDOWN")["observability"] == ssfa.NOT_PERSISTED
+    # 14: Stage-12 trace cannot manufacture Stage-4 candidate judgment
+    r12 = _report(cfg, [{"scan_id": "s1"}], [_cool_trace(cfg, "C1", 1)])
+    assert _stage(r12, "CANDIDATE_CAP_TOP_N")["observability"] == ssfa.NOT_PERSISTED
+    assert _stage(r12, "UNIVERSE_ADMISSION")["observability"] == ssfa.NOT_PERSISTED
+
+
+def test_v1b_15_16_observed_zero_versus_unreached(tmp_path):
+    """5 candidates reached check_alert, 0 suppressed -> 0.
+    3 candidates died at Claude and never reached it -> null, not 0."""
+    cfg = _cfg(tmp_path)
+    reached = _report(cfg, [{"scan_id": "s1"}],
+                      [_sent_trace(cfg, f"OK{i}", i) for i in range(1, 6)])
+    st = _stage(reached, "DEDUP_AND_COOLDOWN")
+    assert st["events_observed"] == 5 and st["shy_rows_attributed"] == 0
+
+    unreached = _report(cfg, [{"scan_id": "s1"}], _fail_traces())
+    st2 = _stage(unreached, "DEDUP_AND_COOLDOWN")
+    assert st2["events_observed"] is None and st2["shy_rows_attributed"] is None
+
+
+def test_v1b_17_mixed_window_remains_honest(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[_row_for_scan("s1", ticker="B1"), _row_for_scan("legacy", ticker="L1")],
+        config=cfg,
+        telemetry={"scan_summaries": [_backed_summary("s1")],
+                   "decision_traces": [_cool_trace(cfg, "C1", 1)]})
+    st = _stage(rep, "DEDUP_AND_COOLDOWN")
+    assert st["observability"] == ssfa.PARTIAL
+    assert st["shyness_attribution"] == ssfa.ATTR_PARTIAL
+    assert isinstance(st["shy_rows_attributed"], int)
+    assert rep["legacy_rows"] >= 1 and rep["telemetry_backed_rows"] >= 1
+    assert "legacy rows are not covered" in st["attribution_reason"]
+
+
+def test_v1b_telemetry_window_is_reported_explicitly(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = _report(cfg, [_backed_summary(f"s{i}") for i in range(5)], [], limit=2)
+    w = rep["telemetry_window"]
+    assert w["scans_available"] == 5
+    assert w["scans_in_window"] == 2      # bounded, deterministic, most recent
+    assert w["limit"] == 2
+
+
+def test_v1b_stage_evidence_map_is_exposed_and_organ_scoped(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = _report(cfg, [{"scan_id": "s1"}], _fail_traces())
+    ev = rep["stage_evidence"]
+    assert set(ev) == set(ssfa.TELEMETRY_BACKED_STAGES)
+    assert ev["CLAUDE_ANALYSIS"]["outcome"] is True
+    assert ev["DEDUP_AND_COOLDOWN"]["outcome"] is False
+    assert ev["DEDUP_AND_COOLDOWN"]["row_attribution"] is False
