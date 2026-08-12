@@ -786,6 +786,12 @@ def _run(rows, state, config, limit, telemetry=None) -> dict:
     telemetry_only, analysis_outcomes = _telemetry_only_rows(traces, seen_keys)
     analyzed.extend(telemetry_only)
     backed_rows += len(telemetry_only)
+    # A stage can be observed by telemetry that produces no judgment row at
+    # all — near-cut traces and Stage-5 analysis failures are real evidence.
+    # They back the STAGE OUTCOME; they never make shyness attributable.
+    backed_evidence = backed_rows + sum(analysis_outcomes.values()) + sum(
+        1 for k, t in (traces or {}).items()
+        if t.get("trace_kind") == "near_cut")
 
     tier_counts, class_counts, stage_counts = {}, {}, {}
     low_conf = 0
@@ -831,7 +837,8 @@ def _run(rows, state, config, limit, telemetry=None) -> dict:
         "class_counts": class_counts,
         "stage_counts": stage_counts,
         "telemetry_scans": len(backed_ids),
-        "stages": _stage_rows(stage_counts, len(backed_ids), backed_rows, legacy_rows),
+        "stages": _stage_rows(stage_counts, len(backed_ids), backed_rows, legacy_rows,
+                              backed_evidence),
         "top_shyness_stages": [{"stage": s, "count": n} for s, n in top_stages],
         "examples": examples,
         "blind_spots": _blind_spots(config),
@@ -851,6 +858,50 @@ TELEMETRY_BACKED_STAGES = {
     "UNIVERSE_ADMISSION", "MARKET_DATA_ENRICHMENT", "PREFILTER_SCORE_VETO",
     "CANDIDATE_CAP_TOP_N", "CLAUDE_ANALYSIS", "DEDUP_AND_COOLDOWN",
 }
+
+# ---------------------------------------------------------------------------
+# Phase 14V.1A — stage OUTCOME visibility is not the same question as
+# candidate-level shyness ATTRIBUTION.
+# ---------------------------------------------------------------------------
+#
+#   observability        -> can we see WHAT the stage did?
+#   shyness_attribution  -> can we prove a SPECIFIC candidate was a missed
+#                           SNIPE/STARTER at that stage?
+#
+# An observed outcome is not automatically proven shyness. Of the six stages
+# Phase 14V makes visible, only DEDUP_AND_COOLDOWN carries row-level causal
+# truth: its `analyzed` traces hold check_alert_reason, cooldown_suppressed,
+# check_alert_evaluated_tier AND the surviving final tier + ladder, so a
+# suppressed judged row is genuinely attributable.
+#
+# The other five are outcome-only:
+#   1 UNIVERSE_ADMISSION      summary count; no per-ticker record at all
+#   2 MARKET_DATA_ENRICHMENT  summary count; no per-ticker record at all
+#   3 PREFILTER_SCORE_VETO    histograms only; rejected tickers get no trace
+#   4 CANDIDATE_CAP_TOP_N     near-cut traces prove a ticker ranked outside the
+#                             boundary — NOT that it was a valid SNIPE/STARTER,
+#                             because no judgment ever ran on it
+#   5 CLAUDE_ANALYSIS         analysis_failed / rate_limited / tiering_failed
+#                             prove a pipeline outcome, not a market undercall
+#
+# So those five report shy_rows_attributed = None with an explicit reason, and
+# must never render "not persisted" — the evidence IS persisted; the causal
+# claim is what is missing.
+
+ATTR_NOT_DETERMINABLE = "NOT_DETERMINABLE"
+ATTR_PARTIAL = "PARTIAL"
+ATTR_OBSERVABLE = "OBSERVABLE"
+
+# Telemetry-backed stages whose traces carry row-level causal shyness truth.
+ROW_ATTRIBUTABLE_TELEMETRY_STAGES = {"DEDUP_AND_COOLDOWN"}
+
+_ATTR_REASON_NOT_PERSISTED = "stage not persisted for this window"
+_ATTR_REASON_OUTCOME_ONLY = (
+    "stage outcome observed; candidate-level shyness not determinable "
+    "(no market judgment exists for the candidates at this stage)"
+)
+_ATTR_REASON_ROW_LEVEL = "row-level decision traces attribute shyness at this stage"
+_ATTR_REASON_HISTORY = "classified from persisted alert_history rows"
 
 
 def _telemetry_scan_ids(telemetry) -> set:
@@ -958,7 +1009,8 @@ def _telemetry_only_rows(traces, seen_keys) -> tuple:
     return rows, outcomes
 
 
-def _stage_rows(stage_counts, telemetry_scans=0, backed_rows=0, legacy_rows=0) -> list:
+def _stage_rows(stage_counts, telemetry_scans=0, backed_rows=0, legacy_rows=0,
+                backed_evidence=None) -> list:
     """Per-stage observability, gated on ACTUAL row/scan intersection.
 
     Phase 14V.1 (H3): a stage is upgraded only when at least one row IN THIS
@@ -968,25 +1020,52 @@ def _stage_rows(stage_counts, telemetry_scans=0, backed_rows=0, legacy_rows=0) -
     telemetry-backed rows the output is byte-identical to legacy behavior:
     null counts, never zero.
     """
-    backed = bool(backed_rows)
+    if backed_evidence is None:
+        backed_evidence = backed_rows
+    backed = bool(backed_evidence)
     mixed = bool(backed_rows and legacy_rows)
     rows = []
     for s in STAGES:
         observability = s["observability"]
         note = s["note"]
-        if backed and s["id"] in TELEMETRY_BACKED_STAGES:
+        telemetry_backed = bool(backed and s["id"] in TELEMETRY_BACKED_STAGES)
+        if telemetry_backed:
             observability = PARTIAL if mixed else OBSERVABLE
             note = (f"{note} Phase 14V telemetry observes this stage for "
                     f"{backed_rows} telemetry-backed row(s) in this window; "
                     f"{legacy_rows} legacy row(s) remain unobservable.")
+
+        # Attribution is a SEPARATE question from outcome visibility.
+        if telemetry_backed and s["id"] in ROW_ATTRIBUTABLE_TELEMETRY_STAGES:
+            attribution = ATTR_PARTIAL if mixed else ATTR_OBSERVABLE
+            attribution_reason = _ATTR_REASON_ROW_LEVEL + (
+                " for the telemetry-backed portion only; legacy rows are not "
+                "covered by this count." if mixed else "")
+        elif telemetry_backed:
+            attribution = ATTR_NOT_DETERMINABLE
+            attribution_reason = _ATTR_REASON_OUTCOME_ONLY
+        elif s["observability"] == NOT_PERSISTED:
+            attribution = ATTR_NOT_DETERMINABLE
+            attribution_reason = _ATTR_REASON_NOT_PERSISTED
+        else:
+            # Stages 6-11 and 13 were always classified from alert_history.
+            attribution = (ATTR_PARTIAL if s["observability"] == PARTIAL
+                           else ATTR_OBSERVABLE)
+            attribution_reason = _ATTR_REASON_HISTORY
         rows.append({
             "n": s["n"], "stage": s["id"], "scheduler_step": s["scheduler_step"],
             "observability": observability, "note": note,
             "telemetry_backed": bool(backed and s["id"] in TELEMETRY_BACKED_STAGES),
             "telemetry_backed_rows": backed_rows if s["id"] in TELEMETRY_BACKED_STAGES else None,
             "legacy_rows": legacy_rows if s["id"] in TELEMETRY_BACKED_STAGES else None,
+            "shyness_attribution": attribution,
+            "attribution_reason": attribution_reason,
+            # Numeric ONLY when shyness is genuinely attributable at this
+            # stage. An observed zero is a real zero and is preserved as 0;
+            # an unattributable stage stays None and says why.
             "shy_rows_attributed": (
-                stage_counts.get(s["id"], 0) if s["observability"] != NOT_PERSISTED else None
+                stage_counts.get(s["id"], 0)
+                if attribution != ATTR_NOT_DETERMINABLE else None
             ),
         })
     return rows
@@ -1178,9 +1257,19 @@ def _render(report) -> str:
     lines += ["", "__FUNNEL (13 stages, scan-pipeline order)__"]
     for s in report.get("stages") or []:
         attributed = s.get("shy_rows_attributed")
-        count = "n/a (not persisted)" if attributed is None else f"{attributed} shy row(s)"
+        if attributed is not None:
+            count = f"{attributed} shy row(s)"
+        elif s.get("shyness_attribution") == ATTR_NOT_DETERMINABLE and \
+                s.get("observability") != NOT_PERSISTED:
+            # The evidence IS persisted — what is missing is the causal claim.
+            # Never say "not persisted" about a stage we can actually see.
+            count = "outcome observed; shyness not attributable"
+        else:
+            count = "n/a (not persisted)"
         lines.append(f"  {s['n']:>2}. {s['stage']:<28} [{_obs_mark(s['observability'])}]  {count}")
         lines.append(f"      {s['scheduler_step']} — {s['note']}")
+        if s.get("attribution_reason") and attributed is None:
+            lines.append(f"      attribution: {s['attribution_reason']}")
 
     lines += ["", "__SHYNESS CLASS COUNTS__"]
     counts = report.get("class_counts") or {}

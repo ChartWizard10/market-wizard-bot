@@ -1274,3 +1274,195 @@ def test_v1_strategy_parity_telemetry_on_versus_off(tmp_path):
                                  check_alert_evaluated_tier="NEAR_ENTRY")
         tlm.write_scan_telemetry(cfg, _summary(tmp_path), [])
         assert _strategy_fingerprint(on) == _strategy_fingerprint(off)
+
+
+# ===========================================================================
+# PHASE 14V.1A — STAGE OBSERVABILITY vs SHYNESS ATTRIBUTION
+# ===========================================================================
+#
+# Two different questions, deliberately not conflated:
+#   observability       -> can we see WHAT the stage did?
+#   shyness_attribution -> can we prove a SPECIFIC candidate was a missed
+#                          SNIPE/STARTER at that stage?
+#
+# An observed outcome is not automatically proven shyness. A stage marked
+# OBSERVABLE must never simultaneously claim its evidence is "not persisted".
+
+
+def _cool_trace(cfg, ticker, rank):
+    return tlm.build_decision_trace(
+        "s1", ticker, {}, rank, _piped(_live_result(), cfg),
+        {"reason": "duplicate_suppressed", "should_alert": False},
+        _SEND_SHAPES["cooldown"])
+
+
+def _sent_trace(cfg, ticker, rank):
+    return tlm.build_decision_trace(
+        "s1", ticker, {}, rank, _piped(_live_result(), cfg),
+        {"reason": "new_signal", "should_alert": True}, _SEND_SHAPES["sent"])
+
+
+def _stage(report, stage_id):
+    return {s["stage"]: s for s in report["stages"]}[stage_id]
+
+
+def test_v1a_1_legacy_stage_12_is_unobservable_and_unattributable():
+    rep = ssfa.run_shyness_funnel_audit(rows=[_row_for_scan("legacy")], config={})
+    st = _stage(rep, "DEDUP_AND_COOLDOWN")
+    assert st["observability"] == ssfa.NOT_PERSISTED
+    assert st["shyness_attribution"] == ssfa.ATTR_NOT_DETERMINABLE
+    assert st["shy_rows_attributed"] is None
+    assert "not persisted" in st["attribution_reason"]
+
+
+def test_v1a_2_telemetry_backed_stage_12_reports_a_real_count(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[], config=cfg,
+        telemetry={"scan_summaries": [{"scan_id": "s1"}],
+                   "decision_traces": [_cool_trace(cfg, "C1", 1), _cool_trace(cfg, "C2", 2)]})
+    st = _stage(rep, "DEDUP_AND_COOLDOWN")
+    assert st["observability"] == ssfa.OBSERVABLE
+    assert st["shyness_attribution"] == ssfa.ATTR_OBSERVABLE
+    assert st["shy_rows_attributed"] == 2
+
+
+def test_v1a_3_observed_zero_cooldown_is_a_real_zero_not_null(tmp_path):
+    """UNOBSERVED != 0, but an OBSERVED count may legitimately be 0."""
+    cfg = _cfg(tmp_path)
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[], config=cfg,
+        telemetry={"scan_summaries": [{"scan_id": "s1"}],
+                   "decision_traces": [_sent_trace(cfg, "OK1", 1)]})
+    st = _stage(rep, "DEDUP_AND_COOLDOWN")
+    assert st["observability"] == ssfa.OBSERVABLE
+    assert st["shy_rows_attributed"] == 0
+    assert st["shy_rows_attributed"] is not None
+
+
+def test_v1a_4_mixed_window_is_partial_and_keeps_the_legacy_caveat(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[_row_for_scan("s1", ticker="B1"), _row_for_scan("legacy", ticker="L1")],
+        config=cfg,
+        telemetry={"scan_summaries": [{"scan_id": "s1"}],
+                   "decision_traces": [_cool_trace(cfg, "C1", 1)]})
+    st = _stage(rep, "DEDUP_AND_COOLDOWN")
+    assert st["observability"] == ssfa.PARTIAL
+    assert st["shyness_attribution"] == ssfa.ATTR_PARTIAL
+    assert isinstance(st["shy_rows_attributed"], int)
+    assert st["legacy_rows"] == 1 and st["telemetry_backed_rows"] >= 1
+    assert "legacy rows are not covered" in st["attribution_reason"]
+
+
+def test_v1a_5_unrelated_telemetry_scan_upgrades_nothing():
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[_row_for_scan(f"legacy-{i}", ticker=f"L{i}") for i in range(5)],
+        config={},
+        telemetry={"scan_summaries": [{"scan_id": "unrelated"}], "decision_traces": []})
+    for sid in ssfa.TELEMETRY_BACKED_STAGES:
+        st = _stage(rep, sid)
+        assert st["observability"] == ssfa.NOT_PERSISTED, sid
+        assert st["shy_rows_attributed"] is None, sid
+
+
+def test_v1a_6_stage_4_near_cut_is_visible_but_not_attributable(tmp_path):
+    """A near-cut trace proves a ticker ranked outside admission. It does NOT
+    prove the ticker was a valid SNIPE/STARTER — no judgment ever ran."""
+    cfg = _cfg(tmp_path)
+    near = [tlm.build_near_cut_trace("s1", _pf_row(f"N{i}", 70 - i), 31 + i) for i in range(3)]
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[], config=cfg,
+        telemetry={"scan_summaries": [{"scan_id": "s1"}],
+                   "decision_traces": near + [_sent_trace(cfg, "OK1", 1)]})
+    st = _stage(rep, "CANDIDATE_CAP_TOP_N")
+    assert st["observability"] == ssfa.OBSERVABLE          # outcome visible
+    assert st["shyness_attribution"] == ssfa.ATTR_NOT_DETERMINABLE
+    assert st["shy_rows_attributed"] is None               # no fabricated shyness
+    assert "not determinable" in st["attribution_reason"]
+    for cls in rep["class_counts"]:
+        assert "UNDERCALL" not in cls                       # never invented
+
+
+def test_v1a_7_stage_5_analysis_failures_are_visible_but_not_undercalls(tmp_path):
+    cfg = _cfg(tmp_path)
+    fails = [tlm.build_analysis_failure_trace("s1", "F1", {}, 5, tlm.TRACE_RATE_LIMITED),
+             tlm.build_analysis_failure_trace("s1", "F2", {}, 6, tlm.TRACE_ANALYSIS_FAILED),
+             tlm.build_analysis_failure_trace("s1", "F3", {}, 7, tlm.TRACE_TIERING_FAILED)]
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[], config=cfg,
+        telemetry={"scan_summaries": [{"scan_id": "s1"}], "decision_traces": fails})
+    st = _stage(rep, "CLAUDE_ANALYSIS")
+    assert st["observability"] == ssfa.OBSERVABLE
+    assert st["shyness_attribution"] == ssfa.ATTR_NOT_DETERMINABLE
+    assert st["shy_rows_attributed"] is None
+    assert rep["telemetry_analysis_outcomes"] == {
+        tlm.TRACE_RATE_LIMITED: 1, tlm.TRACE_ANALYSIS_FAILED: 1, tlm.TRACE_TIERING_FAILED: 1}
+    assert "WAIT" not in rep["tier_counts"]                 # never a fake WAIT
+    for cls in rep["class_counts"]:
+        assert "UNDERCALL" not in cls
+
+
+def test_v1a_8_and_9_renderer_never_claims_not_persisted_for_a_visible_stage(tmp_path):
+    cfg = _cfg(tmp_path)
+    for rows, tel in (
+        ([], {"scan_summaries": [{"scan_id": "s1"}],
+              "decision_traces": [_cool_trace(cfg, "C1", 1)]}),                    # OBSERVABLE
+        ([_row_for_scan("s1"), _row_for_scan("legacy")],
+         {"scan_summaries": [{"scan_id": "s1"}],
+          "decision_traces": [_cool_trace(cfg, "C1", 1)]}),                        # PARTIAL
+    ):
+        rep = ssfa.run_shyness_funnel_audit(rows=rows, config=cfg, telemetry=tel)
+        text = ssfa.render_shyness_funnel_audit(rep)
+        for line in text.splitlines():
+            if "[visible]" in line or "[partial]" in line:
+                assert "n/a (not persisted)" not in line, line
+
+
+def test_v1a_10_and_11_zero_is_preserved_and_unobservable_stays_null(tmp_path):
+    cfg = _cfg(tmp_path)
+    backed = ssfa.run_shyness_funnel_audit(
+        rows=[], config=cfg,
+        telemetry={"scan_summaries": [{"scan_id": "s1"}],
+                   "decision_traces": [_sent_trace(cfg, "OK1", 1)]})
+    assert _stage(backed, "DEDUP_AND_COOLDOWN")["shy_rows_attributed"] == 0
+    legacy = ssfa.run_shyness_funnel_audit(rows=[_row_for_scan("legacy")], config={})
+    assert _stage(legacy, "DEDUP_AND_COOLDOWN")["shy_rows_attributed"] is None
+
+
+def test_v1a_12_historical_14u_behaviour_is_unchanged():
+    """Stages classified from alert_history keep their original semantics."""
+    rep = ssfa.run_shyness_funnel_audit(rows=[_row_for_scan("legacy")], config={})
+    for sid in ("TIERING_BASE_VALIDATION", "ONE_H_ENTRY_PROOF", "SNIPE_GATE_AUDIT",
+                "DOWNGRADE_ONLY_SEAL"):
+        st = _stage(rep, sid)
+        assert st["observability"] == ssfa.OBSERVABLE
+        assert st["shyness_attribution"] == ssfa.ATTR_OBSERVABLE
+        assert isinstance(st["shy_rows_attributed"], int)
+    for sid in ("LADDER_ARBITRATION", "ROUTING_AND_ALERT_WORDING"):
+        st = _stage(rep, sid)
+        assert st["observability"] == ssfa.PARTIAL
+        assert st["shyness_attribution"] == ssfa.ATTR_PARTIAL
+        assert isinstance(st["shy_rows_attributed"], int)
+
+
+def test_v1a_no_stage_is_ever_observable_while_claiming_not_persisted(tmp_path):
+    """The invariant, asserted structurally across every window shape."""
+    cfg = _cfg(tmp_path)
+    windows = [
+        ([], None),
+        ([_row_for_scan("legacy")], None),
+        ([], {"scan_summaries": [{"scan_id": "s1"}],
+              "decision_traces": [_cool_trace(cfg, "C1", 1)]}),
+        ([_row_for_scan("s1"), _row_for_scan("legacy")],
+         {"scan_summaries": [{"scan_id": "s1"}], "decision_traces": []}),
+    ]
+    for rows, tel in windows:
+        rep = ssfa.run_shyness_funnel_audit(rows=rows, config=cfg, telemetry=tel)
+        for st in rep["stages"]:
+            if st["observability"] == ssfa.NOT_PERSISTED:
+                assert st["shy_rows_attributed"] is None
+                assert st["shyness_attribution"] == ssfa.ATTR_NOT_DETERMINABLE
+            if st["shy_rows_attributed"] is not None:
+                assert st["observability"] != ssfa.NOT_PERSISTED
+                assert st["shyness_attribution"] != ssfa.ATTR_NOT_DETERMINABLE
