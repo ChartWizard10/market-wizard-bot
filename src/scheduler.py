@@ -24,6 +24,7 @@ from src import discord_alerts
 from src import indicators
 from src import market_data as market_data_mod
 from src import candle_evidence
+from src import four_hour_operational
 from src import higher_timeframe_context
 from src import one_hour_entry
 from src import prefilter as prefilter_mod
@@ -478,6 +479,34 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("TIMEFRAME_ALIGNMENT_ERROR: %s: %s", ticker, exc)
             tiering_result["timeframe_alignment"] = timeframe_alignment.error_timeframe_alignment_object(str(exc))
+
+        # Step 6.583: REAL 4H operational evidence (Phase R4H-1 — SHADOW evidence
+        # only; never affects tier, capital, routing, suppression, dedup, or raw
+        # score). Aggregated from the SAME 60m provider response already fetched
+        # at Step 6.57 — no second network request. Runs after timeframe_alignment
+        # so the real-vs-proxy comparison can read the proxy state; the Phase-14F
+        # proxy remains production-authoritative until R4H-2.
+        try:
+            _four_hour_env = (one_hour_envelope or {}).get("four_hour")
+            tiering_result["four_hour_operational"] = (
+                four_hour_operational.build_four_hour_operational_context(
+                    ticker,
+                    tiering_result,
+                    enriched_data=enriched_map.get(ticker, {}),
+                    four_hour_bars=_four_hour_env,
+                    config=config,
+                )
+            )
+            log.info(four_hour_operational.render_four_hour_log_line(
+                ticker,
+                tiering_result["four_hour_operational"],
+                tiering_result["four_hour_operational"].get("proxy_comparison"),
+            ))
+        except Exception as exc:
+            log.warning("FOUR_HOUR_OPERATIONAL_ERROR: %s: %s", ticker, exc)
+            tiering_result["four_hour_operational"] = (
+                four_hour_operational.error_four_hour_object(str(exc))
+            )
 
         # Step 6.585: Higher-timeframe structural context (Phase 14I — evidence/
         # display/audit only; never affects tier, capital, routing, suppression,

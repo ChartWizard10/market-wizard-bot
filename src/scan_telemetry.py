@@ -645,6 +645,38 @@ def build_analysis_failure_trace(scan_id, ticker, pf_res, rank, trace_kind,
     }
 
 
+def compact_four_hour_real(four_hour, proxy_comparison=None) -> dict | None:
+    """Compact Phase R4H-1 shadow projection for a decision trace.
+
+    Whitelisted scalars only — never bar arrays, swing lists, or zone history.
+    Returns None when the organ produced nothing, so old traces and rows
+    without 4H evidence stay valid with no retroactive reconstruction.
+    """
+    if not isinstance(four_hour, dict) or not four_hour:
+        return None
+    bc = four_hour.get("bar_context")
+    bc = bc if isinstance(bc, dict) else {}
+    cmp_ = proxy_comparison if isinstance(proxy_comparison, dict) else (
+        four_hour.get("proxy_comparison") if isinstance(four_hour.get("proxy_comparison"), dict) else {}
+    )
+    missing = four_hour.get("missing_proofs")
+    missing = [_scalar(m) for m in missing[:4]] if isinstance(missing, list) else []
+    return {
+        "status": _scalar(four_hour.get("status")),
+        "authority_mode": _scalar(four_hour.get("authority_mode")),
+        "structural_state": _scalar(four_hour.get("structural_state")),
+        "location_state": _scalar(four_hour.get("operational_location")),
+        "readiness": _scalar(four_hour.get("operational_readiness")),
+        "last_closed_time": _scalar(bc.get("last_closed_4h_time")),
+        "live_bar_available": bc.get("live_bar_available") is True,
+        "last_closed_source_complete": bc.get("last_closed_source_complete") is True,
+        "confirmed_history_bars": _num(bc.get("confirmed_history_bars")),
+        "proxy_state": _scalar(cmp_.get("proxy_state")),
+        "proxy_agreement": _scalar(cmp_.get("agreement")),
+        "missing_proofs": missing,
+    }
+
+
 def build_decision_trace(scan_id, ticker, pf_res, rank, tiering_result,
                          dedup_decision=None, send_result=None,
                          claude_analyzed=True, base_final_tier=None,
@@ -699,6 +731,7 @@ def build_decision_trace(scan_id, ticker, pf_res, rank, tiering_result,
             "overhead_status": _scalar(signal.get("overhead_status")),
         },
         "candle_evidence": compact_candle_evidence(tr.get("candle_evidence")),
+        "four_hour_real": compact_four_hour_real(tr.get("four_hour_operational")),
         "suppression": {
             "check_alert_reason": reason,
             "should_alert": dd.get("should_alert") if dd else None,
