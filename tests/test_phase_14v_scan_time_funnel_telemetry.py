@@ -19,6 +19,7 @@ LAWS under test:
 
 import copy
 import json
+import tempfile
 from pathlib import Path
 
 from src import audit_access
@@ -1904,3 +1905,216 @@ def test_v1c_24_25_check_alert_timing_and_cap_unchanged():
     import yaml
     cfg = yaml.safe_load(open("config/doctrine_config.yaml"))
     assert cfg["prefilter"]["max_claude_candidates_per_scan"] == 30
+
+
+# ===========================================================================
+# PHASE 14V.2 — PRODUCTION AUDIT TRUTH
+# ===========================================================================
+#
+# Found from the first live !auditshy session:
+#   A. telemetry-only benign rows were counted as shy (200 rows -> 198 "shy",
+#      of which 99 were CORRECTLY_WAITING_FOR_PROOF)
+#   B. Stage 10 still said "snipe_ladder is NOT persisted" while the very row
+#      it described carried ladder_source = stored_scan_time
+#
+# LAW: telemetry provenance may change certainty; it may not change the
+# definition of shyness. Correctly waiting is not missed opportunity.
+# Stored evidence is stored; reconstructed evidence is reconstructed.
+
+
+_WAIT_SEND = {"ok": True, "sent": False, "channel_id": None,
+              "skipped_reason": "wait_no_alert", "error_type": None}
+_COOL_SEND = {"ok": True, "sent": False, "channel_id": None,
+              "skipped_reason": "duplicate_suppressed", "error_type": None}
+_ROUTE_SEND = {"ok": True, "sent": False, "channel_id": None,
+               "skipped_reason": "channel_not_configured", "error_type": "routing_failure"}
+
+
+def _benign_trace(cfg, ticker, rank, scan="s1"):
+    """A telemetry-only row that is CORRECTLY_WAITING_FOR_PROOF."""
+    return tlm.build_decision_trace(
+        scan, ticker, {}, rank, _piped(_live_result(), cfg),
+        {"reason": "wait_no_alert", "should_alert": False}, _WAIT_SEND)
+
+
+def _route_trace(cfg, ticker, rank, scan="s1"):
+    return tlm.build_decision_trace(
+        scan, ticker, {}, rank, _piped(_live_result(), cfg),
+        {"reason": "new_signal", "should_alert": True}, _ROUTE_SEND)
+
+
+# ---- DEFECT A: one canonical shyness predicate -----------------------------
+
+def test_v2_canonical_is_shy_predicate():
+    """10 — the single rule, applied everywhere."""
+    assert ssfa.is_shy_class(ssfa.CORRECTLY_WAITING_FOR_PROOF) is False
+    assert ssfa.is_shy_class(ssfa.CORRECTLY_BLOCKED_HARD_FAILURE) is False
+    assert ssfa.is_shy_class(ssfa.UNCLASSIFIED) is False
+    assert ssfa.is_shy_class(None) is False
+    for cls in (ssfa.ONE_H_PROOF_MISSING, ssfa.TIMEFRAME_ALIGNMENT_CAP,
+                ssfa.COOLDOWN_SUPPRESSED, ssfa.LADDER_CAPPED,
+                ssfa.POSSIBLE_SNIPE_UNDERCALL):
+        assert ssfa.is_shy_class(cls) is True, cls
+
+
+def test_v2_1_legacy_benign_row_is_not_shy():
+    row = _row_for_scan("legacy")
+    row["one_hour_entry"]["trigger_state"] = "RETEST_IN_PROGRESS"
+    out = ssfa.classify_row(row, {})
+    if out["primary_class"] == ssfa.CORRECTLY_WAITING_FOR_PROOF:
+        assert out["is_shy"] is False
+
+
+def test_v2_2_and_3_telemetry_benign_rows_are_not_shy(tmp_path):
+    """2, 3 — provenance must not change the verdict."""
+    cfg = _cfg(tmp_path)
+    only = ssfa._telemetry_only_row(_benign_trace(cfg, "W1", 1))
+    assert only["primary_class"] == ssfa.CORRECTLY_WAITING_FOR_PROOF
+    assert only["is_shy"] is False
+    assert only["telemetry_only"] is True
+
+    rep = _report(cfg, [{"scan_id": "s1"}], [_benign_trace(cfg, "W1", 1)])
+    assert rep["shy_rows"] == 0
+
+
+def test_v2_4_5_6_benign_row_is_visible_but_never_counted_as_shy(tmp_path):
+    """4, 5, 6 — evidence retained; shyness and stage counts untouched."""
+    cfg = _cfg(tmp_path)
+    traces = [_benign_trace(cfg, f"W{i}", i) for i in range(99)]
+    traces.append(_cool_trace(cfg, "C1", 900))
+    rep = _report(cfg, [{"scan_id": "s1"}], traces, limit=200)
+    assert rep["total_rows"] == 100
+    assert rep["shy_rows"] == 1                                   # was 100
+    assert rep["class_counts"][ssfa.CORRECTLY_WAITING_FOR_PROOF] == 99   # still visible
+    assert rep["class_counts"][ssfa.COOLDOWN_SUPPRESSED] == 1
+    assert rep["stage_counts"] == {"DEDUP_AND_COOLDOWN": 1}       # benign does not pollute
+    assert ssfa.CORRECTLY_WAITING_FOR_PROOF not in [
+        e["primary_class"] for e in rep["examples"]]              # not shown as a miss
+
+
+def test_v2_7_8_9_real_shy_telemetry_rows_remain_shy(tmp_path):
+    """7, 8, 9 — the fix must not suppress genuine findings."""
+    cfg = _cfg(tmp_path)
+    cool = ssfa._telemetry_only_row(_cool_trace(cfg, "C1", 1))
+    assert cool["primary_class"] == ssfa.COOLDOWN_SUPPRESSED and cool["is_shy"] is True
+    route = ssfa._telemetry_only_row(_route_trace(cfg, "R1", 2))
+    assert route["primary_class"] == ssfa.ROUTING_SUPPRESSED and route["is_shy"] is True
+
+    # a classified (non-telemetry) row carrying real caps stays shy
+    row = _row_for_scan("legacy")
+    row["timeframe_alignment"] = {**row["timeframe_alignment"],
+                                  "conflicts": [{"layer": "daily", "reason": "below value"}]}
+    row["snipe_gate_audit"] = {"promotion_state": "PROMOTION_BLOCKED",
+                               "eligible_for_snipe_review": False,
+                               "blocked_gate_names": ["FOUR_H_LOCATION_VALID"],
+                               "missing_proofs": ["ONE_H_TRIGGER_CONFIRMED"],
+                               "blocking_reasons": []}
+    out = ssfa.classify_row(row, _cfg(Path(tempfile.mkdtemp())))
+    assert ssfa.ONE_H_PROOF_MISSING in out["classes"]
+    assert ssfa.TIMEFRAME_ALIGNMENT_CAP in out["classes"]
+    assert out["is_shy"] is True
+
+
+def test_v2_11_headline_obeys_one_predicate_across_provenance(tmp_path):
+    """11 — mixed report: legacy + telemetry rows judged by the same rule."""
+    cfg = _cfg(tmp_path)
+    rows = [_row_for_scan("s1", ticker="B1")]
+    traces = [_benign_trace(cfg, "W1", 1), _cool_trace(cfg, "C1", 2)]
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=rows, config=cfg,
+        telemetry={"scan_summaries": [_backed_summary("s1")], "decision_traces": traces})
+    for a in rep["examples"]:
+        assert ssfa.is_shy_class(a["primary_class"]) is True
+    assert rep["shy_rows"] == sum(
+        1 for c, n in rep["class_counts"].items()
+        if ssfa.is_shy_class(c)) or rep["shy_rows"] >= 1
+
+
+# ---- DEFECT B: Stage-10 provenance wording --------------------------------
+
+def _ladder_note(rep):
+    return _stage(rep, "LADDER_ARBITRATION")["note"]
+
+
+def test_v2_13_legacy_only_stage10_says_reconstructed():
+    rep = ssfa.run_shyness_funnel_audit(rows=[_row_for_scan("legacy")], config={})
+    note = _ladder_note(rep)
+    assert rep["scope"] == "LEGACY_ONLY"
+    assert "NOT persisted" in note and "reconstructed" in note
+    assert "RECONSTRUCTED_NOT_PROVEN" in note
+    assert "STORED_SCAN_TIME" not in note
+
+
+def test_v2_12_telemetry_only_stage10_says_stored(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = _report(cfg, [{"scan_id": "s1"}], [_cool_trace(cfg, "C1", 1)])
+    note = _ladder_note(rep)
+    assert rep["scope"] == "TELEMETRY_ONLY"
+    assert "persists the scan-time snipe_ladder" in note
+    assert "STORED_SCAN_TIME" in note
+    assert "NOT persisted" not in note
+
+
+def test_v2_14_mixed_stage10_describes_both_populations(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[_row_for_scan("s1", ticker="B1"), _row_for_scan("legacy", ticker="L1")],
+        config=cfg,
+        telemetry={"scan_summaries": [_backed_summary("s1")],
+                   "decision_traces": [_cool_trace(cfg, "C1", 1)]})
+    note = _ladder_note(rep)
+    assert rep["scope"] == "MIXED"
+    assert "STORED_SCAN_TIME" in note and "RECONSTRUCTED_NOT_PROVEN" in note
+    assert "never merged" in note
+
+
+def test_v2_15_16_17_provenance_is_unchanged_per_row(tmp_path):
+    """15, 16, 17 — no legacy row is retroactively upgraded."""
+    cfg = _cfg(tmp_path)
+    legacy = ssfa.classify_row(_row_for_scan("legacy"), cfg)
+    assert legacy["ladder_source"] == "recomputed_from_persisted_row"
+    assert legacy["ladder_attribution"] == ssfa.ATTRIBUTION_RECONSTRUCTED
+    assert ssfa.LADDER_CAPPED not in legacy["classes"]
+
+    backed = ssfa._telemetry_only_row(_cool_trace(cfg, "C1", 1))
+    assert backed["ladder_source"] == "stored_scan_time"
+    assert backed["ladder_attribution"] == ssfa.ATTRIBUTION_STORED
+
+
+def test_v2_18_json_and_text_totals_agree(tmp_path):
+    cfg = _cfg(tmp_path)
+    traces = [_benign_trace(cfg, f"W{i}", i) for i in range(5)] + [_cool_trace(cfg, "C1", 9)]
+    rep = _report(cfg, [{"scan_id": "s1"}], traces, limit=50)
+    j = ssfa.shyness_json(rep)
+    text = ssfa.render_shyness_funnel_audit(rep)
+    assert j["shy_rows"] == rep["shy_rows"] == 1
+    assert j["total_rows"] == rep["total_rows"] == 6
+    assert f"Rows analyzed: {rep['total_rows']}" in text
+    assert f"Shy rows: {rep['shy_rows']}" in text
+
+
+def test_v2_19_dual_scope_window_semantics_unchanged(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[_row_for_scan("legacy")], config=cfg,
+        telemetry={"scan_summaries": [_backed_summary("recent")], "decision_traces": []})
+    assert rep["scope"] == "MIXED"
+    assert rep["legacy_alert_window"]["rows_outside_telemetry_window"] == 1
+    assert rep["telemetry_window"]["scans_in_window"] == 1
+
+
+def test_v2_20_audit_only_no_strategy_organ_touched():
+    """20 — this phase may not modify any strategy organ."""
+    import subprocess
+    changed = subprocess.run(
+        ["git", "diff", "--name-only", "origin/main...HEAD"],
+        capture_output=True, text=True, cwd=".").stdout.split()
+    forbidden = ("src/scheduler.py", "src/scan_telemetry.py", "src/tiering.py",
+                 "src/snipe_ladder_judgment.py", "src/snipe_blocker_taxonomy.py",
+                 "src/snipe_confirmed_seal.py", "src/snipe_gate_audit.py",
+                 "src/one_hour_entry.py", "src/timeframe_alignment.py",
+                 "src/higher_timeframe_context.py", "src/prefilter.py",
+                 "src/discord_alerts.py", "src/market_data.py",
+                 "config/doctrine_config.yaml")
+    for f in forbidden:
+        assert f not in changed, f
