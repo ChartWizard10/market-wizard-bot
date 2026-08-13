@@ -187,11 +187,25 @@ def _build(
     o, h, l, c = event["open"], event["high"], event["low"], event["close"]
     is_open = bool(event.get("is_open"))
 
+    # Phase MBT-2: an enriched-only event candle is no longer assumed to be
+    # forming. When Daily bar truth explicitly proves the session is complete,
+    # the candle is labeled CLOSED instead of OPEN_OR_UNKNOWN. LIVE / UNKNOWN
+    # Daily status keeps the old provisional label — unproven is not closed.
+    #
+    # AUTHORITY IS UNCHANGED: the positive-score cap below still applies to
+    # every enriched-only candle, because without a bar sequence there is no
+    # next-candle verdict to earn confirmation from. MBT-2 corrects the label,
+    # it does not hand a candle new permission.
+    daily_ctx = enriched.get("daily_bar_context")
+    daily_ctx = daily_ctx if isinstance(daily_ctx, dict) else {}
+    proven_closed = str(daily_ctx.get("status") or "").upper().strip() == "CLOSED"
+    forming = is_open or (not from_bars and not proven_closed)
+
     rng = h - l
     if rng <= _EPS:
         # Zero-range bar: defined but uninformative. Never raise.
         ctx["status"] = "insufficient_data"
-        ctx["candle_status"] = "OPEN_OR_UNKNOWN" if (is_open or not from_bars) else "CLOSED"
+        ctx["candle_status"] = "OPEN_OR_UNKNOWN" if forming else "CLOSED"
         ctx["body_pct"] = 0.0
         ctx["upper_wick_pct"] = 0.0
         ctx["lower_wick_pct"] = 0.0
@@ -206,8 +220,9 @@ def _build(
         return ctx
 
     ctx["status"] = "ok"
-    # Live-edge (enriched-only): candle is still forming — always OPEN_OR_UNKNOWN.
-    ctx["candle_status"] = "OPEN_OR_UNKNOWN" if (is_open or not from_bars) else "CLOSED"
+    # Live-edge: a forming candle is always OPEN_OR_UNKNOWN. A candle proven
+    # complete by Daily bar truth is honestly labeled CLOSED (Phase MBT-2).
+    ctx["candle_status"] = "OPEN_OR_UNKNOWN" if forming else "CLOSED"
 
     # ---- Metrics ----------------------------------------------------------
     body = abs(c - o)
@@ -309,18 +324,26 @@ def _build(
         hostile_wick=hostile_wick,
         final_tier=final_tier,
     )
-    # Live-edge: candle is still forming. Positive confirmations are provisional
-    # and not yet earned — cap at 0. Hard contradictions (negative) still apply.
+    # Positive confirmations are provisional without a next-candle verdict, so
+    # an enriched-only candle is capped at 0 either way. Hard contradictions
+    # (negative) still apply. Only the REASON differs: a forming candle has no
+    # close yet; a proven-closed candle has a close but no verdict on it.
     if not from_bars and delta > 0:
         delta = 0
-        reason = "forming candle — close pending"
+        reason = (
+            "forming candle — close pending" if forming
+            else "closed candle — next-candle verdict pending"
+        )
     ctx["score_delta"] = max(_DELTA_FLOOR, min(_DELTA_CEIL, int(delta)))
     ctx["score_reason"] = reason
 
     # ---- Display ----------------------------------------------------------
     display = _display_text(family, zone_label, verdict, ctx["level_reaction"])
     if not from_bars and display:
-        display = display.rstrip(".") + " (forming — close pending)."
+        display = display.rstrip(".") + (
+            " (forming — close pending)." if forming
+            else " (next-candle verdict pending)."
+        )
     ctx["display_text"] = display
 
     return ctx

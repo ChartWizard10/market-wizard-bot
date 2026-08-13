@@ -100,6 +100,119 @@ def _resolve_newest_bar_open(bar_time_utc, interval_minutes: int, now_utc: datet
         return True
     return now_utc < end
 
+
+# ---------------------------------------------------------------------------
+# Phase MBT-2 — Daily developing/closed bar truth.
+#
+# A daily row is stamped with its SESSION DATE, so its status is proven from
+# that calendar date against the current America/New_York session clock — no
+# provider timezone is ever guessed, and no intraday offset is needed.
+#
+#   bar date < today ET                  -> CLOSED  (a later session exists)
+#   bar date == today ET, now  < 16:00ET -> LIVE    (regular session running)
+#   bar date == today ET, now >= 16:00ET -> CLOSED  (regular session complete)
+#   bar date > today ET / unparseable /
+#   non-monotonic index                  -> UNKNOWN (never proven closed)
+#
+# UNKNOWN is treated exactly like LIVE by every consumer: it withholds
+# confirmation authority. Unknown timing truth is not permission.
+#
+# EARLY-CLOSE / HOLIDAY LIMITATION (documented, deliberate): no market-calendar
+# dependency is added, so a 13:00 ET early close is still treated as LIVE until
+# 16:00 ET. That only ever DELAYS confirmation — a few hours of false OPEN,
+# never a false CLOSED. Confirmation is delayed, never invented.
+# ---------------------------------------------------------------------------
+
+_DAILY_STATUS_LIVE = "LIVE"
+_DAILY_STATUS_CLOSED = "CLOSED"
+_DAILY_STATUS_UNKNOWN = "UNKNOWN"
+
+
+def _index_date(index_value):
+    """Session date for a daily index entry, or None if it cannot be parsed."""
+    try:
+        ts = pd.Timestamp(index_value)
+    except (TypeError, ValueError):
+        return None
+    try:
+        if ts is pd.NaT or ts != ts:      # NaT guard
+            return None
+        return ts.date()
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _daily_status_from_date(bar_date, now_utc: datetime) -> tuple:
+    """(status, status_source) for a daily bar's session date."""
+    now_et = now_utc.astimezone(_EASTERN)
+    today_et = now_et.date()
+    if bar_date < today_et:
+        return _DAILY_STATUS_CLOSED, "prior_session_date_et"
+    if bar_date > today_et:
+        return _DAILY_STATUS_UNKNOWN, "future_dated_row"
+    session_close = now_et.replace(
+        hour=_SESSION_CLOSE_ET[0], minute=_SESSION_CLOSE_ET[1], second=0, microsecond=0
+    )
+    if now_et >= session_close:
+        return _DAILY_STATUS_CLOSED, "regular_session_complete_et"
+    return _DAILY_STATUS_LIVE, "regular_session_in_progress_et"
+
+
+def resolve_daily_bar_status(df, now_utc: datetime | None = None) -> dict:
+    """Classify the newest daily row as CLOSED, LIVE (developing) or UNKNOWN.
+
+    Returns the canonical `daily_bar_context` provenance object. Never raises.
+    `using_live_bar_for_confirmation` is a permanent False — this module never
+    grants a developing bar confirmation authority, and no caller may set it.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    ctx = {
+        "status": _DAILY_STATUS_UNKNOWN,
+        "last_closed_daily_date": None,
+        "live_daily_date": None,
+        "live_bar_available": False,
+        "using_live_bar_for_confirmation": False,
+        "status_source": "no_bars",
+        "confirmed_bars": 0,
+        "evaluated_at": now_utc.isoformat(),
+    }
+
+    try:
+        n = 0 if df is None else len(df)
+    except TypeError:
+        n = 0
+    if n == 0:
+        return ctx
+
+    index = df.index
+    newest_date = _index_date(index[-1])
+    if newest_date is None:
+        status, source = _DAILY_STATUS_UNKNOWN, "unparseable_index"
+    elif not bool(getattr(index, "is_monotonic_increasing", False)):
+        # The last row cannot be proven to be the newest row.
+        status, source = _DAILY_STATUS_UNKNOWN, "non_monotonic_index"
+    else:
+        status, source = _daily_status_from_date(newest_date, now_utc)
+
+    live = status != _DAILY_STATUS_CLOSED
+    ctx["status"] = status
+    ctx["status_source"] = source
+    ctx["live_bar_available"] = live
+    ctx["confirmed_bars"] = max(0, n - 1) if live else n
+
+    if live:
+        ctx["live_daily_date"] = newest_date.isoformat() if newest_date else None
+        prior_date = _index_date(index[-2]) if n >= 2 else None
+        ctx["last_closed_daily_date"] = prior_date.isoformat() if prior_date else None
+    else:
+        ctx["last_closed_daily_date"] = newest_date.isoformat() if newest_date else None
+
+    return ctx
+
 # ---------------------------------------------------------------------------
 # Ticker universe loader
 # ---------------------------------------------------------------------------

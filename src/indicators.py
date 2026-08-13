@@ -5,10 +5,13 @@ Only: structure, value/SMA alignment, liquidity, sweep, BOS/MSS/CHoCH/reclaim,
 FVG, OB/demand/flip zone, retest, overhead, targets, invalidation, R:R, volume behavior.
 """
 
+import copy
 import logging
 
 import numpy as np
 import pandas as pd
+
+from src.market_data import resolve_daily_bar_status
 
 log = logging.getLogger(__name__)
 
@@ -114,9 +117,15 @@ def compute_swings(df: pd.DataFrame, lookback: int) -> dict:
 # Liquidity pools
 # ---------------------------------------------------------------------------
 
-def compute_liquidity_pools(df: pd.DataFrame, swings: dict) -> dict:
+def compute_liquidity_pools(df: pd.DataFrame, swings: dict, reference_price: float | None = None) -> dict:
+    """Pool LEVELS come from the bars supplied (completed bars under MBT-2).
+
+    `reference_price` only decides which of those confirmed levels sit above or
+    below price right now — a current-location fact, not a confirmation. It
+    defaults to the frame's own last close for backward compatibility.
+    """
     h, l = df["high"], df["low"]
-    cur = float(df["close"].iloc[-1])
+    cur = float(df["close"].iloc[-1]) if reference_price is None else float(reference_price)
 
     # Equal highs/lows: swing levels within 0.2% of each other
     def cluster(levels: list, tol: float = 0.002) -> list:
@@ -266,11 +275,16 @@ def detect_structure_event(df: pd.DataFrame, sweep: dict, config: dict) -> dict:
 # FVG detection
 # ---------------------------------------------------------------------------
 
-def detect_fvg(df: pd.DataFrame, config: dict) -> dict | None:
+def detect_fvg(df: pd.DataFrame, config: dict, reference_price: float | None = None) -> dict | None:
     """Detect most recent unfilled bullish FVG within lookback.
 
     Bullish FVG: candle1 high < candle3 low (gap between them).
     Returns None if no unfilled FVG found.
+
+    Under MBT-2 `df` carries completed bars only, so a developing bar can
+    neither create a zone nor fill one. `reference_price` answers the separate
+    location question "is price in the zone right now" and defaults to the
+    frame's own last close for backward compatibility.
     """
     thresholds = config.get("prefilter", {}).get("thresholds", {})
     lookback = thresholds.get("fvg_lookback_bars", 30)
@@ -283,7 +297,7 @@ def detect_fvg(df: pd.DataFrame, config: dict) -> dict | None:
     if n < lookback + 2:
         return None
 
-    cur_close = float(c.iloc[-1])
+    cur_close = float(c.iloc[-1]) if reference_price is None else float(reference_price)
     best = None
 
     for i in range(n - lookback, n - 2):
@@ -317,11 +331,16 @@ def detect_fvg(df: pd.DataFrame, config: dict) -> dict | None:
 # OB / Demand / Flip zone
 # ---------------------------------------------------------------------------
 
-def detect_ob(df: pd.DataFrame, config: dict) -> dict | None:
+def detect_ob(df: pd.DataFrame, config: dict, reference_price: float | None = None) -> dict | None:
     """Detect most recent valid, unmitigated bullish OB/demand zone.
 
     OB: last bearish candle before a displacement move up.
     Mitigated OB (price traded back through the body) is excluded.
+
+    Under MBT-2 `df` carries completed bars only, so an unfinished daily close
+    can never mitigate a zone. `reference_price` answers the separate location
+    question "is price at the OB right now" and defaults to the frame's own
+    last close for backward compatibility.
     """
     thresholds = config.get("prefilter", {}).get("thresholds", {})
     lookback = thresholds.get("ob_lookback_bars", 30)
@@ -335,7 +354,7 @@ def detect_ob(df: pd.DataFrame, config: dict) -> dict | None:
     if n < lookback + 3:
         return None
 
-    cur_close = float(c.iloc[-1])
+    cur_close = float(c.iloc[-1]) if reference_price is None else float(reference_price)
     best = None
 
     for i in range(n - lookback, n - 3):
@@ -550,36 +569,252 @@ def assess_volume(df: pd.DataFrame, config: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Phase MBT-2 — live (developing) Daily observations
+#
+# These are EVIDENCE-ONLY diagnostics. They describe what the unfinished daily
+# candle is doing right now. None of them may confirm anything: every one
+# carries an explicit `confirms_*: False` assertion, and no canonical
+# confirmation field is ever derived from them.
+# ---------------------------------------------------------------------------
+
+def _zone_bounds(fvg: dict | None, ob: dict | None) -> list:
+    zones = []
+    if fvg:
+        zones.append(("FVG", fvg["fvg_bot"], fvg["fvg_top"]))
+    if ob:
+        zones.append(("OB", ob["ob_lo"], ob["ob_hi"]))
+    return zones
+
+
+def live_retest_context(cur: float, fvg: dict | None, ob: dict | None, atr: float | None) -> dict:
+    """How the DEVELOPING daily bar is interacting with confirmed zones.
+
+    Never a retest verdict — a live interaction is provisional by construction.
+    """
+    ctx = {
+        "live_zone": None,
+        "live_zone_low": None,
+        "live_zone_high": None,
+        "live_interaction": "NO_ZONE",
+        "live_distance_atr": None,
+        "confirms_retest": False,
+        "confirms_failure": False,
+    }
+    zones = _zone_bounds(fvg, ob)
+    if not zones:
+        return ctx
+
+    label, z_lo, z_hi = zones[0]
+    ctx["live_zone"] = label
+    ctx["live_zone_low"] = z_lo
+    ctx["live_zone_high"] = z_hi
+
+    if z_lo <= cur <= z_hi:
+        ctx["live_interaction"] = "INSIDE_ZONE"
+        ctx["live_distance_atr"] = 0.0
+        return ctx
+
+    if atr:
+        dist_atr = round(min(abs(cur - z_lo), abs(cur - z_hi)) / atr, 2)
+        ctx["live_distance_atr"] = dist_atr
+        if dist_atr <= 0.5:
+            ctx["live_interaction"] = "NEAR_ZONE"
+            return ctx
+
+    ctx["live_interaction"] = "BELOW_ZONE" if cur < z_lo else "ABOVE_ZONE"
+    return ctx
+
+
+def live_structure_context(live_row, structure: dict, confirmed_close: float | None) -> dict:
+    """What the DEVELOPING daily bar is doing against confirmed structure.
+
+    Emits evidence-only states. `confirms_structure` is a permanent False.
+    """
+    level = structure.get("structure_level")
+    if level is None:
+        level = structure.get("prior_structural_high")
+
+    ctx = {
+        "level": level,
+        "state": "UNKNOWN",
+        "live_close": None,
+        "live_high": None,
+        "confirms_structure": False,
+    }
+    if level is None or live_row is None or confirmed_close is None:
+        return ctx
+
+    try:
+        live_close = round(float(live_row["close"]), 4)
+        live_high = round(float(live_row["high"]), 4)
+    except (KeyError, TypeError, ValueError):
+        return ctx
+
+    ctx["live_close"] = live_close
+    ctx["live_high"] = live_high
+
+    if live_close > level:
+        if confirmed_close > level:
+            ctx["state"] = "LIVE_ABOVE_LEVEL"
+        elif structure.get("structure_confirmed"):
+            ctx["state"] = "LIVE_RECLAIM_BUILDING"
+        else:
+            ctx["state"] = "LIVE_BREAK_BUILDING"
+    elif live_high > level:
+        ctx["state"] = "LIVE_WICK_BREAK"
+    elif confirmed_close > level:
+        ctx["state"] = "LIVE_STRUCTURE_THREAT"
+    else:
+        ctx["state"] = "LIVE_BELOW_LEVEL"
+
+    return ctx
+
+
+_EMPTY_CONFIRMED = {
+    "smas": {"sma20": None, "sma50": None, "sma200": None},
+    "atr": None,
+    "swings": {"swing_highs": [], "swing_lows": [],
+               "last_swing_high": None, "last_swing_low": None},
+    "pools": {"equal_highs": [], "equal_lows": [],
+              "recent_range_high": None, "recent_range_low": None,
+              "nearest_pool_above": None, "nearest_pool_below": None},
+    "sweep": {"sweep_detected": False, "sweep_low": None, "prior_low": None},
+    "structure": {"structure_event": "none", "structure_level": None,
+                  "structure_confirmed": False, "prior_structural_high": None,
+                  "wick_only_break": False},
+    "fvg": None,
+    "ob": None,
+    "volume": {"volume_ratio": None, "volume_behavior": "unknown"},
+}
+
+
+def _confirmed_view(confirmed_df: pd.DataFrame, config: dict,
+                    swing_lookback: int, reference_price: float) -> dict:
+    """Every confirmation-dependent Daily feature, from COMPLETED bars only."""
+    if len(confirmed_df) == 0:
+        # Deep copy: the nested lists must never be shared between tickers.
+        return copy.deepcopy(_EMPTY_CONFIRMED)
+
+    swings = compute_swings(confirmed_df, swing_lookback)
+    sweep = detect_sweep(confirmed_df, config)
+    structure = detect_structure_event(confirmed_df, sweep, config)
+    return {
+        "smas": compute_smas(confirmed_df),
+        "atr": compute_atr(confirmed_df),
+        "swings": swings,
+        "pools": compute_liquidity_pools(confirmed_df, swings, reference_price=reference_price),
+        "sweep": sweep,
+        "structure": {
+            "structure_event": structure["structure_event"],
+            "structure_level": structure["structure_level"],
+            "structure_confirmed": structure["structure_confirmed"],
+            "prior_structural_high": structure.get("prior_structural_high"),
+            "wick_only_break": structure.get("wick_only_break", False),
+        },
+        "fvg": detect_fvg(confirmed_df, config, reference_price=reference_price),
+        "ob": detect_ob(confirmed_df, config, reference_price=reference_price),
+        "volume": assess_volume(confirmed_df, config),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main enrichment entry point
 # ---------------------------------------------------------------------------
 
-def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
+def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
     """Compute all structure-first features for a validated ticker DataFrame.
 
     Returns a flat feature dict for use by prefilter and claude_client.
     No rsi, macd, bollinger_bands, or stochastic computed or included.
+
+    Phase MBT-2 — dual Daily view. When the newest row is a DEVELOPING daily
+    bar (or its status cannot be proven closed) it is excluded from every
+    confirmation-dependent feature: SMA / ATR / swings / liquidity / sweep /
+    structure / FVG / OB / volume are computed from completed daily bars only.
+
+    The developing bar still owns CURRENT price, and current location/risk
+    metrics (extension, overhead, targets, R:R, zone proximity) still react to
+    it — those are scan-moment facts, not auction receipts. What it may never
+    do is confirm: a live break is not a closed BOS, a live zone touch is not a
+    confirmed retest, a live breach is not an accepted failure, and partial
+    session volume is not a completed participation verdict.
+
+    `now_utc` is injectable for deterministic tests; production reads the clock.
     """
     thresholds = config.get("prefilter", {}).get("thresholds", {})
     swing_lookback = thresholds.get("swing_lookback_bars", 60)
 
-    cur = round(float(df["close"].iloc[-1]), 4)
+    daily_ctx = resolve_daily_bar_status(df, now_utc=now_utc)
+    live_available = bool(daily_ctx.get("live_bar_available")) and len(df) >= 1
 
-    smas = compute_smas(df)
-    alignment = sma_value_alignment(cur, smas)
+    if live_available:
+        confirmed_df = df.iloc[:-1]
+        live_row = df.iloc[-1]
+    else:
+        confirmed_df = df
+        live_row = None
+    daily_ctx["confirmed_bars"] = len(confirmed_df)
+
+    # Current price: the live bar when one exists, else the last closed close.
+    cur = round(float(df["close"].iloc[-1]), 4)
+    confirmed_close: float | None = (
+        round(float(confirmed_df["close"].iloc[-1]), 4) if len(confirmed_df) else None
+    )
+    # Confirmation anchor. With no completed bar there is no closed-close truth.
+    anchor = confirmed_close if confirmed_close is not None else cur
+
+    view = _confirmed_view(confirmed_df, config, swing_lookback, reference_price=cur)
+    smas = view["smas"]
+    atr = view["atr"]
+    swings = view["swings"]
+    pools = view["pools"]
+    sweep = view["sweep"]
+    structure = view["structure"]
+    fvg = view["fvg"]
+    ob = view["ob"]
+    volume = view["volume"]
+
+    # Confirmed value alignment is a CLOSED close against COMPLETED SMAs.
+    alignment = sma_value_alignment(anchor, smas)
+    # Current distance from confirmed value is a location metric — live price.
     extension = price_extension_from_sma20_pct(cur, smas.get("sma20"))
-    atr = compute_atr(df)
-    swings = compute_swings(df, swing_lookback)
-    pools = compute_liquidity_pools(df, swings)
-    sweep = detect_sweep(df, config)
-    structure = detect_structure_event(df, sweep, config)
-    fvg = detect_fvg(df, config)
-    ob = detect_ob(df, config)
-    retest = assess_retest(cur, fvg, ob, atr)
+
+    # Retest authority comes from closed evidence only.
+    retest = assess_retest(anchor, fvg, ob, atr)
+    retest_proof = "CLOSED_CONFIRMED"
+
+    live_retest = None
+    live_structure = None
+    live_alignment = None
+    live_volume = None
+    if live_available:
+        live_retest = live_retest_context(cur, fvg, ob, atr)
+        live_structure = live_structure_context(live_row, structure, confirmed_close)
+        live_alignment = sma_value_alignment(cur, smas)
+        try:
+            live_volume = float(live_row["volume"])
+        except (KeyError, TypeError, ValueError):
+            live_volume = None
+
+        # A live interaction may register as PROVISIONAL contact, never as a
+        # confirmed retest and never as an accepted failure. It can only lift
+        # "missing" to "partial"; proven closed verdicts are never overwritten.
+        if (
+            retest["retest_status"] == "missing"
+            and live_retest["live_interaction"] in ("INSIDE_ZONE", "NEAR_ZONE")
+        ):
+            retest = {
+                "retest_status": "partial",
+                "retest_zone": live_retest["live_zone"],
+                "retest_distance_atr": live_retest["live_distance_atr"],
+            }
+            retest_proof = "PROVISIONAL_LIVE"
+
+    # Location / risk geometry: confirmed anchors, current price.
     overhead = assess_overhead(cur, pools, atr, config)
     targets = estimate_targets(cur, pools, structure)
     invalidation = estimate_invalidation(fvg, ob, swings)
     rr = estimate_rr(cur, targets, invalidation)
-    volume = assess_volume(df, config)
 
     prev_close: float | None = None
     if len(df) >= 2:
@@ -592,6 +827,14 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict) -> dict:
         "current_high": round(float(df["high"].iloc[-1]), 4),
         "current_low": round(float(df["low"].iloc[-1]), 4),
         "previous_close": prev_close,
+        # Daily bar truth (MBT-2)
+        "daily_bar_context": daily_ctx,
+        "last_closed_daily_close": confirmed_close,
+        "daily_retest_proof": retest_proof,
+        "live_sma_value_alignment": live_alignment,
+        "live_daily_volume": live_volume,
+        "live_retest_context": live_retest,
+        "live_structure_context": live_structure,
         # SMA / value
         "sma20": smas["sma20"],
         "sma50": smas["sma50"],
