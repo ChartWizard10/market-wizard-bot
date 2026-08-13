@@ -28,7 +28,7 @@ The engine reads only separately-acquired 1H OHLCV bars plus existing
 higher-timeframe structure already present on the tiering_result / enriched dict.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src import candle_evidence
 
@@ -461,11 +461,13 @@ def _compute_freshness(bars, now_ref) -> str:
     if t is None:
         # No timestamp metadata — synthetic/replay bars are treated as current.
         return "FRESH"
-    now = now_ref or datetime.utcnow()
+    now = now_ref if now_ref is not None else datetime.now(timezone.utc)
     try:
-        gap_min = abs((now - t).total_seconds()) / 60.0
+        gap_min = abs((_as_aware_utc(now) - _as_aware_utc(t)).total_seconds()) / 60.0
     except Exception:
-        return "FRESH"
+        # Phase MBT-1: a genuine comparison failure must degrade honestly.
+        # Unknown timing truth is not permission — never fake FRESH.
+        return "STALE"
     if gap_min <= _FRESH_MAX_MIN:
         return "FRESH"
     if gap_min <= _RECENT_MAX_MIN:
@@ -1355,14 +1357,40 @@ def _bar_time(bar):
 
 
 def _parse_time(value):
+    """Parse an ISO timestamp, preserving any real UTC offset it carries.
+
+    Phase MBT-1: the previous implementation discarded tzinfo via
+    `.replace(tzinfo=None)`, which silently converted an absolute instant into
+    a naive wall-clock string — "2026-08-12T09:30:00-04:00" and
+    "2026-08-12T13:30:00+00:00" are the SAME instant and must never be allowed
+    to diverge. Naive input (no offset in the string) stays naive; legacy
+    synthetic/replay fixtures with bare timestamps are unaffected.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
         return value
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+
+
+def _as_aware_utc(dt: datetime) -> datetime:
+    """Normalize a parsed timestamp to an aware UTC instant for comparison.
+
+    A naive value is treated as already representing UTC — an explicit,
+    documented internal normalization rule (not a guess about any provider's
+    exchange timezone), and it is exactly backward compatible: subtracting
+    two naive-but-UTC-labeled datetimes yields the identical delta as
+    subtracting the naive datetimes directly, so existing naive+naive legacy
+    fixtures compare exactly as before. Aware values are converted through
+    their real offset, so a genuine ET timestamp and its UTC equivalent now
+    produce the same instant instead of a false multi-hour divergence.
+    """
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _safe_int(val) -> int:
