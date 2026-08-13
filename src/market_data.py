@@ -3,13 +3,102 @@
 import logging
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Phase MBT-1 — 1H closed/live bar truth and timezone-safe freshness.
+#
+# Doctrine: a closed candle is evidence; a live candle is information. The
+# newest 1H bar may be genuinely still forming (is_open=True) or may already
+# be closed even though the provider has not yet published the next interval.
+# Every earlier bar is closed by chronological law (a later bar exists).
+#
+# The newest bar's status is proven from its own absolute timestamp, the
+# configured interval, and the regular U.S. equity session close — never
+# guessed. If the timestamp's real UTC offset cannot be established (a naive
+# pandas index, i.e. the provider gave us no timezone information at all),
+# the bar is conservatively treated as still open: unknown timing truth is
+# not permission to grant closed-confirmation authority. No third-party
+# market-calendar dependency is added; early-close/holiday sessions are not
+# specially modeled, which only ever biases toward staying open longer than
+# the true close — the safe direction, never a false CLOSED.
+# ---------------------------------------------------------------------------
+
+_EASTERN = ZoneInfo("America/New_York")
+_SESSION_OPEN_ET = (9, 30)
+_SESSION_CLOSE_ET = (16, 0)
+
+
+def _parse_interval_minutes(interval) -> int:
+    """Parse a yfinance-style interval string ('60m', '1h', '30m') to minutes.
+    Unparseable input defaults to 60 — the doctrine default for 1H evidence."""
+    if not isinstance(interval, str):
+        return 60
+    s = interval.strip().lower()
+    try:
+        if s.endswith("h"):
+            return int(round(float(s[:-1]) * 60))
+        if s.endswith("m"):
+            return int(s[:-1])
+    except (TypeError, ValueError):
+        pass
+    return 60
+
+
+def _bar_time_utc(index_value):
+    """Absolute UTC instant for a pandas index entry, or None if the source
+    carries no timezone information. Never guesses a provider timezone —
+    only converts an offset the data itself actually supplies."""
+    try:
+        ts = pd.Timestamp(index_value)
+    except (TypeError, ValueError):
+        return None
+    if ts.tzinfo is None:
+        return None
+    try:
+        return ts.tz_convert("UTC").to_pydatetime()
+    except Exception:
+        return None
+
+
+def _interval_end_utc(bar_time_utc: datetime, interval_minutes: int) -> datetime:
+    """The UTC instant at which `bar_time_utc`'s interval completes.
+
+    Bars that start within the regular U.S. equity session (09:30-16:00 ET)
+    can never run past that session's 16:00 ET close, even if the configured
+    interval would nominally extend further (e.g. a 15:30 ET 60m bar closes
+    with the session at 16:00 ET, not 16:30 ET).
+    """
+    nominal_end = bar_time_utc + timedelta(minutes=interval_minutes)
+    bar_et = bar_time_utc.astimezone(_EASTERN)
+    session_open = bar_et.replace(hour=_SESSION_OPEN_ET[0], minute=_SESSION_OPEN_ET[1],
+                                  second=0, microsecond=0)
+    session_close = bar_et.replace(hour=_SESSION_CLOSE_ET[0], minute=_SESSION_CLOSE_ET[1],
+                                   second=0, microsecond=0)
+    if session_open <= bar_et < session_close:
+        session_close_utc = session_close.astimezone(timezone.utc)
+        return min(nominal_end, session_close_utc)
+    return nominal_end
+
+
+def _resolve_newest_bar_open(bar_time_utc, interval_minutes: int, now_utc: datetime) -> bool:
+    """True (open/live/provisional) unless the interval's completion can be
+    proven from an absolute timestamp. Conservative Ambiguity Law: any
+    unprovable case resolves to open, never to closed."""
+    if bar_time_utc is None or now_utc is None:
+        return True
+    try:
+        end = _interval_end_utc(bar_time_utc, interval_minutes)
+    except Exception:
+        return True
+    return now_utc < end
 
 # ---------------------------------------------------------------------------
 # Ticker universe loader
@@ -310,12 +399,17 @@ def fetch_one_hour_bars(ticker: str, config: dict) -> dict:
 
     Returns an envelope dict consumable by one_hour_entry.build_one_hour_entry_context:
       {
-        "bars":      list of {open,high,low,close,volume,time} (oldest→newest),
+        "bars":      list of {open,high,low,close,volume,time,is_open?} (oldest→newest),
         "freshness": "FRESH" | "RECENT" | "DEGRADED" | "STALE",
-        "now":       iso timestamp the freshness was computed against,
+        "now":       timezone-aware UTC ISO timestamp the freshness was computed against,
         "status":    "OK" | "EMPTY" | "ERROR",
         "error":     None | str,
       }
+
+    Only the newest bar may ever carry is_open=True, and only when its own
+    interval has not yet completed as of `now` (Phase MBT-1). Every earlier
+    bar is closed by chronological law. OHLCV values are never altered by
+    this classification.
 
     Never raises. On any failure returns status != "OK" with bars=[] so the 1H
     engine degrades safely. This does NOT touch the daily/4H acquisition path.
@@ -324,6 +418,10 @@ def fetch_one_hour_bars(ticker: str, config: dict) -> dict:
     period = one_hour_cfg.get("lookback_period", "1mo")
     interval = one_hour_cfg.get("interval", "60m")
     max_bars = int(one_hour_cfg.get("max_bars", 80))
+    interval_minutes = _parse_interval_minutes(interval)
+
+    now_utc = datetime.now(timezone.utc)
+    now_iso = now_utc.isoformat()
 
     try:
         df = yf.download(
@@ -335,32 +433,38 @@ def fetch_one_hour_bars(ticker: str, config: dict) -> dict:
         )
     except Exception as exc:
         log.warning("ONE_HOUR_FETCH_ERROR: %s: %s", ticker, exc)
-        return {"bars": [], "freshness": "STALE", "now": None, "status": "ERROR", "error": str(exc)}
+        return {"bars": [], "freshness": "STALE", "now": now_iso, "status": "ERROR", "error": str(exc)}
 
     if df is None or df.empty:
-        return {"bars": [], "freshness": "STALE", "now": None, "status": "EMPTY", "error": "empty 1H response"}
+        return {"bars": [], "freshness": "STALE", "now": now_iso, "status": "EMPTY", "error": "empty 1H response"}
 
     try:
         df = _normalize(df)
     except Exception as exc:
-        return {"bars": [], "freshness": "STALE", "now": None, "status": "ERROR", "error": f"1H normalize failed: {exc}"}
+        return {"bars": [], "freshness": "STALE", "now": now_iso, "status": "ERROR", "error": f"1H normalize failed: {exc}"}
 
-    bars = []
     tail = df.tail(max_bars)
-    for idx, row in tail.iterrows():
+    n = len(tail)
+    bars = []
+    for pos, (idx, row) in enumerate(tail.iterrows()):
         try:
-            bars.append({
+            bar_dt_utc = _bar_time_utc(idx)
+            bar = {
                 "open": float(row["open"]),
                 "high": float(row["high"]),
                 "low": float(row["low"]),
                 "close": float(row["close"]),
                 "volume": float(row["volume"]) if "volume" in tail.columns else None,
-                "time": str(pd.to_datetime(idx)),
-            })
+                "time": bar_dt_utc.isoformat() if bar_dt_utc is not None else str(pd.to_datetime(idx)),
+            }
         except (KeyError, ValueError, TypeError):
             continue
+        # Chronological law: only the newest bar can possibly still be open.
+        if pos == n - 1 and _resolve_newest_bar_open(bar_dt_utc, interval_minutes, now_utc):
+            bar["is_open"] = True
+        bars.append(bar)
 
-    return {"bars": bars, "freshness": None, "now": datetime.utcnow().isoformat(), "status": "OK", "error": None}
+    return {"bars": bars, "freshness": None, "now": now_iso, "status": "OK", "error": None}
 
 
 def _error_result(ticker: str, msg: str) -> dict:
