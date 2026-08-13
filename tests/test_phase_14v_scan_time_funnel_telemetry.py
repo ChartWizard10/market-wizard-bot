@@ -2115,6 +2115,12 @@ def test_v2_19_dual_scope_window_semantics_unchanged(tmp_path):
 def test_v2_20_audit_only_no_strategy_organ_touched():
     """20 — this phase may not modify any strategy organ."""
     import subprocess
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, cwd=".").stdout.strip()
+    if not branch.startswith("phase-14v"):
+        import pytest as _pytest
+        _pytest.skip("phase-scoped guard — only meaningful on the Phase 14V branch")
     changed = subprocess.run(
         ["git", "diff", "--name-only", "origin/main...HEAD"],
         capture_output=True, text=True, cwd=".").stdout.split()

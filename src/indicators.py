@@ -11,7 +11,7 @@ import logging
 import numpy as np
 import pandas as pd
 
-from src.market_data import resolve_daily_bar_status
+from src.market_data import partition_daily_bars
 
 log = logging.getLogger(__name__)
 
@@ -744,18 +744,19 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
     thresholds = config.get("prefilter", {}).get("thresholds", {})
     swing_lookback = thresholds.get("swing_lookback_bars", 60)
 
-    daily_ctx = resolve_daily_bar_status(df, now_utc=now_utc)
-    live_available = bool(daily_ctx.get("live_bar_available")) and len(df) >= 1
+    # Phase MBT-2A: confirmation eligibility is decided per row from validated
+    # session dates. Physical row position is never provenance — a scrambled or
+    # duplicated index cannot promote an unfinished candle into completed
+    # evidence, and no row outside `confirmed_df` reaches any confirmed feature.
+    partition = partition_daily_bars(df, now_utc=now_utc)
+    daily_ctx = partition["context"]
+    confirmed_df = partition["confirmed_df"]
+    live_row = partition["live_row"]
+    live_available = live_row is not None
 
-    if live_available:
-        confirmed_df = df.iloc[:-1]
-        live_row = df.iloc[-1]
-    else:
-        confirmed_df = df
-        live_row = None
-    daily_ctx["confirmed_bars"] = len(confirmed_df)
-
-    # Current price: the live bar when one exists, else the last closed close.
+    # Current price: the provider's last row, exactly as before. An ambiguous
+    # frame degrades provenance (current_row_trusted=False) — it never buys
+    # confirmation authority back in order to keep a price.
     cur = round(float(df["close"].iloc[-1]), 4)
     confirmed_close: float | None = (
         round(float(confirmed_df["close"].iloc[-1]), 4) if len(confirmed_df) else None

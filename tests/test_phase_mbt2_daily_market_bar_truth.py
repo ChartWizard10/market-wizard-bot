@@ -273,9 +273,12 @@ def test_10_confirmed_smas_do_not_move_with_the_live_close():
 def test_11_current_extension_from_confirmed_sma_may_move_with_live_price():
     ea, eb = _two_live_prices(flat_df(250))
     assert ea["price_extension_from_sma20_pct"] != eb["price_extension_from_sma20_pct"]
-    # ...and the LIVE alignment view is allowed to differ from the confirmed one.
-    assert eb["live_sma_value_alignment"] is not None
-    assert eb["sma_value_alignment"] == ea["sma_value_alignment"]
+    # ...and the LIVE alignment view is exposed as its own field (flat history
+    # keeps both reads "mixed"; the divergent case is asserted in the
+    # far-above-SMA adversarial test).
+    assert ea["live_sma_value_alignment"] == "mixed"
+    assert eb["live_sma_value_alignment"] == "mixed"
+    assert eb["sma_value_alignment"] == ea["sma_value_alignment"] == "mixed"
 
 
 def test_12_confirmed_atr_is_not_moved_by_developing_range():
@@ -695,7 +698,8 @@ def test_41b_unknown_daily_status_never_reads_as_closed():
                  when=SESSION_DAY + timedelta(days=30))     # future-dated row
     e = indicators.enrich("K", df, CFG, now_utc=NOW_MIDSESSION)
     assert e["daily_bar_context"]["status"] == "UNKNOWN"
-    assert e["daily_bar_context"]["live_bar_available"] is True
+    assert e["daily_bar_context"]["current_row_trusted"] is False
+    assert e["daily_bar_context"]["ambiguous_rows_withheld"] == 1
     ctx = candle_evidence.build_candle_evidence_context(e, {"final_tier": "STARTER"})
     assert ctx["candle_status"] == "OPEN_OR_UNKNOWN"
 
@@ -853,36 +857,65 @@ def test_adv_provider_row_missing_today():
 def test_adv_malformed_index_is_unknown_never_closed():
     df = _frame([FLAT] * 30)
     df.index = pd.Index(["not-a-date"] * 30)
-    ctx = resolve_daily_bar_status(df, now_utc=NOW_MIDSESSION)
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
     assert ctx["status"] == "UNKNOWN"
-    assert ctx["live_bar_available"] is True
+    assert ctx["status_source"] == "unparseable_index"
+    # Not one unparseable row may enter confirmation.
+    assert len(part["confirmed_df"]) == 0
+    assert ctx["confirmed_bars"] == 0
+    assert ctx["ambiguous_rows_withheld"] == 30
+    assert part["live_row"] is None
+    assert ctx["live_bar_available"] is False
+    assert ctx["current_row_trusted"] is False
 
 
-def test_adv_unsorted_index_cannot_prove_the_last_row_is_newest():
+def test_adv_unsorted_index_recovers_history_by_date_not_position():
+    """Bad ordering must not destroy recoverable history — but it must also
+    not let a row be confirmed just because it sits early in the frame."""
     df = _frame([FLAT] * 30)
-    df = df.iloc[list(range(28)) + [29, 28]]
-    ctx = resolve_daily_bar_status(df, now_utc=NOW_MIDSESSION)
-    assert ctx["status"] == "UNKNOWN"
-    assert ctx["status_source"] == "non_monotonic_index"
-    assert ctx["live_bar_available"] is True
+    df = df.iloc[list(range(28)) + [29, 28]]        # last two rows swapped
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
+
+    # Every row here is a unique COMPLETED prior session, so all are eligible…
+    assert ctx["status"] == "CLOSED"
+    assert len(part["confirmed_df"]) == 30
+    # …and the confirmed subset is re-sorted chronologically before use.
+    assert ctx["index_reordered"] is True
+    dates = list(part["confirmed_df"].index)
+    assert dates == sorted(dates)
+    assert ctx["current_row_trusted"] is False      # physical last isn't newest
+    assert ctx["ambiguous_rows_withheld"] == 0
 
 
 def test_adv_duplicate_dates_do_not_fabricate_a_close():
-    rows = [FLAT] * 30
-    df = _frame(rows)
-    df = pd.concat([df, df.iloc[[-1]]])       # duplicate final date
-    ctx = resolve_daily_bar_status(df, now_utc=NOW_MIDSESSION)
-    assert ctx["status"] in ("CLOSED", "UNKNOWN")
+    df = _frame([FLAT] * 30)
+    df = pd.concat([df, df.iloc[[-1]]])       # duplicate final session date
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
+    assert ctx["status"] == "UNKNOWN"
+    assert ctx["status_source"] == "duplicate_session_dates"
     assert ctx["using_live_bar_for_confirmation"] is False
+    # BOTH copies are withheld — no copy is crowned canonical.
+    assert len(part["confirmed_df"]) == 29
+    assert ctx["ambiguous_rows_withheld"] == 2
+    assert LAST_CLOSED_DAY not in [i.date() for i in part["confirmed_df"].index]
 
 
 def test_adv_future_dated_row_is_unknown():
     df = _append(flat_df(30), 100, 101, 99, 100.5,
                  when=SESSION_DAY + timedelta(days=10))
-    ctx = resolve_daily_bar_status(df, now_utc=NOW_MIDSESSION)
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
     assert ctx["status"] == "UNKNOWN"
     assert ctx["status_source"] == "future_dated_row"
-    assert ctx["live_bar_available"] is True
+    assert part["live_row"] is None
+    assert ctx["live_bar_available"] is False
+    # The future row is excluded; the genuine completed history survives.
+    assert len(part["confirmed_df"]) == 30
+    assert ctx["ambiguous_rows_withheld"] == 1
+    assert ctx["current_row_trusted"] is False
 
 
 def test_adv_empty_and_none_frames_never_claim_closed():
@@ -1027,10 +1060,54 @@ def test_class_b_false_bullish_confirmation_is_corrected_to_provisional():
     assert e["retest_status"] == "partial"                    # corrected
     assert old_volume["volume_behavior"] == "dryup"
     assert e["volume_behavior"] != "dryup"                    # corrected
-    assert e["structure_confirmed"] == old_structure["structure_confirmed"] or True
+    assert e["volume_behavior"] == "neutral"
+
+    # In THIS frame the developing bar wicks through the structural level and
+    # closes back under it, so neither view confirms structure. Stated exactly
+    # on both sides — the live excursion is preserved only as information.
+    assert old_structure["structure_confirmed"] is False
+    assert e["structure_confirmed"] is False
+    assert e["live_structure_context"]["state"] == "LIVE_WICK_BREAK"
+    assert e["live_structure_context"]["live_high"] == 108.0
+    assert e["live_structure_context"]["level"] == 106.0
+
     w = CFG["prefilter"]["scoring_weights"]["retest_proximity_status"]
     assert prefilter_mod._score_retest(e, w) < prefilter_mod._score_retest(
         {"retest_status": "confirmed"}, w)
+
+
+def test_class_b2_developing_break_is_a_deterministic_before_after_differential():
+    """Second Class-B vector: a developing bar that closes clean above the
+    structural level. Pre-MBT-2 it manufactured BOS + dryup; MBT-2 grants
+    neither. Every value asserted exactly on both sides."""
+    base = flat_df(150)
+    df = _append(base, 100.0, 104.0, 99.5, 103.5, v=150_000.0)
+
+    old_structure = indicators.detect_structure_event(
+        df, indicators.detect_sweep(df, CFG), CFG)
+    old_volume = indicators.assess_volume(df, CFG)
+    e = indicators.enrich("B2", df, CFG, now_utc=NOW_MIDSESSION)
+
+    # BEFORE (whole frame treated as closed)
+    assert old_structure["structure_event"] == "BOS"
+    assert old_structure["structure_confirmed"] is True
+    assert old_volume["volume_behavior"] == "dryup"
+    assert old_volume["volume_ratio"] == 0.15
+
+    # AFTER (completed bars only)
+    assert e["structure_event"] == "none"
+    assert e["structure_confirmed"] is False
+    assert e["structure_level"] is None
+    assert e["volume_behavior"] == "neutral"
+    assert e["live_structure_context"]["state"] == "LIVE_BREAK_BUILDING"
+    assert e["live_structure_context"]["confirms_structure"] is False
+    assert e["live_daily_volume"] == 150_000.0
+
+    # The same bar, once complete, earns exactly what the rules allow.
+    closed = indicators.enrich("B2", df, CFG, now_utc=NOW_AFTER_CLOSE)
+    assert closed["structure_event"] == "BOS"
+    assert closed["structure_confirmed"] is True
+    assert closed["volume_behavior"] == "dryup"
 
 
 def test_class_c_false_bearish_failure_is_corrected():
@@ -1057,3 +1134,240 @@ def test_every_live_field_carries_an_explicit_non_confirmation_assertion():
     assert e["live_retest_context"]["confirms_retest"] is False
     assert e["live_retest_context"]["confirms_failure"] is False
     assert e["live_structure_context"]["confirms_structure"] is False
+
+
+# ===========================================================================
+# PHASE MBT-2A — ambiguous Daily partition safety
+#
+# Physical row position is not confirmation provenance. A malformed ordering
+# cannot promote an unfinished candle into completed evidence, and duplicate
+# session rows are ambiguity rather than extra confirmation.
+# ===========================================================================
+
+def _row(o, h, l, c, v, when):
+    return pd.DataFrame(
+        {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
+        index=[pd.Timestamp(when)])
+
+
+# A violent developing session — if it ever leaks into confirmation it is
+# impossible to miss in SMA / ATR / structure / volume.
+LOUD_TODAY = (100.0, 130.0, 99.5, 129.0, 5_000_000.0)
+
+# What confirmation MUST look like: completed flat history, nothing else.
+SAFE_FIELDS = ("sma20", "sma50", "atr", "structure_event", "structure_confirmed",
+               "recent_range_high", "recent_range_low", "volume_behavior",
+               "volume_ratio", "sma_value_alignment", "last_swing_high",
+               "last_swing_low", "sweep_detected", "fvg", "ob")
+
+
+def _safe_baseline():
+    return indicators.enrich("SAFE", flat_df(150), CFG, now_utc=NOW_NEXT_MORNING)
+
+
+def _assert_confirmation_matches_safe_history(e):
+    safe = _safe_baseline()
+    contaminated = [f for f in SAFE_FIELDS if e[f] != safe[f]]
+    assert contaminated == [], contaminated
+
+
+def test_2a_01_non_monotonic_today_row_before_last_is_excluded():
+    """[..., 06-10, 06-11(LIVE), 06-10] — the developing row is not the
+    physical last row, and must still be withheld from confirmation."""
+    df = pd.concat([flat_df(150), _row(*LOUD_TODAY, SESSION_DAY),
+                    _row(*FLAT, LAST_CLOSED_DAY)])
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+
+    confirmed_dates = [i.date() for i in part["confirmed_df"].index]
+    assert SESSION_DAY not in confirmed_dates
+    # The duplicated 06-10 session is ambiguous, so both copies go too.
+    assert LAST_CLOSED_DAY not in confirmed_dates
+    assert part["context"]["ambiguous_rows_withheld"] == 2
+    # The developing row is found by DATE, not by position.
+    assert part["live_row"] is not None
+    assert float(part["live_row"]["close"]) == 129.0
+    assert part["context"]["status"] == "LIVE"
+
+
+def test_2a_02_non_monotonic_confirmation_equals_safe_completed_history():
+    df = pd.concat([flat_df(150), _row(*LOUD_TODAY, SESSION_DAY),
+                    _row(*FLAT, LAST_CLOSED_DAY)])
+    e = indicators.enrich("NM", df, CFG, now_utc=NOW_MIDSESSION)
+    _assert_confirmation_matches_safe_history(e)
+    assert e["structure_confirmed"] is False
+    assert e["volume_behavior"] != "expansion"
+    assert e["last_closed_daily_close"] == 100.0
+    assert e["live_structure_context"]["live_close"] == 129.0
+
+
+def test_2a_02b_pure_reordering_recovers_history_instead_of_discarding_it():
+    """Unique valid dates in the wrong order: keep every completed row, sort
+    it chronologically, and still withhold the developing session."""
+    base = flat_df(150)
+    # Two completed rows swapped, and the developing row buried mid-frame.
+    df = pd.concat([base.iloc[:-2], base.iloc[[-1]],
+                    _row(*LOUD_TODAY, SESSION_DAY), base.iloc[[-2]]])
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
+
+    assert ctx["status"] == "LIVE"
+    assert ctx["index_reordered"] is True
+    dates = list(part["confirmed_df"].index)
+    assert dates == sorted(dates)
+    assert ctx["ambiguous_rows_withheld"] == 0
+    assert len(part["confirmed_df"]) == 150          # no history discarded
+    assert SESSION_DAY not in [i.date() for i in part["confirmed_df"].index]
+
+    e = indicators.enrich("RO", df, CFG, now_utc=NOW_MIDSESSION)
+    _assert_confirmation_matches_safe_history(e)
+
+
+def test_2a_03_duplicate_today_rows_neither_gains_authority():
+    df = pd.concat([flat_df(150), _row(*LOUD_TODAY, SESSION_DAY),
+                    _row(100.0, 131.0, 99.0, 130.0, 6_000_000.0, SESSION_DAY)])
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
+
+    assert ctx["status"] == "UNKNOWN"
+    assert ctx["status_source"] == "duplicate_session_dates"
+    assert ctx["ambiguous_rows_withheld"] == 2
+    assert part["live_row"] is None                  # no canonical copy invented
+    assert ctx["live_bar_available"] is False
+    assert SESSION_DAY not in [i.date() for i in part["confirmed_df"].index]
+
+    e = indicators.enrich("DUP", df, CFG, now_utc=NOW_MIDSESSION)
+    _assert_confirmation_matches_safe_history(e)
+    assert e["live_retest_context"] is None
+    assert e["live_structure_context"] is None
+    assert e["daily_bar_context"]["using_live_bar_for_confirmation"] is False
+
+
+def test_2a_04_duplicate_historical_session_is_not_two_confirmed_candles():
+    df = pd.concat([flat_df(150),
+                    _row(100.0, 125.0, 99.0, 124.0, 4_000_000.0, LAST_CLOSED_DAY)])
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
+
+    assert ctx["status"] == "UNKNOWN"
+    assert ctx["status_source"] == "duplicate_session_dates"
+    assert len(part["confirmed_df"]) == 149          # BOTH copies withheld
+    assert ctx["ambiguous_rows_withheld"] == 2
+    assert [i.date() for i in part["confirmed_df"].index].count(LAST_CLOSED_DAY) == 0
+
+    e = indicators.enrich("DH", df, CFG, now_utc=NOW_MIDSESSION)
+    _assert_confirmation_matches_safe_history(e)
+
+
+def test_2a_05_future_row_embedded_before_last_is_excluded():
+    df = pd.concat([flat_df(150),
+                    _row(100.0, 140.0, 99.0, 139.0, 7_000_000.0, "2025-12-31"),
+                    _row(*FLAT, "2025-06-11")])
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
+
+    assert ctx["status"] == "UNKNOWN"
+    assert ctx["status_source"] == "future_dated_row"
+    assert date(2025, 12, 31) not in [i.date() for i in part["confirmed_df"].index]
+    # The current-session row is still correctly withheld as developing.
+    assert SESSION_DAY not in [i.date() for i in part["confirmed_df"].index]
+
+    e = indicators.enrich("FU", df, CFG, now_utc=NOW_MIDSESSION)
+    _assert_confirmation_matches_safe_history(e)
+    assert e["recent_range_high"] != 140.0
+
+
+def test_2a_06_malformed_row_embedded_before_last_is_excluded():
+    df = pd.concat([flat_df(150),
+                    _row(100.0, 145.0, 99.0, 144.0, 8_000_000.0, LAST_CLOSED_DAY),
+                    _row(*FLAT, SESSION_DAY)])
+    df.index = pd.Index(list(df.index[:-2]) + ["not-a-date", df.index[-1]],
+                        dtype=object)
+    part = market_data.partition_daily_bars(df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
+
+    assert ctx["status"] == "UNKNOWN"
+    assert ctx["status_source"] == "unparseable_index"
+    assert len(part["confirmed_df"]) == 150          # malformed + developing out
+    assert ctx["ambiguous_rows_withheld"] == 1
+
+    e = indicators.enrich("MF", df, CFG, now_utc=NOW_MIDSESSION)
+    _assert_confirmation_matches_safe_history(e)
+    assert e["recent_range_high"] != 145.0
+
+
+def test_2a_07_confirmed_subset_is_chronological_before_indicators_run():
+    base = flat_df(60)
+    scrambled = base.iloc[[10, 3, 55, 0, 41] + [i for i in range(60)
+                                                if i not in (10, 3, 55, 0, 41)]]
+    part = market_data.partition_daily_bars(scrambled, now_utc=NOW_NEXT_MORNING)
+    dates = list(part["confirmed_df"].index)
+    assert dates == sorted(dates)
+    assert len(dates) == 60
+    assert part["context"]["index_reordered"] is True
+    # Sorting reorders rows; it never edits them.
+    assert sorted(part["confirmed_df"]["close"].tolist()) == sorted(
+        scrambled["close"].tolist())
+
+
+def test_2a_08_clean_production_frame_is_unchanged():
+    """A normal Yahoo frame must partition exactly as MBT-2 already did."""
+    live_df = _append(zone_df(), 105.8, 106.5, ZONE_MID - 0.4, ZONE_MID)
+    part = market_data.partition_daily_bars(live_df, now_utc=NOW_MIDSESSION)
+    ctx = part["context"]
+
+    assert ctx["status"] == "LIVE"
+    assert ctx["index_reordered"] is False
+    assert ctx["ambiguous_rows_withheld"] == 0
+    assert ctx["current_row_trusted"] is True
+    assert ctx["confirmed_bars"] == len(live_df) - 1
+    # Identical to the old positional slice for a clean frame.
+    assert part["confirmed_df"].equals(live_df.iloc[:-1])
+    assert part["live_row"].equals(live_df.iloc[-1])
+    assert part["current_row"].equals(live_df.iloc[-1])
+
+    closed_df = zone_df()
+    cpart = market_data.partition_daily_bars(closed_df, now_utc=NOW_NEXT_MORNING)
+    assert cpart["context"]["status"] == "CLOSED"
+    assert cpart["confirmed_df"].equals(closed_df)
+    assert cpart["live_row"] is None
+    assert cpart["context"]["current_row_trusted"] is True
+
+
+def test_2a_09_live_to_closed_transition_is_unchanged():
+    base = zone_df()
+    df = _append(base, 105.8, 106.5, ZONE_MID - 0.4, ZONE_MID, v=200_000.0)
+    a = indicators.enrich("T", df, CFG, now_utc=NOW_MIDSESSION)
+    b = indicators.enrich("T", df, CFG, now_utc=NOW_AFTER_CLOSE)
+
+    assert (a["daily_bar_context"]["status"], b["daily_bar_context"]["status"]) == (
+        "LIVE", "CLOSED")
+    assert (a["retest_status"], b["retest_status"]) == ("partial", "confirmed")
+    assert (a["daily_retest_proof"], b["daily_retest_proof"]) == (
+        "PROVISIONAL_LIVE", "CLOSED_CONFIRMED")
+    assert (a["volume_behavior"], b["volume_behavior"]) == ("neutral", "dryup")
+    assert (a["last_closed_daily_close"], b["last_closed_daily_close"]) == (
+        106.0, ZONE_MID)
+    assert a["current_price"] == b["current_price"] == ZONE_MID
+    for ctx in (a["daily_bar_context"], b["daily_bar_context"]):
+        assert ctx["ambiguous_rows_withheld"] == 0
+        assert ctx["current_row_trusted"] is True
+
+
+def test_2a_10_ambiguity_never_buys_confirmation_back_to_keep_a_price():
+    """Current price survives an ambiguous frame; confirmation does not."""
+    df = pd.concat([flat_df(150), _row(*LOUD_TODAY, SESSION_DAY),
+                    _row(100.0, 131.0, 99.0, 130.0, 6_000_000.0, SESSION_DAY)])
+    e = indicators.enrich("AM", df, CFG, now_utc=NOW_MIDSESSION)
+    assert e["current_price"] == 130.0                      # price preserved
+    assert e["daily_bar_context"]["current_row_trusted"] is False   # disclosed
+    assert e["structure_confirmed"] is False
+    assert e["daily_bar_context"]["using_live_bar_for_confirmation"] is False
+    _assert_confirmation_matches_safe_history(e)
+
+
+def test_2a_11_partition_never_raises_on_hostile_input():
+    hostile = [None, pd.DataFrame(), flat_df(1), flat_df(0)]
+    for frame in hostile:
+        part = market_data.partition_daily_bars(frame, now_utc=NOW_MIDSESSION)
+        assert part["context"]["using_live_bar_for_confirmation"] is False
+        assert part["context"]["status"] in ("LIVE", "CLOSED", "UNKNOWN")
