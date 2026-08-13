@@ -102,7 +102,7 @@ STAGES = (
     {"id": "LADDER_ARBITRATION", "n": 10,
      "scheduler_step": "Step 6.592 (apply_ladder_arbitration)",
      "observability": PARTIAL,
-     "note": "snipe_ladder is NOT persisted; recomputed read-only from the row's own evidence."},
+     "note": "Ladder provenance depends on the row (see scope note)."},
     {"id": "DOWNGRADE_ONLY_SEAL", "n": 11,
      "scheduler_step": "Step 6.595 / 6.596 (seal + reconciliation)",
      "observability": OBSERVABLE,
@@ -168,6 +168,24 @@ UNOBSERVABLE_CLASSES = {
 BENIGN_CLASSES = {
     CORRECTLY_BLOCKED_HARD_FAILURE, CORRECTLY_WAITING_FOR_PROOF,
 }
+
+
+def is_shy_class(primary) -> bool:
+    """THE canonical shyness predicate — Phase 14V.2.
+
+    Telemetry provenance may change how CERTAIN we are about a row. It may
+    never change what "shy" MEANS. A row is shy only when it carries a
+    finding that is neither benign nor unclassified:
+
+      - CORRECTLY_WAITING_FOR_PROOF / CORRECTLY_BLOCKED_HARD_FAILURE are
+        benign. Correctly waiting is not missed opportunity.
+      - UNCLASSIFIED is not proven shyness. Unknown is not failure.
+
+    Every row path — legacy, telemetry-backed and telemetry-only — must use
+    this one predicate. A divergent copy previously let telemetry-only benign
+    rows inflate the headline shy count.
+    """
+    return bool(primary) and primary not in BENIGN_CLASSES and primary != UNCLASSIFIED
 
 CLASS_STAGE = {
     PREFILTER_REJECTED: "PREFILTER_SCORE_VETO",
@@ -697,8 +715,7 @@ def _row_result(row, ec, tier, ceiling, floor, classes, blocking_codes,
         "primary_class": primary,
         "stage": CLASS_STAGE.get(primary) if primary else None,
         "classes": list(classes),
-        "is_shy": bool(primary) and primary not in BENIGN_CLASSES
-                  and primary != UNCLASSIFIED,
+        "is_shy": is_shy_class(primary),
         "ceiling_vs_served": _ceiling_vs_served(tier, ceiling),
         "recompute_confidence": conf["level"],
         "recompute_gaps": list(conf["gaps"]),
@@ -948,6 +965,43 @@ _ATTR_REASON_OUTCOME_ONLY = (
     "(no market judgment exists for the candidates at this stage)"
 )
 _ATTR_REASON_ROW_LEVEL = "row-level decision traces attribute shyness at this stage"
+# Phase 14V.2A — Stage-10 provenance wording. Three states, never conflated:
+#
+#   AVAILABLE   the row carries a stored scan-time ladder
+#   CONSUMED    the audit actually classified Stage 10 from that ladder
+#   CAUSAL      a definitive LADDER_CAPPED was asserted for that row
+#
+# Availability does not imply consumption, and consumption does not imply a
+# causal claim. Concretely, in the current audit:
+#
+#   * A persisted alert_history row carries snipe_ladder (state_store.
+#     record_alert), evidence_ceiling() reads it, and classify_row CAN emit a
+#     definitive LADDER_CAPPED from it.
+#   * A telemetry-only decision trace also carries the stored ladder, but
+#     _telemetry_only_row derives its classes from suppression/routing/
+#     delivery truth and never runs the Stage-10 ceiling classifier — so its
+#     ladder is displayed provenance, not a causal Stage-10 claim.
+#
+# Legacy history is never retroactively upgraded.
+_LADDER_NOTE_LEGACY = (
+    "Legacy rows do not carry scan-time ladder evidence; Stage 10 is reconstructed "
+    "read-only from each row's own evidence and remains RECONSTRUCTED_NOT_PROVEN."
+)
+_LADDER_NOTE_TELEMETRY = (
+    "Phase 14V makes scan-time ladder evidence available prospectively; rows carrying "
+    "a stored ladder are labeled STORED_SCAN_TIME. A causal Stage-10 claim is made "
+    "only where the audit actually classifies from that stored ladder — telemetry-only "
+    "decision traces expose the ladder as evidence and do not by themselves imply a "
+    "LADDER_CAPPED finding."
+)
+_LADDER_NOTE_MIXED = (
+    "Mixed provenance: prospective rows may carry STORED_SCAN_TIME ladder evidence; "
+    "legacy rows have no persisted ladder and remain RECONSTRUCTED_NOT_PROVEN. Causal "
+    "Stage-10 claims are made only for rows whose classification actually consumes "
+    "stored ladder evidence; availability alone is never a ladder cap. The populations "
+    "are never merged."
+)
+
 _ATTR_REASON_NOT_REACHED = (
     "no candidate reached this stage in the telemetry window; the stage did "
     "not execute, so there is nothing to attribute (this is not a zero)"
@@ -1167,7 +1221,10 @@ def _telemetry_only_row(trace) -> dict:
         "seal_applied": None, "promotion_state": None,
         "primary_class": primary,
         "stage": CLASS_STAGE.get(primary) if primary else None,
-        "classes": classes, "is_shy": bool(primary),
+        "classes": classes,
+        # Phase 14V.2: the SAME predicate as every other row path. A benign
+        # telemetry-only row is evidence, not shyness.
+        "is_shy": is_shy_class(primary),
         "ceiling_vs_served": "AT_CEILING",
         "recompute_confidence": HIGH_CONFIDENCE, "recompute_gaps": [],
         "blocking_codes": [], "soft_cap_codes": [],
@@ -1216,6 +1273,10 @@ def _stage_rows(stage_counts, telemetry_scans=0, backed_rows=0, legacy_rows=0,
         ev = stage_evidence.get(s["id"]) or {}
         telemetry_backed = bool(s["id"] in TELEMETRY_BACKED_STAGES
                                 and ev.get("evidence_available"))
+        if s["id"] == "LADDER_ARBITRATION":
+            note = (_LADDER_NOTE_MIXED if (backed_rows and legacy_rows)
+                    else _LADDER_NOTE_TELEMETRY if backed_rows
+                    else _LADDER_NOTE_LEGACY)
         stage_reached = ev.get("stage_reached")
         if telemetry_backed:
             observability = PARTIAL if mixed else OBSERVABLE
