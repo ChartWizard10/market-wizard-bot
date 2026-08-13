@@ -965,21 +965,41 @@ _ATTR_REASON_OUTCOME_ONLY = (
     "(no market judgment exists for the candidates at this stage)"
 )
 _ATTR_REASON_ROW_LEVEL = "row-level decision traces attribute shyness at this stage"
-# Phase 14V.2 — Stage-10 provenance wording. Stored evidence is stored;
-# reconstructed evidence is reconstructed. The two must never share a
-# description, and legacy history is never retroactively upgraded.
+# Phase 14V.2A — Stage-10 provenance wording. Three states, never conflated:
+#
+#   AVAILABLE   the row carries a stored scan-time ladder
+#   CONSUMED    the audit actually classified Stage 10 from that ladder
+#   CAUSAL      a definitive LADDER_CAPPED was asserted for that row
+#
+# Availability does not imply consumption, and consumption does not imply a
+# causal claim. Concretely, in the current audit:
+#
+#   * A persisted alert_history row carries snipe_ladder (state_store.
+#     record_alert), evidence_ceiling() reads it, and classify_row CAN emit a
+#     definitive LADDER_CAPPED from it.
+#   * A telemetry-only decision trace also carries the stored ladder, but
+#     _telemetry_only_row derives its classes from suppression/routing/
+#     delivery truth and never runs the Stage-10 ceiling classifier — so its
+#     ladder is displayed provenance, not a causal Stage-10 claim.
+#
+# Legacy history is never retroactively upgraded.
 _LADDER_NOTE_LEGACY = (
-    "snipe_ladder was NOT persisted for these rows; the ladder is reconstructed "
-    "read-only from each row's own evidence (RECONSTRUCTED_NOT_PROVEN)."
+    "Legacy rows do not carry scan-time ladder evidence; Stage 10 is reconstructed "
+    "read-only from each row's own evidence and remains RECONSTRUCTED_NOT_PROVEN."
 )
 _LADDER_NOTE_TELEMETRY = (
-    "Phase 14V persists the scan-time snipe_ladder, so Stage 10 uses STORED_SCAN_TIME "
-    "evidence and a ladder cap is causally attributable."
+    "Phase 14V makes scan-time ladder evidence available prospectively; rows carrying "
+    "a stored ladder are labeled STORED_SCAN_TIME. A causal Stage-10 claim is made "
+    "only where the audit actually classifies from that stored ladder — telemetry-only "
+    "decision traces expose the ladder as evidence and do not by themselves imply a "
+    "LADDER_CAPPED finding."
 )
 _LADDER_NOTE_MIXED = (
-    "Mixed provenance: telemetry-backed rows carry the stored scan-time ladder "
-    "(STORED_SCAN_TIME); legacy rows have no persisted ladder and are reconstructed "
-    "read-only (RECONSTRUCTED_NOT_PROVEN). The two are never merged."
+    "Mixed provenance: prospective rows may carry STORED_SCAN_TIME ladder evidence; "
+    "legacy rows have no persisted ladder and remain RECONSTRUCTED_NOT_PROVEN. Causal "
+    "Stage-10 claims are made only for rows whose classification actually consumes "
+    "stored ladder evidence; availability alone is never a ladder cap. The populations "
+    "are never merged."
 )
 
 _ATTR_REASON_NOT_REACHED = (

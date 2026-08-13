@@ -2025,9 +2025,16 @@ def test_v2_11_headline_obeys_one_predicate_across_provenance(tmp_path):
         telemetry={"scan_summaries": [_backed_summary("s1")], "decision_traces": traces})
     for a in rep["examples"]:
         assert ssfa.is_shy_class(a["primary_class"]) is True
-    assert rep["shy_rows"] == sum(
-        1 for c, n in rep["class_counts"].items()
-        if ssfa.is_shy_class(c)) or rep["shy_rows"] >= 1
+    # Deterministic fixture: 1 legacy row (genuinely POSSIBLE_SNIPE_UNDERCALL),
+    # 1 telemetry cooldown row (genuinely shy), 1 telemetry benign row.
+    # Exactly the two genuine findings count; the benign row is excluded while
+    # remaining visible in class_counts.
+    assert rep["total_rows"] == 3
+    assert rep["shy_rows"] == 2
+    assert rep["stage_counts"] == {"LADDER_ARBITRATION": 1, "DEDUP_AND_COOLDOWN": 1}
+    assert rep["class_counts"][ssfa.CORRECTLY_WAITING_FOR_PROOF] == 1
+    assert ssfa.CORRECTLY_WAITING_FOR_PROOF not in [
+        e["primary_class"] for e in rep["examples"]]
 
 
 # ---- DEFECT B: Stage-10 provenance wording --------------------------------
@@ -2040,7 +2047,8 @@ def test_v2_13_legacy_only_stage10_says_reconstructed():
     rep = ssfa.run_shyness_funnel_audit(rows=[_row_for_scan("legacy")], config={})
     note = _ladder_note(rep)
     assert rep["scope"] == "LEGACY_ONLY"
-    assert "NOT persisted" in note and "reconstructed" in note
+    assert "do not carry scan-time ladder evidence" in note
+    assert "reconstructed read-only" in note
     assert "RECONSTRUCTED_NOT_PROVEN" in note
     assert "STORED_SCAN_TIME" not in note
 
@@ -2050,9 +2058,10 @@ def test_v2_12_telemetry_only_stage10_says_stored(tmp_path):
     rep = _report(cfg, [{"scan_id": "s1"}], [_cool_trace(cfg, "C1", 1)])
     note = _ladder_note(rep)
     assert rep["scope"] == "TELEMETRY_ONLY"
-    assert "persists the scan-time snipe_ladder" in note
+    assert "available prospectively" in note
     assert "STORED_SCAN_TIME" in note
-    assert "NOT persisted" not in note
+    # must not claim every telemetry-only row is causally classified
+    assert "do not by themselves imply a LADDER_CAPPED finding" in note
 
 
 def test_v2_14_mixed_stage10_describes_both_populations(tmp_path):
@@ -2118,3 +2127,135 @@ def test_v2_20_audit_only_no_strategy_organ_touched():
                  "config/doctrine_config.yaml")
     for f in forbidden:
         assert f not in changed, f
+
+
+# ===========================================================================
+# PHASE 14V.2A — STAGE-10 PROVENANCE: AVAILABLE / CONSUMED / CAUSAL
+# ===========================================================================
+#
+# Three states, never conflated:
+#   AVAILABLE  the row carries a stored scan-time ladder
+#   CONSUMED   the audit actually classified Stage 10 from that ladder
+#   CAUSAL     a definitive LADDER_CAPPED was asserted for that row
+#
+# A persisted alert_history row satisfies all three. A telemetry-only decision
+# trace satisfies only AVAILABLE: _telemetry_only_row derives its classes from
+# suppression/routing/delivery and never runs the ceiling classifier.
+
+
+def _sent_history_row_with_stored_ladder(cfg, ticker="SENT1", scan="s1",
+                                         served="STARTER"):
+    """A real post-14V alert_history row carrying the stored scan-time ladder,
+    served BELOW the ladder-supported ceiling."""
+    tr = _piped(_live_result(), cfg)
+    state = {"tickers": {}, "meta": {}}
+    state_store.record_alert(ticker, tr, state, cfg, scan)
+    row = state["tickers"][ticker]["alert_history"][-1]
+    row.update({"ticker": ticker, "scan_id": scan, "tier": served,
+                "capital_action": "starter_only"})
+    return row
+
+
+def test_v2a_1_stored_history_row_uses_stored_scan_time(tmp_path):
+    cfg = _cfg(tmp_path)
+    row = _sent_history_row_with_stored_ladder(cfg)
+    assert isinstance(row.get("snipe_ladder"), dict)          # persisted by record_alert
+    out = ssfa.classify_row(row, cfg)
+    assert out["ladder_source"] == "stored_scan_time"
+    assert out["ladder_attribution"] == ssfa.ATTRIBUTION_STORED
+
+
+def test_v2a_2_stored_history_row_can_produce_definitive_ladder_capped(tmp_path):
+    """CONSUMED + CAUSAL: evidence_ceiling reads the stored ladder and the
+    classifier asserts the cap."""
+    cfg = _cfg(tmp_path)
+    row = _sent_history_row_with_stored_ladder(cfg)
+    assert row["snipe_ladder"]["existing_final_tier_recommendation"] == "SNIPE_IT"
+    out = ssfa.classify_row(row, cfg)
+    assert out["ceiling_tier"] == "SNIPE_IT" and out["tier"] == "STARTER"
+    assert ssfa.LADDER_CAPPED in out["classes"]
+    assert out["is_shy"] is True
+
+
+def test_v2a_3_telemetry_only_row_exposes_ladder_but_is_not_ladder_capped(tmp_path):
+    """AVAILABLE only. The ladder is displayed provenance, not a causal claim."""
+    cfg = _cfg(tmp_path)
+    trace = _benign_trace(cfg, "W1", 1)
+    assert isinstance(trace.get("snipe_ladder"), dict)         # evidence present
+    assert trace["ladder_source"] == "stored_scan_time"
+    row = ssfa._telemetry_only_row(trace)
+    assert row["ladder_source"] == "stored_scan_time"
+    assert row["ladder_attribution"] == ssfa.ATTRIBUTION_STORED
+    assert ssfa.LADDER_CAPPED not in row["classes"]            # never auto-asserted
+    assert row["primary_class"] == ssfa.CORRECTLY_WAITING_FOR_PROOF
+    assert row["is_shy"] is False
+
+    # structural: the telemetry-only path does not run the Stage-10 classifier
+    import inspect
+    src = inspect.getsource(ssfa._telemetry_only_row)
+    assert "evidence_ceiling" not in src
+    assert "classify_row" not in src
+    assert "LADDER_CAPPED" not in src
+
+
+def test_v2a_4_telemetry_only_wording_does_not_overclaim(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = _report(cfg, [{"scan_id": "s1"}], [_benign_trace(cfg, "W1", 1)])
+    note = _ladder_note(rep)
+    assert rep["scope"] == "TELEMETRY_ONLY"
+    assert "available prospectively" in note
+    assert "STORED_SCAN_TIME" in note
+    # must NOT claim every telemetry-only row is causally classified
+    assert "do not by themselves imply a LADDER_CAPPED finding" in note
+    assert "a ladder cap is causally attributable" not in note
+
+
+def test_v2a_5_legacy_only_wording_unchanged_in_meaning():
+    rep = ssfa.run_shyness_funnel_audit(rows=[_row_for_scan("legacy")], config={})
+    note = _ladder_note(rep)
+    assert rep["scope"] == "LEGACY_ONLY"
+    assert "RECONSTRUCTED_NOT_PROVEN" in note
+    assert "reconstructed read-only" in note
+    assert "STORED_SCAN_TIME" not in note
+
+
+def test_v2a_6_mixed_wording_names_availability_versus_causation(tmp_path):
+    cfg = _cfg(tmp_path)
+    rep = ssfa.run_shyness_funnel_audit(
+        rows=[_sent_history_row_with_stored_ladder(cfg), _row_for_scan("legacy-old")],
+        config=cfg,
+        telemetry={"scan_summaries": [_backed_summary("s1")],
+                   "decision_traces": [_benign_trace(cfg, "W1", 1)]})
+    note = _ladder_note(rep)
+    assert rep["scope"] == "MIXED"
+    assert "STORED_SCAN_TIME" in note and "RECONSTRUCTED_NOT_PROVEN" in note
+    assert "actually consumes stored ladder evidence" in note
+    assert "availability alone is never a ladder cap" in note
+
+
+def test_v2a_7_three_provenance_states_are_never_conflated(tmp_path):
+    """CASE C: stored+consumed, stored+unconsumed, reconstructed."""
+    cfg = _cfg(tmp_path)
+    sent = ssfa.classify_row(_sent_history_row_with_stored_ladder(cfg), cfg)
+    unsent = ssfa._telemetry_only_row(_benign_trace(cfg, "W1", 1))
+    legacy = ssfa.classify_row(_row_for_scan("legacy-old"), cfg)
+
+    assert (sent["ladder_attribution"], ssfa.LADDER_CAPPED in sent["classes"]) == \
+        (ssfa.ATTRIBUTION_STORED, True)                 # available + consumed + causal
+    assert (unsent["ladder_attribution"], ssfa.LADDER_CAPPED in unsent["classes"]) == \
+        (ssfa.ATTRIBUTION_STORED, False)                # available only
+    assert (legacy["ladder_attribution"], ssfa.LADDER_CAPPED in legacy["classes"]) == \
+        (ssfa.ATTRIBUTION_RECONSTRUCTED, False)         # reconstructed, never causal
+
+
+def test_v2a_8_defect_a_fixture_does_not_regress(tmp_path):
+    """The 99 benign + 1 real-shy fixture still reports 1, not 100."""
+    cfg = _cfg(tmp_path)
+    traces = [_benign_trace(cfg, f"W{i}", i) for i in range(99)]
+    traces.append(_cool_trace(cfg, "C1", 900))
+    rep = _report(cfg, [{"scan_id": "s1"}], traces, limit=200)
+    assert rep["total_rows"] == 100
+    assert rep["shy_rows"] == 1
+    assert rep["class_counts"][ssfa.CORRECTLY_WAITING_FOR_PROOF] == 99
+    assert rep["stage_counts"] == {"DEDUP_AND_COOLDOWN": 1}
+    assert ssfa.is_shy_class(ssfa.CORRECTLY_WAITING_FOR_PROOF) is False
