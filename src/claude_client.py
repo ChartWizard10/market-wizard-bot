@@ -160,10 +160,27 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
     ticker = enriched.get("ticker", "UNKNOWN")
     lines = [f"TICKER: {ticker}"]
 
-    # Price context
-    close = enriched.get("latest_close") or enriched.get("close")
-    if close is not None:
-        lines.append(f"LATEST_CLOSE: {close}")
+    # Price context.
+    # Phase MBT-2: when Daily bar truth is available, the current price is NOT
+    # labeled LATEST_CLOSE — a developing session price is not a close. Current
+    # price (execution/location truth) and last closed Daily close
+    # (confirmation truth) are sent as separate, explicitly named facts.
+    daily_ctx = enriched.get("daily_bar_context")
+    daily_ctx = daily_ctx if isinstance(daily_ctx, dict) else {}
+    daily_status = str(daily_ctx.get("status") or "").upper().strip()
+
+    if daily_status:
+        lines.append(f"DAILY_BAR_STATUS: {daily_status}")
+        current_price = enriched.get("current_price")
+        if current_price is not None:
+            lines.append(f"CURRENT_PRICE: {current_price}")
+        last_closed = enriched.get("last_closed_daily_close")
+        if last_closed is not None:
+            lines.append(f"LAST_CLOSED_DAILY_CLOSE: {last_closed}")
+    else:
+        close = enriched.get("latest_close") or enriched.get("close")
+        if close is not None:
+            lines.append(f"LATEST_CLOSE: {close}")
 
     # SMA levels — no disabled indicators
     sma20 = enriched.get("sma20")
@@ -227,6 +244,15 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
     # Volume
     vol_behavior = enriched.get("volume_behavior", "unknown")
     lines.append(f"VOLUME_BEHAVIOR: {vol_behavior}")
+
+    # Confirmation provenance for the three feature families a developing
+    # Daily bar could otherwise contaminate (Phase MBT-2).
+    if daily_status:
+        lines.append("DAILY_STRUCTURE_SOURCE: CLOSED_BARS")
+        lines.append(
+            f"DAILY_RETEST_PROOF: {enriched.get('daily_retest_proof', 'CLOSED_CONFIRMED')}"
+        )
+        lines.append("DAILY_VOLUME_SOURCE: LAST_COMPLETED_SESSION")
 
     # Invalidation and targets
     invalidation = enriched.get("invalidation_level")

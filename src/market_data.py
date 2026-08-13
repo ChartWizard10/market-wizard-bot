@@ -100,6 +100,215 @@ def _resolve_newest_bar_open(bar_time_utc, interval_minutes: int, now_utc: datet
         return True
     return now_utc < end
 
+
+# ---------------------------------------------------------------------------
+# Phase MBT-2 — Daily developing/closed bar truth.
+#
+# A daily row is stamped with its SESSION DATE, so its status is proven from
+# that calendar date against the current America/New_York session clock — no
+# provider timezone is ever guessed, and no intraday offset is needed.
+#
+#   bar date < today ET                  -> CLOSED  (a later session exists)
+#   bar date == today ET, now  < 16:00ET -> LIVE    (regular session running)
+#   bar date == today ET, now >= 16:00ET -> CLOSED  (regular session complete)
+#   bar date > today ET / unparseable /
+#   non-monotonic index                  -> UNKNOWN (never proven closed)
+#
+# UNKNOWN is treated exactly like LIVE by every consumer: it withholds
+# confirmation authority. Unknown timing truth is not permission.
+#
+# EARLY-CLOSE / HOLIDAY LIMITATION (documented, deliberate): no market-calendar
+# dependency is added, so a 13:00 ET early close is still treated as LIVE until
+# 16:00 ET. That only ever DELAYS confirmation — a few hours of false OPEN,
+# never a false CLOSED. Confirmation is delayed, never invented.
+# ---------------------------------------------------------------------------
+
+_DAILY_STATUS_LIVE = "LIVE"
+_DAILY_STATUS_CLOSED = "CLOSED"
+_DAILY_STATUS_UNKNOWN = "UNKNOWN"
+
+
+def _index_date(index_value):
+    """Session date for a daily index entry, or None if it cannot be parsed."""
+    try:
+        ts = pd.Timestamp(index_value)
+    except (TypeError, ValueError):
+        return None
+    try:
+        if ts is pd.NaT or ts != ts:      # NaT guard
+            return None
+        return ts.date()
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _session_dates(index) -> list:
+    """Session date per row, None where it cannot be parsed."""
+    try:
+        if isinstance(index, pd.DatetimeIndex):
+            return [None if v is pd.NaT or v != v else v for v in index.date]
+    except (TypeError, ValueError, AttributeError):
+        pass
+    return [_index_date(v) for v in index]
+
+
+def _session_complete(now_utc: datetime) -> bool:
+    """True once the current ET regular session's 16:00 close has passed."""
+    now_et = now_utc.astimezone(_EASTERN)
+    close = now_et.replace(
+        hour=_SESSION_CLOSE_ET[0], minute=_SESSION_CLOSE_ET[1], second=0, microsecond=0
+    )
+    return now_et >= close
+
+
+# ---------------------------------------------------------------------------
+# Phase MBT-2A — ambiguous-row partition safety.
+#
+# Confirmation eligibility is decided PER ROW from that row's own validated
+# session date. Physical row position is not provenance: a scrambled or
+# duplicated index must never promote an unfinished candle into completed
+# evidence, and dropping `df.iloc[-1]` proves nothing about the rest.
+#
+#   date < today ET, unique              -> eligible completed history
+#   date == today ET, session complete,
+#                     unique             -> eligible
+#   date == today ET, session running    -> NOT eligible (developing)
+#   date > today ET                      -> NOT eligible (future)
+#   date unparseable                     -> NOT eligible
+#   date duplicated anywhere in the frame-> NOT eligible for EVERY copy
+#
+# Duplicate session rows are ambiguity, not extra confirmation: no copy is
+# arbitrarily crowned canonical, so the whole duplicated group is withheld.
+# Bad ordering alone does not destroy recoverable history — rows with valid,
+# unique dates are kept and sorted chronologically before any indicator runs.
+# OHLCV is never mutated and no bar is ever synthesized.
+# ---------------------------------------------------------------------------
+
+def partition_daily_bars(df, now_utc: datetime | None = None) -> dict:
+    """Split a daily frame into confirmation-eligible bars and everything else.
+
+    Returns:
+      confirmed_df  rows that earned confirmation authority, chronological
+      live_row      the trustworthy developing current-session row, or None
+      current_row   the row that owns current price (provider's last row), or None
+      context       the canonical `daily_bar_context` provenance object
+
+    Never raises. `using_live_bar_for_confirmation` is a permanent False.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    ctx = {
+        "status": _DAILY_STATUS_UNKNOWN,
+        "last_closed_daily_date": None,
+        "live_daily_date": None,
+        "live_bar_available": False,
+        "using_live_bar_for_confirmation": False,
+        "status_source": "no_bars",
+        "confirmed_bars": 0,
+        "ambiguous_rows_withheld": 0,
+        "current_row_trusted": False,
+        "index_reordered": False,
+        "evaluated_at": now_utc.isoformat(),
+    }
+    empty = {"confirmed_df": df, "live_row": None, "current_row": None, "context": ctx}
+
+    try:
+        n = 0 if df is None else len(df)
+    except TypeError:
+        n = 0
+    if n == 0:
+        return empty
+
+    dates = _session_dates(df.index)
+    counts: dict = {}
+    for d in dates:
+        if d is not None:
+            counts[d] = counts.get(d, 0) + 1
+
+    today_et = now_utc.astimezone(_EASTERN).date()
+    complete = _session_complete(now_utc)
+
+    def eligible(d) -> bool:
+        if d is None:                 # unparseable date
+            return False
+        if counts[d] > 1:             # ambiguous duplicated session
+            return False
+        if d > today_et:              # future / clock-skewed row
+            return False
+        if d == today_et:             # current session
+            return complete
+        return True                   # a later session exists
+
+    positions = [i for i, d in enumerate(dates) if eligible(d)]
+    ordered = sorted(positions, key=lambda i: dates[i])
+    ctx["index_reordered"] = ordered != positions
+    confirmed_df = df.iloc[ordered]
+
+    parseable = [d for d in dates if d is not None]
+    newest = max(parseable) if parseable else None
+
+    # ---- status of the newest provable session -----------------------------
+    if newest is None:
+        status, source = _DAILY_STATUS_UNKNOWN, "unparseable_index"
+    elif counts[newest] > 1:
+        status, source = _DAILY_STATUS_UNKNOWN, "duplicate_session_dates"
+    elif newest > today_et:
+        status, source = _DAILY_STATUS_UNKNOWN, "future_dated_row"
+    elif any(d is None for d in dates):
+        status, source = _DAILY_STATUS_UNKNOWN, "unparseable_index"
+    elif newest < today_et:
+        status, source = _DAILY_STATUS_CLOSED, "prior_session_date_et"
+    elif complete:
+        status, source = _DAILY_STATUS_CLOSED, "regular_session_complete_et"
+    else:
+        status, source = _DAILY_STATUS_LIVE, "regular_session_in_progress_et"
+
+    # ---- the developing row, identified by DATE, never by position ---------
+    live_row = None
+    if not complete and counts.get(today_et, 0) == 1:
+        pos = dates.index(today_et)
+        live_row = df.iloc[pos]
+        ctx["live_daily_date"] = today_et.isoformat()
+
+    # ---- current price row: the provider's last row, never a synthesized one
+    current_row = df.iloc[-1]
+    ctx["current_row_trusted"] = bool(
+        dates[-1] is not None
+        and newest is not None
+        and dates[-1] == newest
+        and counts[dates[-1]] == 1
+        and dates[-1] <= today_et
+    )
+
+    withheld = n - len(confirmed_df)
+    ctx["status"] = status
+    ctx["status_source"] = source
+    ctx["live_bar_available"] = live_row is not None
+    ctx["confirmed_bars"] = len(confirmed_df)
+    ctx["ambiguous_rows_withheld"] = max(0, withheld - (1 if live_row is not None else 0))
+    if len(confirmed_df):
+        last_confirmed = dates[ordered[-1]]
+        ctx["last_closed_daily_date"] = last_confirmed.isoformat() if last_confirmed else None
+
+    return {
+        "confirmed_df": confirmed_df,
+        "live_row": live_row,
+        "current_row": current_row,
+        "context": ctx,
+    }
+
+
+def resolve_daily_bar_status(df, now_utc: datetime | None = None) -> dict:
+    """Classify the newest daily row as CLOSED, LIVE (developing) or UNKNOWN.
+
+    Thin accessor over `partition_daily_bars` — the partition is the single
+    source of truth for Daily confirmation provenance.
+    """
+    return partition_daily_bars(df, now_utc=now_utc)["context"]
+
 # ---------------------------------------------------------------------------
 # Ticker universe loader
 # ---------------------------------------------------------------------------
