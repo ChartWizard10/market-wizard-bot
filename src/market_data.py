@@ -309,6 +309,322 @@ def resolve_daily_bar_status(df, now_utc: datetime | None = None) -> dict:
     """
     return partition_daily_bars(df, now_utc=now_utc)["context"]
 
+
+# ---------------------------------------------------------------------------
+# Phase R4H-1 — session-aligned 4H operational bars from the SAME 60m response.
+#
+# ONE provider request, two organs. The 1H engine keeps its existing
+# tail(max_bars) trigger window; the 4H engine aggregates from the FULL
+# normalized response, because operational structure needs far more history
+# than trigger proof does.
+#
+# The regular session splits into exactly two operational buckets:
+#
+#   MORNING_4H      09:30-13:30 ET   sources 09:30/10:30/11:30/12:30   240 min
+#   AFTERNOON_CLOSE 13:30-16:00 ET   sources 13:30/14:30/15:30         150 min
+#
+# The afternoon bucket is a 150-minute session-close operational candle and is
+# labeled as such — it is never described as 240 minutes.
+#
+# MBT-1 remains sovereign over the source rows: a 60m timestamp is the
+# INTERVAL START (see `_interval_end_utc`), and a source bar is closed only
+# once its own interval has completed. MBT-2A remains sovereign over
+# ambiguity: duplicate, unparseable or future-dated constituents withhold
+# confirmation from their bucket rather than being silently dropped, and
+# physical row order is never treated as provenance.
+#
+# Closed clock time alone is not enough: a bucket earns confirmation only when
+# every expected source interval is present AND closed. A completed window
+# with a missing constituent is INCOMPLETE, never confirmed evidence. No bar
+# is ever synthesized, interpolated, or averaged across a hole.
+#
+# Pre-market, after-hours and overnight rows are excluded — this is the
+# regular-session operational chart, and overnight liquidity is a different
+# auction.
+#
+# EARLY-CLOSE LIMITATION (documented, deliberate): no market-calendar
+# dependency is added. On a 13:00 ET early close the afternoon bucket simply
+# never receives its 13:30/14:30/15:30 constituents, so it stays INCOMPLETE
+# and never confirms. Confirmation is delayed, never invented.
+# ---------------------------------------------------------------------------
+
+MORNING_4H = "MORNING_4H"
+AFTERNOON_CLOSE = "AFTERNOON_CLOSE"
+
+_SLOT_STARTS = {
+    MORNING_4H: ((9, 30), (10, 30), (11, 30), (12, 30)),
+    AFTERNOON_CLOSE: ((13, 30), (14, 30), (15, 30)),
+}
+_SLOT_WINDOW_ET = {
+    MORNING_4H: ((9, 30), (13, 30)),
+    AFTERNOON_CLOSE: ((13, 30), (16, 0)),
+}
+_SLOT_DURATION_MIN = {MORNING_4H: 240, AFTERNOON_CLOSE: 150}
+_SLOT_ORDER = {MORNING_4H: 0, AFTERNOON_CLOSE: 1}
+
+FOUR_HOUR_AGGREGATION = "RTH_SESSION_ALIGNED"
+
+
+def _slot_for_start(et_dt) -> str | None:
+    """Operational bucket for a source bar's ET interval start, or None when
+    the row is outside the regular session / off the hourly RTH grid."""
+    hm = (et_dt.hour, et_dt.minute)
+    for slot, starts in _SLOT_STARTS.items():
+        if hm in starts:
+            return slot
+    return None
+
+
+def _slot_bounds_utc(session_date, slot) -> tuple:
+    """(start_utc, end_utc) for a bucket on a given ET session date."""
+    (sh, sm), (eh, em) = _SLOT_WINDOW_ET[slot]
+    start = datetime(session_date.year, session_date.month, session_date.day,
+                     sh, sm, tzinfo=_EASTERN)
+    end = datetime(session_date.year, session_date.month, session_date.day,
+                   eh, em, tzinfo=_EASTERN)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def _empty_four_hour(now_iso, status="EMPTY", error=None) -> dict:
+    return {
+        "bars": [],
+        "status": status,
+        "source_interval": None,
+        "aggregation": FOUR_HOUR_AGGREGATION,
+        "source_request_reused": True,
+        "now": now_iso,
+        "error": error,
+        # Phase R4H-1A: latest-bucket health is a SEPARATE fact from whether
+        # historical evidence exists. An older good candle does not make the
+        # latest missing candle healthy.
+        "latest_bucket_status": "NONE",
+        "latest_bucket_time": None,
+        "latest_bucket_confirmation_eligible": False,
+        # None = no session is running to be current for; False = today's
+        # session has opened and this frame carries nothing from it.
+        "current_session_evidence": None,
+        "history": {
+            "sessions_covered": 0,
+            "total_bars": 0,
+            "closed_complete_bars": 0,
+            "source_rows_seen": 0,
+            "source_rows_off_session": 0,
+            "source_rows_unparseable": 0,
+        },
+    }
+
+
+_DEGRADING_BUCKET_STATES = ("INCOMPLETE", "AMBIGUOUS", "MISSING")
+
+
+def _current_session_started(now_utc: datetime) -> bool:
+    """True once today's regular session has opened.
+
+    Weekends are provably non-sessions by calendar arithmetic. Holidays are
+    NOT modeled — no market-calendar dependency is added — so a holiday looks
+    like a session with no data and reports degraded/stale evidence. That is
+    the safe direction: it withholds trust rather than granting it.
+    """
+    now_et = now_utc.astimezone(_EASTERN)
+    if now_et.weekday() >= 5:
+        return False
+    session_open = now_et.replace(hour=_SESSION_OPEN_ET[0], minute=_SESSION_OPEN_ET[1],
+                                  second=0, microsecond=0)
+    return now_et >= session_open
+
+
+def _latest_bucket_health(bars, now_utc: datetime) -> tuple:
+    """(status, time, confirmation_eligible, current_session_evidence).
+
+    Health of the newest evidence is not the same question as whether any
+    historical evidence exists, and a CLOSED candle can still be STALE.
+
+    Once today's session has opened, the latest EXPECTED bucket belongs to
+    TODAY — so a frame carrying only prior-session bars reports MISSING and
+    `current_session_evidence=False` instead of quietly presenting yesterday's
+    good close as current. Before the open (and at weekends) the newest
+    session present in the data is legitimately the latest evidence and is
+    never called stale merely because the calendar advanced.
+
+        CONFIRMED / LIVE       -> healthy
+        INCOMPLETE / AMBIGUOUS -> degraded
+        window started, no bar -> MISSING (degraded)
+        window not begun       -> not evaluated
+    """
+    if not bars:
+        return "NONE", None, False, None
+
+    started = _current_session_started(now_utc)
+    today = now_utc.astimezone(_EASTERN).date()
+    dates_present = {b["session_date"] for b in bars}
+
+    if started:
+        target_date = today
+        current_session_evidence = today.isoformat() in dates_present
+    else:
+        current_session_evidence = None      # no session running to be current for
+        try:
+            target_date = datetime.fromisoformat(bars[-1]["session_date"]).date()
+        except (TypeError, ValueError):
+            last = bars[-1]
+            return (last["status"], last["time"],
+                    bool(last["confirmation_eligible"]), current_session_evidence)
+
+    present = {b["bucket_slot"]: b for b in bars
+               if b["session_date"] == target_date.isoformat()}
+
+    latest = None
+    for slot in sorted(_SLOT_ORDER, key=lambda k: _SLOT_ORDER[k]):
+        start_utc, _end_utc = _slot_bounds_utc(target_date, slot)
+        if now_utc < start_utc:
+            break                      # this bucket has not begun — not expected yet
+        latest = (slot, start_utc)
+
+    if latest is None:
+        last = bars[-1]
+        return (last["status"], last["time"],
+                bool(last["confirmation_eligible"]), current_session_evidence)
+
+    slot, start_utc = latest
+    bucket = present.get(slot)
+    if bucket is None:
+        return "MISSING", start_utc.isoformat(), False, current_session_evidence
+    return (bucket["status"], bucket["time"],
+            bool(bucket["confirmation_eligible"]), current_session_evidence)
+
+
+def aggregate_four_hour_bars(df, now_utc: datetime | None = None,
+                             interval: str = "60m") -> dict:
+    """Aggregate a normalized intraday DataFrame into session-aligned 4H bars.
+
+    Consumes the FULL provider response (never the truncated 1H window) and
+    never mutates it. Returns the `four_hour` envelope. Never raises.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    now_iso = now_utc.isoformat()
+
+    env = _empty_four_hour(now_iso)
+    env["source_interval"] = interval
+    interval_minutes = _parse_interval_minutes(interval)
+
+    try:
+        n = 0 if df is None else len(df)
+    except TypeError:
+        n = 0
+    if n == 0:
+        return env
+
+    hist = env["history"]
+    hist["source_rows_seen"] = n
+
+    # ---- Bucket the source rows by (session date, slot) --------------------
+    groups: dict = {}
+    for idx, row in df.iterrows():
+        bar_utc = _bar_time_utc(idx)
+        if bar_utc is None:
+            hist["source_rows_unparseable"] += 1
+            continue
+        et = bar_utc.astimezone(_EASTERN)
+        slot = _slot_for_start(et)
+        if slot is None:
+            hist["source_rows_off_session"] += 1
+            continue
+        try:
+            member = {
+                "start": bar_utc,
+                "hm": (et.hour, et.minute),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]) if "volume" in df.columns else None,
+                "closed": not _resolve_newest_bar_open(bar_utc, interval_minutes, now_utc),
+                "future": bar_utc > now_utc,
+            }
+        except (KeyError, TypeError, ValueError):
+            hist["source_rows_unparseable"] += 1
+            continue
+        groups.setdefault((et.date(), slot), []).append(member)
+
+    if not groups:
+        env["status"] = "EMPTY" if not hist["source_rows_unparseable"] else "DEGRADED"
+        return env
+
+    # ---- Build one operational candle per bucket ---------------------------
+    bars = []
+    for (session_date, slot) in sorted(groups, key=lambda k: (k[0], _SLOT_ORDER[k[1]])):
+        # MBT-2A: safe rows may be sorted chronologically — position is not
+        # provenance — but nothing ambiguous is quietly dropped.
+        members = sorted(groups[(session_date, slot)], key=lambda m: m["start"])
+        starts = [m["hm"] for m in members]
+        expected = _SLOT_STARTS[slot]
+
+        duplicated = len(set(starts)) != len(starts)
+        has_future = any(m["future"] for m in members)
+        source_complete = set(starts) == set(expected) and not duplicated
+        all_closed = all(m["closed"] for m in members)
+
+        start_utc, end_utc = _slot_bounds_utc(session_date, slot)
+        window_complete = now_utc >= end_utc
+        is_open = (not window_complete) or (not all_closed)
+        ambiguous = duplicated or has_future
+
+        confirmation_eligible = bool(
+            window_complete and source_complete and all_closed and not ambiguous
+        )
+        if ambiguous:
+            status = "AMBIGUOUS"
+        elif is_open:
+            status = "LIVE"
+        elif not source_complete:
+            status = "INCOMPLETE"
+        else:
+            status = "CONFIRMED"
+
+        volumes = [m["volume"] for m in members if m["volume"] is not None]
+        bars.append({
+            "time": start_utc.isoformat(),
+            "end_time": end_utc.isoformat(),
+            "session_date": session_date.isoformat(),
+            "bucket_slot": slot,
+            "duration_minutes": _SLOT_DURATION_MIN[slot],
+            "open": members[0]["open"],
+            "high": max(m["high"] for m in members),
+            "low": min(m["low"] for m in members),
+            "close": members[-1]["close"],
+            "volume": sum(volumes) if len(volumes) == len(members) else None,
+            "source_bar_count": len(members),
+            "expected_source_bar_count": len(expected),
+            "source_complete": source_complete,
+            "is_open": is_open,
+            "confirmation_eligible": confirmation_eligible,
+            "status": status,
+        })
+
+    confirmed = sum(1 for b in bars if b["confirmation_eligible"])
+    hist["total_bars"] = len(bars)
+    hist["closed_complete_bars"] = confirmed
+    hist["sessions_covered"] = len({b["session_date"] for b in bars})
+
+    latest_status, latest_time, latest_elig, current_evidence = _latest_bucket_health(
+        bars, now_utc)
+    env["latest_bucket_status"] = latest_status
+    env["latest_bucket_time"] = latest_time
+    env["latest_bucket_confirmation_eligible"] = latest_elig
+    env["current_session_evidence"] = current_evidence
+
+    env["bars"] = bars
+    if (hist["source_rows_unparseable"] or confirmed == 0
+            or latest_status in _DEGRADING_BUCKET_STATES
+            or current_evidence is False):
+        env["status"] = "DEGRADED"
+    else:
+        env["status"] = "OK"
+    return env
+
 # ---------------------------------------------------------------------------
 # Ticker universe loader
 # ---------------------------------------------------------------------------
@@ -620,8 +936,14 @@ def fetch_one_hour_bars(ticker: str, config: dict) -> dict:
     bar is closed by chronological law. OHLCV values are never altered by
     this classification.
 
+    Phase R4H-1 adds a backwards-compatible "four_hour" namespace to the same
+    envelope. It is aggregated from the SAME provider response — one request,
+    two organs — and from the FULL normalized frame rather than the truncated
+    1H window, because operational structure needs more history than trigger
+    proof. The 1H "bars" list is byte-for-byte unchanged.
+
     Never raises. On any failure returns status != "OK" with bars=[] so the 1H
-    engine degrades safely. This does NOT touch the daily/4H acquisition path.
+    engine degrades safely. This does NOT touch the daily acquisition path.
     """
     one_hour_cfg = config.get("one_hour", {})
     period = one_hour_cfg.get("lookback_period", "1mo")
@@ -642,15 +964,29 @@ def fetch_one_hour_bars(ticker: str, config: dict) -> dict:
         )
     except Exception as exc:
         log.warning("ONE_HOUR_FETCH_ERROR: %s: %s", ticker, exc)
-        return {"bars": [], "freshness": "STALE", "now": now_iso, "status": "ERROR", "error": str(exc)}
+        return {"bars": [], "freshness": "STALE", "now": now_iso, "status": "ERROR",
+                "error": str(exc),
+                "four_hour": _empty_four_hour(now_iso, "ERROR", str(exc))}
 
     if df is None or df.empty:
-        return {"bars": [], "freshness": "STALE", "now": now_iso, "status": "EMPTY", "error": "empty 1H response"}
+        return {"bars": [], "freshness": "STALE", "now": now_iso, "status": "EMPTY",
+                "error": "empty 1H response",
+                "four_hour": _empty_four_hour(now_iso, "EMPTY", "empty 1H response")}
 
     try:
         df = _normalize(df)
     except Exception as exc:
-        return {"bars": [], "freshness": "STALE", "now": now_iso, "status": "ERROR", "error": f"1H normalize failed: {exc}"}
+        return {"bars": [], "freshness": "STALE", "now": now_iso, "status": "ERROR",
+                "error": f"1H normalize failed: {exc}",
+                "four_hour": _empty_four_hour(now_iso, "ERROR", f"1H normalize failed: {exc}")}
+
+    # R4H-1: aggregate 4H from the FULL normalized response, BEFORE the 1H
+    # trigger window is truncated below. No second provider request.
+    try:
+        four_hour = aggregate_four_hour_bars(df, now_utc=now_utc, interval=interval)
+    except Exception as exc:                      # pragma: no cover - defensive
+        log.warning("FOUR_HOUR_AGGREGATION_ERROR: %s: %s", ticker, exc)
+        four_hour = _empty_four_hour(now_iso, "ERROR", f"4H aggregation failed: {exc}")
 
     tail = df.tail(max_bars)
     n = len(tail)
@@ -673,7 +1009,8 @@ def fetch_one_hour_bars(ticker: str, config: dict) -> dict:
             bar["is_open"] = True
         bars.append(bar)
 
-    return {"bars": bars, "freshness": None, "now": now_iso, "status": "OK", "error": None}
+    return {"bars": bars, "freshness": None, "now": now_iso, "status": "OK",
+            "error": None, "four_hour": four_hour}
 
 
 def _error_result(ticker: str, msg: str) -> dict:
