@@ -394,6 +394,12 @@ def _empty_four_hour(now_iso, status="EMPTY", error=None) -> dict:
         "source_request_reused": True,
         "now": now_iso,
         "error": error,
+        # Phase R4H-1A: latest-bucket health is a SEPARATE fact from whether
+        # historical evidence exists. An older good candle does not make the
+        # latest missing candle healthy.
+        "latest_bucket_status": "NONE",
+        "latest_bucket_time": None,
+        "latest_bucket_confirmation_eligible": False,
         "history": {
             "sessions_covered": 0,
             "total_bars": 0,
@@ -403,6 +409,51 @@ def _empty_four_hour(now_iso, status="EMPTY", error=None) -> dict:
             "source_rows_unparseable": 0,
         },
     }
+
+
+_DEGRADING_BUCKET_STATES = ("INCOMPLETE", "AMBIGUOUS", "MISSING")
+
+
+def _latest_bucket_health(bars, now_utc: datetime) -> tuple:
+    """(status, time, confirmation_eligible) for the LATEST EXPECTED bucket.
+
+    Health of the newest evidence is not the same question as whether any
+    historical evidence exists. A bucket whose window has already STARTED is
+    expected; one that has not begun yet is legitimately absent and must not
+    be reported as degraded.
+
+        CONFIRMED / LIVE      -> healthy
+        INCOMPLETE / AMBIGUOUS-> degraded
+        window started, no bar-> MISSING (degraded)
+        window not begun      -> not evaluated
+    """
+    if not bars:
+        return "NONE", None, False
+
+    newest_date = bars[-1]["session_date"]
+    present = {b["bucket_slot"]: b for b in bars if b["session_date"] == newest_date}
+    try:
+        session_date = datetime.fromisoformat(newest_date).date()
+    except (TypeError, ValueError):
+        last = bars[-1]
+        return last["status"], last["time"], bool(last["confirmation_eligible"])
+
+    latest = None
+    for slot in sorted(_SLOT_ORDER, key=lambda k: _SLOT_ORDER[k]):
+        start_utc, _end_utc = _slot_bounds_utc(session_date, slot)
+        if now_utc < start_utc:
+            break                      # this bucket has not begun — not expected yet
+        latest = (slot, start_utc)
+
+    if latest is None:
+        last = bars[-1]
+        return last["status"], last["time"], bool(last["confirmation_eligible"])
+
+    slot, start_utc = latest
+    bucket = present.get(slot)
+    if bucket is None:
+        return "MISSING", start_utc.isoformat(), False
+    return bucket["status"], bucket["time"], bool(bucket["confirmation_eligible"])
 
 
 def aggregate_four_hour_bars(df, now_utc: datetime | None = None,
@@ -521,8 +572,14 @@ def aggregate_four_hour_bars(df, now_utc: datetime | None = None,
     hist["closed_complete_bars"] = confirmed
     hist["sessions_covered"] = len({b["session_date"] for b in bars})
 
+    latest_status, latest_time, latest_elig = _latest_bucket_health(bars, now_utc)
+    env["latest_bucket_status"] = latest_status
+    env["latest_bucket_time"] = latest_time
+    env["latest_bucket_confirmation_eligible"] = latest_elig
+
     env["bars"] = bars
-    if hist["source_rows_unparseable"] or confirmed == 0:
+    if (hist["source_rows_unparseable"] or confirmed == 0
+            or latest_status in _DEGRADING_BUCKET_STATES):
         env["status"] = "DEGRADED"
     else:
         env["status"] = "OK"

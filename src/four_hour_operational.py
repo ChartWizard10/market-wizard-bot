@@ -132,6 +132,7 @@ def default_four_hour_object(status: str = "INSUFFICIENT") -> dict:
             "closed_bar_available": False,
             "live_bar_available": False,
             "last_closed_source_complete": False,
+            "latest_bucket_status": "NONE",
             "using_live_bar_for_confirmation": False,
             "history_bars": 0,
             "confirmed_history_bars": 0,
@@ -312,6 +313,8 @@ def _build(ticker, tiering_result, enriched, four_hour_bars, config) -> dict:
     if confirmed:
         bc["last_closed_4h_time"] = confirmed[-1].get("time")
         bc["last_closed_source_complete"] = bool(confirmed[-1].get("source_complete"))
+    bc["latest_bucket_status"] = str(
+        envelope.get("latest_bucket_status") or "NONE").upper()
     bc["freshness_status"] = _freshness(bars, envelope)
 
     price = _current_price(enriched, live, confirmed)
@@ -460,9 +463,18 @@ def _proxy_state(tiering_result):
     return None
 
 
+_DEGRADED_LATEST = ("INCOMPLETE", "AMBIGUOUS", "MISSING")
+
+
 def _freshness(bars, envelope):
+    """Trust in the CURRENT evidence — a different fact from the last valid
+    confirmation. An older good candle does not make the latest missing
+    candle healthy."""
     if not bars:
         return "STALE"
+    latest = str(envelope.get("latest_bucket_status") or "").upper()
+    if latest in _DEGRADED_LATEST:
+        return "DEGRADED"
     if bars[-1].get("is_open"):
         return "LIVE"
     return "CLOSED" if str(envelope.get("status", "")).upper() == "OK" else "DEGRADED"
@@ -604,10 +616,11 @@ def _build_displacement(confirmed, live, atr, structure) -> dict:
     def read(bar):
         rng = bar["high"] - bar["low"]
         if rng <= _EPS:
-            return 0.0, 0.0, 0.0
+            return 0.0, 0.0, None
         body = abs(bar["close"] - bar["open"]) / rng
         close_pos = (bar["close"] - bar["low"]) / rng
-        ratio = (rng / atr) if atr else 0.0
+        # No ATR-14 -> range expansion is UNPROVABLE, never assumed satisfied.
+        ratio = (rng / atr) if atr else None
         return body, close_pos, ratio
 
     level = structure.get("break_level") or structure.get("last_swing_high")
@@ -620,7 +633,7 @@ def _build_displacement(confirmed, live, atr, structure) -> dict:
             level is not None and bar["close"] > level + _EPS
         ) or structure["break_state"] == "BOS_CONFIRMED"
         if (body >= _ce._BODY_DOMINANT and close_pos >= _ce._CLOSE_BULL
-                and r >= _ce._RANGE_ATR_EXPANSION and consequence):
+                and r is not None and r >= _ce._RANGE_ATR_EXPANSION and consequence):
             state = "DISPLACEMENT_CONFIRMED"
             origin = round(bar["low"], 4)
             body_pct, ratio = round(body, 4), round(r, 3)
@@ -628,7 +641,7 @@ def _build_displacement(confirmed, live, atr, structure) -> dict:
 
     if state == "NONE" and live is not None:
         body, close_pos, r = read(live)
-        if body >= _ce._BODY_DOMINANT and r >= _ce._RANGE_ATR_EXPANSION:
+        if body >= _ce._BODY_DOMINANT and r is not None and r >= _ce._RANGE_ATR_EXPANSION:
             state = "DISPLACEMENT_BUILDING"
             body_pct, ratio = round(body, 4), round(r, 3)
 
@@ -756,12 +769,15 @@ def _build_location(confirmed, structure, zone, value, failure, atr, price) -> d
             return {"state": state, "reason": f"price inside {label}",
                     "reference_level": lo, "distance_atr": 0.0}
 
+    # Nearest anchor by RAW distance — always measurable. The ATR multiple is
+    # attached only when ATR-14 genuinely exists; it is never fabricated, and
+    # a missing ATR never manufactures EXTENDED or proximity.
     nearest = None
     for label, lo, hi in anchors:
         dist = min(abs(price - lo), abs(price - hi))
-        d_atr = round(dist / atr, 2) if atr else None
-        if nearest is None or (d_atr is not None and d_atr < nearest[1]):
-            nearest = (label, d_atr if d_atr is not None else 999.0, lo)
+        if nearest is None or dist < nearest[3]:
+            d_atr = round(dist / atr, 2) if atr else None
+            nearest = (label, d_atr, lo, dist)
 
     if failure["state"] == "FAILURE_THREAT":
         return {"state": "REPAIRING",
@@ -769,7 +785,7 @@ def _build_location(confirmed, structure, zone, value, failure, atr, price) -> d
                 "reference_level": failure["level"],
                 "distance_atr": nearest[1] if nearest else None}
 
-    if nearest and nearest[1] <= _RETEST_PROXIMITY_ATR:
+    if nearest and nearest[1] is not None and nearest[1] <= _RETEST_PROXIMITY_ATR:
         return {"state": "DEFENDABLE", "reason": f"price at {nearest[0]}",
                 "reference_level": nearest[2], "distance_atr": nearest[1]}
 
@@ -780,7 +796,7 @@ def _build_location(confirmed, structure, zone, value, failure, atr, price) -> d
                           "with no structural reason to act",
                 "reference_level": None, "distance_atr": nearest[1] if nearest else None}
 
-    if nearest and nearest[1] >= _EXTENDED_ATR:
+    if nearest and nearest[1] is not None and nearest[1] >= _EXTENDED_ATR:
         return {"state": "EXTENDED",
                 "reason": f"{nearest[1]} ATR above the nearest defendable 4H structure",
                 "reference_level": nearest[2], "distance_atr": nearest[1]}
@@ -1010,29 +1026,52 @@ def _build_invalidation_quality(structure, zone, liquidity, price) -> dict:
 
 
 def _build_target_path(structure, liquidity, enriched, price, config) -> dict:
-    """Shadow path assessment. Production targets and estimated_rr untouched."""
+    """Shadow path assessment. Production targets and estimated_rr untouched.
+
+    A next objective must be AHEAD of price. Candidates are the confirmed 4H
+    swing highs above price, the confirmed 4H range high above price, and any
+    numeric confirmed Daily target above price; the NEAREST wins, so a nearer
+    4H objective beats a distant Daily one and a Daily target is used only
+    when no 4H objective sits above price.
+
+    "No overhead objective" is a different fact from "old objective behind
+    price" — the former is an honest OPEN path with no target, the latter is
+    false target labeling and is never emitted.
+    """
     block_pct = float(
         (config or {}).get("prefilter", {}).get("thresholds", {})
         .get("overhead_block_distance_pct", 3)
     )
-    objective, basis = liquidity.get("buyside_target"), "next confirmed 4H swing high"
-    if objective is None:
-        objective, basis = structure.get("range_high"), "confirmed 4H range high"
 
-    daily_targets = (enriched or {}).get("targets") or []
-    if objective is not None and price is not None and daily_targets:
-        first = _f((daily_targets[0] or {}).get("level"))
-        if first is not None and first > objective:
-            pass  # the nearer 4H objective is the operational one; Daily is beyond
-
-    if objective is None or price is None or price <= 0:
+    if price is None or price <= 0:
         return {"path_class": "UNKNOWN", "next_objective": None,
                 "objective_basis": None, "distance_pct": None}
 
+    candidates = []
+    for level in (structure.get("swing_highs") or []):
+        lvl = _f(level)
+        if lvl is not None and lvl > price + _EPS:
+            candidates.append((lvl, "next confirmed 4H swing high"))
+    range_high = _f(structure.get("range_high"))
+    if range_high is not None and range_high > price + _EPS:
+        candidates.append((range_high, "confirmed 4H range high"))
+    for target in ((enriched or {}).get("targets") or []):
+        if not isinstance(target, dict):
+            continue
+        lvl = _f(target.get("level"))
+        if lvl is not None and lvl > price + _EPS:
+            candidates.append((lvl, "confirmed Daily objective"))
+
+    if not candidates:
+        # Nothing confirmed stands above price. That is a legitimately open
+        # structural path — with no target, not a stale one behind price.
+        return {"path_class": "OPEN", "next_objective": None,
+                "objective_basis": "NO_CONFIRMED_OVERHEAD_OBJECTIVE",
+                "distance_pct": None}
+
+    objective, basis = min(candidates, key=lambda c: c[0])
     dist_pct = round((objective - price) / price * 100, 3)
-    if dist_pct <= 0:
-        path = "OPEN"
-    elif dist_pct <= block_pct:
+    if dist_pct <= block_pct:
         path = "BLOCKED"
     elif dist_pct <= block_pct * _PATH_COMPRESSED_MULT:
         path = "COMPRESSED"
@@ -1146,6 +1185,11 @@ def _proof_ledger(obj, evidence, live, confirmed):
         soft.append("current 4H bucket is still forming — live evidence is provisional")
     if not obj["bar_context"]["last_closed_source_complete"]:
         soft.append("last closed 4H bucket had incomplete source coverage")
+    latest = obj["bar_context"].get("latest_bucket_status")
+    if latest in _DEGRADED_LATEST:
+        soft.append(f"latest expected 4H bucket is {latest} — current evidence "
+                    f"is degraded even though older confirmations stand")
+        missing.append(f"latest expected 4H bucket {latest}")
     soft.extend(evidence)
 
     if obj["displacement"]["state"] in ("NONE", "BUILDING", "DISPLACEMENT_BUILDING"):
@@ -1178,25 +1222,36 @@ def _sentence(ticker, obj) -> str:
 # ---------------------------------------------------------------------------
 
 def _atr(bars, period):
-    if len(bars) < 2:
+    """ATR over `period` true ranges, matching indicators.compute_atr exactly.
+
+    The canonical implementation builds a true-range series the same length as
+    the bar series — the first bar's TR is its own high-low, because there is
+    no prior close — and then takes rolling(period, min_periods=period). So
+    ATR-14 needs 14 BARS, and fewer than that returns None.
+
+    Insufficient history does not authorize changing the feature definition:
+    a shortened ATR is never returned wearing the ATR-14 label.
+    """
+    if not bars or period <= 0:
         return None
-    trs = []
+    trs = [bars[0]["high"] - bars[0]["low"]]
     for prev, cur in zip(bars, bars[1:]):
         trs.append(max(cur["high"] - cur["low"],
                        abs(cur["high"] - prev["close"]),
                        abs(cur["low"] - prev["close"])))
     if len(trs) < period:
-        period = len(trs)
-    if period <= 0:
         return None
     return round(sum(trs[-period:]) / period, 4)
 
 
 def _f(val):
+    """Finite float or None. NaN and +/-inf are malformed, not values."""
     if val is None or isinstance(val, bool):
         return None
     try:
         f = float(val)
     except (TypeError, ValueError):
         return None
-    return None if f != f else f
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return f

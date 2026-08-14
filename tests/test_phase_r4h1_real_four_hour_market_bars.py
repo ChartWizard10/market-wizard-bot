@@ -473,3 +473,100 @@ def test_partial_live_source_bar_keeps_its_bucket_open():
     assert a["source_complete"] is True
     assert a["is_open"] is True
     assert a["confirmation_eligible"] is False
+
+
+# ===========================================================================
+# PHASE R4H-1A — latest-bucket health (Defect A, market-bar layer)
+#
+# An older good candle does not make the latest missing candle healthy.
+# "Historical evidence exists" and "the latest expected evidence is healthy"
+# are two different facts, and the envelope must report both.
+# ===========================================================================
+
+MISSING_1430 = [(9, 30), (10, 30), (11, 30), (12, 30), (13, 30), (15, 30)]
+
+
+def _env(starts, hour, minute):
+    return market_data.aggregate_four_hour_bars(
+        frame(session_rows(starts=starts)), now_utc=utc(*SESSION, hour, minute))
+
+
+def test_a1_missing_1430_after_close_makes_the_latest_bucket_incomplete():
+    env = _env(MISSING_1430, 16, 5)
+    b = buckets(env)
+    assert b["MORNING_4H"]["status"] == "CONFIRMED"
+    assert b["MORNING_4H"]["confirmation_eligible"] is True
+    assert b["AFTERNOON_CLOSE"]["status"] == "INCOMPLETE"
+    assert b["AFTERNOON_CLOSE"]["confirmation_eligible"] is False
+    assert env["latest_bucket_status"] == "INCOMPLETE"
+    assert env["latest_bucket_confirmation_eligible"] is False
+    assert env["latest_bucket_time"] == utc(*SESSION, 13, 30).isoformat()
+
+
+def test_a2_missing_1430_degrades_the_envelope_despite_a_confirmed_morning():
+    env = _env(MISSING_1430, 16, 5)
+    assert env["status"] == "DEGRADED"
+    # The historical confirmation is still counted — it is simply not health.
+    assert env["history"]["closed_complete_bars"] == 1
+    assert env["history"]["total_bars"] == 2
+
+
+def test_a7_a_complete_session_stays_healthy():
+    env = _env(list(RTH_STARTS), 16, 5)
+    assert env["status"] == "OK"
+    assert env["latest_bucket_status"] == "CONFIRMED"
+    assert env["latest_bucket_confirmation_eligible"] is True
+
+
+def test_a8_a_live_current_bucket_is_not_degraded_for_still_forming():
+    env = _env(list(RTH_STARTS), 15, 55)
+    assert env["latest_bucket_status"] == "LIVE"
+    assert env["latest_bucket_confirmation_eligible"] is False
+    assert env["status"] == "OK"          # provisional, not degraded
+    assert buckets(env)["MORNING_4H"]["confirmation_eligible"] is True
+
+
+def test_a8b_a_bucket_that_has_not_begun_is_not_falsely_degraded():
+    """At 12:00 the afternoon window has not started, so its absence is
+    legitimate — the morning bucket is the latest EXPECTED evidence."""
+    env = _env([(9, 30), (10, 30), (11, 30)], 12, 0)
+    assert env["latest_bucket_status"] == "LIVE"
+    assert env["latest_bucket_time"] == utc(*SESSION, 9, 30).isoformat()
+
+
+def test_a8c_a_completed_window_that_produced_no_bar_is_missing():
+    """The afternoon window completed and delivered nothing at all — that is
+    missing evidence, not a healthy chart."""
+    env = _env(list(MORNING_STARTS), 16, 5)
+    assert env["latest_bucket_status"] == "MISSING"
+    assert env["latest_bucket_time"] == utc(*SESSION, 13, 30).isoformat()
+    assert env["latest_bucket_confirmation_eligible"] is False
+    assert env["status"] == "DEGRADED"
+    assert buckets(env)["MORNING_4H"]["confirmation_eligible"] is True
+
+
+def test_a9_early_close_degradation_remains_conservative():
+    day = (2025, 7, 3)
+    rows = session_rows(day=day, starts=list(MORNING_STARTS) + [(13, 30)])
+    env = market_data.aggregate_four_hour_bars(frame(rows), now_utc=utc(*day, 20, 0))
+    assert env["latest_bucket_status"] == "INCOMPLETE"
+    assert env["status"] == "DEGRADED"
+    a = buckets(env)["AFTERNOON_CLOSE"]
+    assert a["confirmation_eligible"] is False
+    assert buckets(env)["MORNING_4H"]["confirmation_eligible"] is True
+
+
+def test_a_ambiguous_latest_bucket_also_degrades():
+    rows = session_rows(starts=list(RTH_STARTS))
+    rows.append((et(*SESSION, 14, 30), 999.0, 999.0, 999.0, 999.0, 5.0))
+    env = market_data.aggregate_four_hour_bars(frame(rows), now_utc=utc(*SESSION, 16, 5))
+    assert env["latest_bucket_status"] == "AMBIGUOUS"
+    assert env["status"] == "DEGRADED"
+
+
+def test_a_empty_and_error_envelopes_carry_the_new_provenance():
+    for env in (market_data.aggregate_four_hour_bars(None, now_utc=utc(*SESSION, 16, 5)),
+                market_data._empty_four_hour("now", "ERROR", "boom")):
+        assert env["latest_bucket_status"] == "NONE"
+        assert env["latest_bucket_time"] is None
+        assert env["latest_bucket_confirmation_eligible"] is False

@@ -23,7 +23,7 @@ import pandas as pd
 import pytest
 
 from src import four_hour_operational as fho
-from src import market_data, scan_telemetry, timeframe_alignment
+from src import indicators, market_data, scan_telemetry, timeframe_alignment
 
 ET = ZoneInfo("America/New_York")
 RTH = ((9, 30), (10, 30), (11, 30), (12, 30), (13, 30), (14, 30), (15, 30))
@@ -663,8 +663,10 @@ def test_76_daily_objective_context_is_readable_without_overwriting_production()
     before = copy.deepcopy(enriched)
     obj = build(bars, price=bars[-1]["close"], enriched=enriched)
     assert enriched == before                      # production inputs untouched
-    assert obj["target_path"]["next_objective"] != 999.0 or True
+    # Shadow only: the organ never echoes the production invalidation level,
+    # and its own objective is derived from confirmed evidence.
     assert obj["invalidation_quality"]["level"] != 12.0
+    assert obj["target_path"]["next_objective"] != 12.0
 
 
 @pytest.mark.parametrize("offset_pct,expected", [
@@ -1017,3 +1019,261 @@ def test_performance_is_local_deterministic_and_cheap():
     print(f"combined x30  : {(agg_ms + build_ms) * 30:.1f} ms")
     assert env["history"]["total_bars"] >= 40
     assert agg_ms < 250 and build_ms < 250       # generous CI headroom
+
+
+# ===========================================================================
+# PHASE R4H-1A — Defect A: the organ reflects latest-bucket health
+# ===========================================================================
+
+def _degraded_envelope(bars, latest="INCOMPLETE"):
+    env = envelope(bars, "DEGRADED")
+    env["latest_bucket_status"] = latest
+    env["latest_bucket_time"] = "2025-06-11T17:30:00+00:00"
+    env["latest_bucket_confirmation_eligible"] = False
+    return env
+
+
+def _healthy_envelope(bars, latest="CONFIRMED"):
+    env = envelope(bars, "OK")
+    env["latest_bucket_status"] = latest
+    env["latest_bucket_time"] = bars[-1]["time"]
+    env["latest_bucket_confirmation_eligible"] = latest == "CONFIRMED"
+    return env
+
+
+def test_a3_organ_status_is_degraded_when_the_latest_bucket_is_incomplete():
+    bars = legs(UPTREND)
+    obj = fho.build_four_hour_operational_context(
+        "A", {}, {"current_price": bars[-1]["close"]},
+        _degraded_envelope(bars), CFG)
+    assert obj["status"] == "DEGRADED"
+
+
+def test_a4_freshness_status_is_degraded_not_closed():
+    bars = legs(UPTREND)
+    obj = fho.build_four_hour_operational_context(
+        "A", {}, {"current_price": bars[-1]["close"]},
+        _degraded_envelope(bars), CFG)
+    assert obj["bar_context"]["freshness_status"] == "DEGRADED"
+    assert obj["bar_context"]["latest_bucket_status"] == "INCOMPLETE"
+
+
+def test_a5_the_last_good_confirmation_is_not_erased():
+    """Three separate facts: last good confirmation, latest bucket, trust."""
+    bars = legs(UPTREND)
+    healthy = fho.build_four_hour_operational_context(
+        "A", {}, {"current_price": bars[-1]["close"]}, _healthy_envelope(bars), CFG)
+    degraded = fho.build_four_hour_operational_context(
+        "A", {}, {"current_price": bars[-1]["close"]}, _degraded_envelope(bars), CFG)
+
+    assert degraded["bar_context"]["last_closed_4h_time"] == \
+        healthy["bar_context"]["last_closed_4h_time"]
+    assert degraded["bar_context"]["last_closed_4h_time"] is not None
+    assert degraded["bar_context"]["confirmed_history_bars"] == \
+        healthy["bar_context"]["confirmed_history_bars"]
+    assert degraded["bar_context"]["latest_bucket_status"] == "INCOMPLETE"
+    assert degraded["bar_context"]["freshness_status"] == "DEGRADED"
+    assert healthy["bar_context"]["freshness_status"] == "CLOSED"
+    assert any("latest expected 4H bucket" in m for m in degraded["missing_proofs"])
+
+
+def test_a6_the_incomplete_bucket_never_enters_confirmed_calculations():
+    bars = legs(UPTREND)
+    intruder = bar(500, 900, 400, 850, slot="AFTERNOON_CLOSE",
+                   session="2025-06-11", complete=False, confirmed=False)
+    clean = fho.build_four_hour_operational_context(
+        "A", {}, {"current_price": bars[-1]["close"]}, _healthy_envelope(bars), CFG)
+    withtail = fho.build_four_hour_operational_context(
+        "A", {}, {"current_price": bars[-1]["close"]},
+        _degraded_envelope(bars + [intruder]), CFG)
+    for field in ("structure", "displacement", "zone_context", "value_context",
+                  "liquidity"):
+        assert withtail[field] == clean[field], field
+    assert withtail["structure"]["range_high"] < 900
+
+
+def test_a_live_latest_bucket_is_not_degraded_by_the_organ():
+    bars = legs(UPTREND)
+    live = bars + [bar(bars[-1]["close"], bars[-1]["close"] + 1,
+                       bars[-1]["close"] - 1, bars[-1]["close"] + 0.5,
+                       slot="AFTERNOON_CLOSE", session="2025-06-11", is_open=True)]
+    obj = fho.build_four_hour_operational_context(
+        "A", {}, {"current_price": bars[-1]["close"]},
+        _healthy_envelope(live, "LIVE"), CFG)
+    assert obj["bar_context"]["freshness_status"] == "LIVE"
+    assert obj["status"] == "ENABLED"
+
+
+# ===========================================================================
+# PHASE R4H-1A — Defect B: a target must be AHEAD of price
+# ===========================================================================
+
+def _range_high(bars):
+    return build(bars, price=None)["structure"]["range_high"]
+
+
+def test_b_case1_nearer_4h_objective_beats_a_distant_daily_target():
+    bars = legs(UPTREND)
+    hi = _range_high(bars)
+    price = round(hi - 5, 4)
+    obj = build(bars, price=price,
+                enriched={"targets": [{"label": "T1", "level": hi + 200}]})
+    tp = obj["target_path"]
+    assert tp["objective_basis"] in ("next confirmed 4H swing high",
+                                     "confirmed 4H range high")
+    assert tp["next_objective"] < hi + 200
+    assert tp["next_objective"] > price
+
+
+def test_b_case2_daily_target_is_used_when_no_4h_objective_is_above_price():
+    bars = legs(UPTREND)
+    price = round(_range_high(bars) + 25, 4)          # above every 4H level
+    obj = build(bars, price=price,
+                enriched={"targets": [{"label": "T1", "level": price + 50,
+                                       "reason": "daily"}]})
+    tp = obj["target_path"]
+    assert tp["objective_basis"] == "confirmed Daily objective"
+    assert tp["next_objective"] == round(price + 50, 4)
+    assert tp["distance_pct"] > 0
+
+
+def test_b_case3_no_objective_above_price_is_open_with_no_backward_target():
+    bars = legs(UPTREND)
+    price = round(_range_high(bars) + 25, 4)
+    tp = build(bars, price=price)["target_path"]
+    assert tp["path_class"] == "OPEN"
+    assert tp["next_objective"] is None
+    assert tp["objective_basis"] == "NO_CONFIRMED_OVERHEAD_OBJECTIVE"
+    assert tp["distance_pct"] is None
+
+
+def test_b_case4_a_daily_target_below_price_is_ignored():
+    bars = legs(UPTREND)
+    price = round(_range_high(bars) + 25, 4)
+    tp = build(bars, price=price,
+               enriched={"targets": [{"label": "T1", "level": price - 10}]})["target_path"]
+    assert tp["next_objective"] is None
+    assert tp["objective_basis"] == "NO_CONFIRMED_OVERHEAD_OBJECTIVE"
+
+
+def test_b_case5_malformed_daily_targets_are_ignored_safely():
+    bars = legs(UPTREND)
+    price = round(_range_high(bars) + 25, 4)
+    hostile = [None, "T1", 42, {"label": "T1"}, {"level": None},
+               {"level": "abc"}, {"level": float("nan")}, {"level": float("inf")}]
+    tp = build(bars, price=price, enriched={"targets": hostile})["target_path"]
+    assert tp["next_objective"] is None
+    assert tp["objective_basis"] == "NO_CONFIRMED_OVERHEAD_OBJECTIVE"
+    assert tp["path_class"] == "OPEN"
+
+
+def test_b_next_objective_is_never_at_or_behind_price():
+    bars = legs(UPTREND)
+    hi = _range_high(bars)
+    for price in (hi - 30, hi - 5, hi, hi + 0.01, hi + 25, hi + 200):
+        tp = build(bars, price=round(price, 4))["target_path"]
+        if tp["next_objective"] is not None:
+            assert tp["next_objective"] > price, price
+            assert tp["distance_pct"] > 0, price
+        else:
+            assert tp["objective_basis"] == "NO_CONFIRMED_OVERHEAD_OBJECTIVE"
+            assert tp["path_class"] == "OPEN"
+
+
+def test_b_price_exactly_at_the_objective_is_not_a_future_objective():
+    bars = legs(UPTREND)
+    hi = _range_high(bars)
+    tp = build(bars, price=hi)["target_path"]
+    assert tp["next_objective"] != hi
+    assert tp["next_objective"] is None or tp["next_objective"] > hi
+
+
+# ===========================================================================
+# PHASE R4H-1A — Defect C: ATR-14 means ATR-14
+# ===========================================================================
+
+def _bars(n):
+    return legs([(2, 4), (-1, 2), (2, 4), (-1, 2), (2, 8)])[:n]
+
+
+def test_c1_twelve_confirmed_bars_have_no_atr14():
+    assert fho._atr(_bars(12), fho._ATR_PERIOD) is None
+
+
+def test_c2_atr14_availability_matches_the_canonical_true_range_count():
+    """indicators.compute_atr builds a TR series the SAME LENGTH as the bar
+    series (the first TR is its own high-low) and takes
+    rolling(14, min_periods=14). So 13 bars -> unavailable, 14 -> available."""
+    assert fho._atr(_bars(13), fho._ATR_PERIOD) is None
+    assert fho._atr(_bars(14), fho._ATR_PERIOD) is not None
+
+
+def test_c2b_matches_indicators_compute_atr_exactly():
+    for n in (12, 13, 14, 15, 20, 30):
+        bars = _bars(n)
+        df = pd.DataFrame({"high": [b["high"] for b in bars],
+                           "low": [b["low"] for b in bars],
+                           "close": [b["close"] for b in bars]})
+        assert fho._atr(bars, 14) == indicators.compute_atr(df, 14), n
+
+
+def test_c3_fifteen_confirmed_bars_have_atr14():
+    assert fho._atr(_bars(15), fho._ATR_PERIOD) is not None
+
+
+def test_c4_no_shortened_atr_is_ever_emitted():
+    """The value returned at 14 bars must be the true 14-period mean, not a
+    shorter window quietly relabelled."""
+    bars = _bars(14)
+    trs = [bars[0]["high"] - bars[0]["low"]]
+    for prev, cur in zip(bars, bars[1:]):
+        trs.append(max(cur["high"] - cur["low"],
+                       abs(cur["high"] - prev["close"]),
+                       abs(cur["low"] - prev["close"])))
+    assert len(trs) == 14
+    assert fho._atr(bars, 14) == round(sum(trs) / 14, 4)
+    # A 13-bar window would have produced a different number — and None is
+    # returned instead of that number.
+    assert round(sum(trs[-13:]) / 13, 4) != fho._atr(bars, 14)
+    assert fho._atr(bars[:13], 14) is None
+
+
+def test_c5_atr_dependent_fields_degrade_safely():
+    bars = legs([(2, 4), (-1, 2), (2, 4), (-1, 3)])[:13]
+    assert fho._atr([b for b in bars if b["confirmation_eligible"]],
+                    fho._ATR_PERIOD) is None
+    r = build(bars, price=None)["structure"]
+
+    mid = build(bars, price=round((r["range_low"] + r["range_high"]) / 2, 4))
+    assert mid["location"]["distance_atr"] is None
+    assert mid["displacement"]["range_atr_ratio"] is None
+    assert mid["retest_truth"]["distance_atr"] is None
+    assert mid["displacement"]["state"] != "DISPLACEMENT_CONFIRMED"
+
+    # No proximity credit and no invented EXTENDED from a missing ATR.
+    assert mid["operational_location"] == "MID_RANGE"
+    far = build(bars, price=round(r["range_high"] + 40, 4))
+    assert far["operational_location"] == "EXTENDED"
+    assert far["location"]["reason"] == "price at the upper edge of the 4H range"
+    assert far["location"]["distance_atr"] is None
+
+
+def test_c6_forty_four_bar_production_shaped_fixture_is_unchanged():
+    """22 sessions x 2 buckets — the real production history budget."""
+    bars = []
+    px = 100.0
+    for d in range(22):
+        session = f"2025-06-{d + 1:02d}"
+        for slot in ("MORNING_4H", "AFTERNOON_CLOSE"):
+            bars.append(bar(px, px + 1.2, px - 1.1, px + 0.4, v=900_000.0,
+                            slot=slot, session=session))
+            px += 0.35
+    assert len(bars) == 44
+    obj = build(bars, price=bars[-1]["close"])
+    assert obj["status"] == "ENABLED"
+    assert obj["bar_context"]["confirmed_history_bars"] == 44
+    assert fho._atr(bars, fho._ATR_PERIOD) is not None
+    assert obj["value_context"]["sma10"] is not None
+    assert obj["value_context"]["sma20"] is not None
+    assert obj["value_context"]["sma50"] is None          # honest at 44 bars
+    assert obj["value_context"]["unavailable"] == [50]
