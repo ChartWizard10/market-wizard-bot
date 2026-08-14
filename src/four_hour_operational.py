@@ -136,6 +136,9 @@ def default_four_hour_object(status: str = "INSUFFICIENT") -> dict:
             "using_live_bar_for_confirmation": False,
             "history_bars": 0,
             "confirmed_history_bars": 0,
+            "structural_segment_bars": 0,
+            "structural_segment_start": None,
+            "history_gap_detected": False,
             "sessions_covered": 0,
             "freshness_status": "UNKNOWN",
         },
@@ -302,11 +305,18 @@ def _build(ticker, tiering_result, enriched, four_hour_bars, config) -> dict:
         obj["scanner_sentence"] = "4H operational evidence unavailable."
         return obj
 
-    confirmed = [b for b in bars if b.get("confirmation_eligible")]
-    live = bars[-1] if bars and bars[-1].get("is_open") else None
+    eligible = [b for b in bars if b.get("confirmation_eligible")]
+    # Sequential proof runs ONLY on the latest contiguous run — never across a
+    # known hole — while `eligible` remains the audit count of all valid
+    # historical confirmations.
+    confirmed = _structural_segment(bars)
+    live = _resolve_live_bucket(bars)
 
     bc = obj["bar_context"]
-    bc["confirmed_history_bars"] = len(confirmed)
+    bc["confirmed_history_bars"] = len(eligible)
+    bc["structural_segment_bars"] = len(confirmed)
+    bc["structural_segment_start"] = confirmed[0]["time"] if confirmed else None
+    bc["history_gap_detected"] = len(confirmed) < len(eligible)
     bc["closed_bar_available"] = bool(confirmed)
     bc["live_bar_available"] = live is not None
     bc["current_live_4h_time"] = live.get("time") if live else None
@@ -323,7 +333,10 @@ def _build(ticker, tiering_result, enriched, four_hour_bars, config) -> dict:
     if len(confirmed) < _MIN_CONFIRMED_BARS:
         obj["status"] = "INSUFFICIENT"
         obj["missing_proofs"] = [
-            f"insufficient confirmed 4H history: {len(confirmed)} < {_MIN_CONFIRMED_BARS}"
+            f"insufficient contiguous 4H history: {len(confirmed)} < "
+            f"{_MIN_CONFIRMED_BARS}"
+            + (f" (gap detected; {len(eligible)} confirmed buckets exist but are "
+               f"not contiguous)" if bc["history_gap_detected"] else "")
         ]
         obj["scanner_sentence"] = (
             f"4H evidence insufficient — only {len(confirmed)} confirmed operational "
@@ -332,7 +345,14 @@ def _build(ticker, tiering_result, enriched, four_hour_bars, config) -> dict:
         obj["proxy_comparison"] = compare_real_vs_proxy(_proxy_state(tiering_result), obj)
         return obj
 
-    obj["status"] = "DEGRADED" if env_status == "DEGRADED" else "ENABLED"
+    if bc["freshness_status"] == "STALE":
+        # Obsolete 4H structure must never be advertised as healthy current
+        # evidence against today's live price.
+        obj["status"] = "STALE"
+    elif env_status == "DEGRADED":
+        obj["status"] = "DEGRADED"
+    else:
+        obj["status"] = "ENABLED"
 
     # ---- Layer 1: price ladder -------------------------------------------
     atr = _atr(confirmed, _ATR_PERIOD)
@@ -409,6 +429,77 @@ def _build(ticker, tiering_result, enriched, four_hour_bars, config) -> dict:
 # Input resolution
 # ---------------------------------------------------------------------------
 
+_MORNING_SLOT = "MORNING_4H"
+_AFTERNOON_SLOT = "AFTERNOON_CLOSE"
+
+
+def _resolve_live_bucket(bars):
+    """The developing 4H candle, or None.
+
+    Phase R4H-1B: `is_open` alone is not provenance. A bucket whose
+    constituents were duplicated, future-dated or unparseable is AMBIGUOUS —
+    explicitly ineligible for confirmation — and an INCOMPLETE bucket is
+    missing evidence. Neither is a legitimate developing candle, so neither may
+    feed provisional live reads. Only a bucket the market-bar layer itself
+    classified LIVE is admitted. The bucket is never mutated or promoted.
+    """
+    if not bars:
+        return None
+    last = bars[-1]
+    if not last.get("is_open"):
+        return None
+    if str(last.get("status") or "").upper() != "LIVE":
+        return None
+    return last
+
+
+def _contiguous(prev, cur) -> bool:
+    """True when `cur` is the very next operational bucket after `prev`.
+
+    The session schedule is MORNING -> AFTERNOON within a date, and
+    AFTERNOON -> MORNING across dates (weekends included, since the next
+    session's morning legitimately follows the previous session's close). Any
+    other pairing means an expected bucket between them is absent.
+    """
+    p_slot = prev.get("bucket_slot")
+    c_slot = cur.get("bucket_slot")
+    if prev.get("session_date") == cur.get("session_date"):
+        return p_slot == _MORNING_SLOT and c_slot == _AFTERNOON_SLOT
+    return p_slot == _AFTERNOON_SLOT and c_slot == _MORNING_SLOT
+
+
+def _structural_segment(bars) -> list:
+    """The latest CONTIGUOUS run of confirmed buckets ending at the newest
+    valid closed candle.
+
+    Phase R4H-1B: a missing candle cannot be stitched out of existence.
+    Filtering an INCOMPLETE or AMBIGUOUS bucket away and joining both sides
+    would let pivots, ATR true ranges, FVGs, breaks, retests and holds be
+    confirmed straight across a known evidence hole. Sequential proof
+    therefore runs on this segment only. Nothing is synthesized or
+    interpolated, and the pre-gap history is still counted for audit.
+
+    A trailing LIVE bucket sits AFTER closed history and never breaks it.
+    """
+    # Trailing non-confirmed buckets (the developing candle, or a latest
+    # bucket that came back INCOMPLETE/AMBIGUOUS) sit AFTER the last confirmed
+    # candle. They are not history and they do not invalidate the history
+    # behind them — their health is reported separately.
+    end = len(bars) - 1
+    while end >= 0 and not bars[end].get("confirmation_eligible"):
+        end -= 1
+
+    segment = []
+    for idx in range(end, -1, -1):
+        bucket = bars[idx]
+        if not bucket.get("confirmation_eligible"):
+            break                        # INCOMPLETE / AMBIGUOUS breaks continuity
+        if segment and not _contiguous(bucket, segment[0]):
+            break                        # an expected bucket between them is absent
+        segment.insert(0, bucket)
+    return segment
+
+
 def _resolve_bars(four_hour_bars):
     """Accept the market_data four_hour envelope or a bare bar list."""
     if isinstance(four_hour_bars, dict):
@@ -468,9 +559,17 @@ _DEGRADED_LATEST = ("INCOMPLETE", "AMBIGUOUS", "MISSING")
 
 def _freshness(bars, envelope):
     """Trust in the CURRENT evidence — a different fact from the last valid
-    confirmation. An older good candle does not make the latest missing
-    candle healthy."""
+    confirmation, and a different fact again from candle state.
+
+    A closed candle can still be stale. When today's session has opened and
+    the frame carries nothing from it, the newest candle may be perfectly
+    CLOSED and still be yesterday's — that is STALE, not healthy. Before the
+    open and at weekends the prior session is legitimately the latest
+    evidence and is never called stale merely because the date changed.
+    """
     if not bars:
+        return "STALE"
+    if envelope.get("current_session_evidence") is False:
         return "STALE"
     latest = str(envelope.get("latest_bucket_status") or "").upper()
     if latest in _DEGRADED_LATEST:
@@ -1185,6 +1284,14 @@ def _proof_ledger(obj, evidence, live, confirmed):
         soft.append("current 4H bucket is still forming — live evidence is provisional")
     if not obj["bar_context"]["last_closed_source_complete"]:
         soft.append("last closed 4H bucket had incomplete source coverage")
+    if obj["bar_context"].get("history_gap_detected"):
+        soft.append(
+            f"evidence hole in 4H history — sequential proof uses only the latest "
+            f"contiguous segment of {obj['bar_context']['structural_segment_bars']} "
+            f"of {obj['bar_context']['confirmed_history_bars']} confirmed buckets")
+    if obj["bar_context"].get("freshness_status") == "STALE":
+        soft.append("4H evidence predates the current session — stale, not current")
+        missing.append("no current-session 4H evidence")
     latest = obj["bar_context"].get("latest_bucket_status")
     if latest in _DEGRADED_LATEST:
         soft.append(f"latest expected 4H bucket is {latest} — current evidence "

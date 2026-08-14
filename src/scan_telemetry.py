@@ -671,6 +671,10 @@ def compact_four_hour_real(four_hour, proxy_comparison=None) -> dict | None:
         "live_bar_available": bc.get("live_bar_available") is True,
         "last_closed_source_complete": bc.get("last_closed_source_complete") is True,
         "confirmed_history_bars": _num(bc.get("confirmed_history_bars")),
+        # Phase R4H-1B provenance: continuity and evidence age.
+        "structural_segment_bars": _num(bc.get("structural_segment_bars")),
+        "history_gap_detected": bc.get("history_gap_detected") is True,
+        "freshness_status": _scalar(bc.get("freshness_status")),
         "proxy_state": _scalar(cmp_.get("proxy_state")),
         "proxy_agreement": _scalar(cmp_.get("agreement")),
         "missing_proofs": missing,

@@ -400,6 +400,9 @@ def _empty_four_hour(now_iso, status="EMPTY", error=None) -> dict:
         "latest_bucket_status": "NONE",
         "latest_bucket_time": None,
         "latest_bucket_confirmation_eligible": False,
+        # None = no session is running to be current for; False = today's
+        # session has opened and this frame carries nothing from it.
+        "current_session_evidence": None,
         "history": {
             "sessions_covered": 0,
             "total_bars": 0,
@@ -414,46 +417,80 @@ def _empty_four_hour(now_iso, status="EMPTY", error=None) -> dict:
 _DEGRADING_BUCKET_STATES = ("INCOMPLETE", "AMBIGUOUS", "MISSING")
 
 
+def _current_session_started(now_utc: datetime) -> bool:
+    """True once today's regular session has opened.
+
+    Weekends are provably non-sessions by calendar arithmetic. Holidays are
+    NOT modeled — no market-calendar dependency is added — so a holiday looks
+    like a session with no data and reports degraded/stale evidence. That is
+    the safe direction: it withholds trust rather than granting it.
+    """
+    now_et = now_utc.astimezone(_EASTERN)
+    if now_et.weekday() >= 5:
+        return False
+    session_open = now_et.replace(hour=_SESSION_OPEN_ET[0], minute=_SESSION_OPEN_ET[1],
+                                  second=0, microsecond=0)
+    return now_et >= session_open
+
+
 def _latest_bucket_health(bars, now_utc: datetime) -> tuple:
-    """(status, time, confirmation_eligible) for the LATEST EXPECTED bucket.
+    """(status, time, confirmation_eligible, current_session_evidence).
 
     Health of the newest evidence is not the same question as whether any
-    historical evidence exists. A bucket whose window has already STARTED is
-    expected; one that has not begun yet is legitimately absent and must not
-    be reported as degraded.
+    historical evidence exists, and a CLOSED candle can still be STALE.
 
-        CONFIRMED / LIVE      -> healthy
-        INCOMPLETE / AMBIGUOUS-> degraded
-        window started, no bar-> MISSING (degraded)
-        window not begun      -> not evaluated
+    Once today's session has opened, the latest EXPECTED bucket belongs to
+    TODAY — so a frame carrying only prior-session bars reports MISSING and
+    `current_session_evidence=False` instead of quietly presenting yesterday's
+    good close as current. Before the open (and at weekends) the newest
+    session present in the data is legitimately the latest evidence and is
+    never called stale merely because the calendar advanced.
+
+        CONFIRMED / LIVE       -> healthy
+        INCOMPLETE / AMBIGUOUS -> degraded
+        window started, no bar -> MISSING (degraded)
+        window not begun       -> not evaluated
     """
     if not bars:
-        return "NONE", None, False
+        return "NONE", None, False, None
 
-    newest_date = bars[-1]["session_date"]
-    present = {b["bucket_slot"]: b for b in bars if b["session_date"] == newest_date}
-    try:
-        session_date = datetime.fromisoformat(newest_date).date()
-    except (TypeError, ValueError):
-        last = bars[-1]
-        return last["status"], last["time"], bool(last["confirmation_eligible"])
+    started = _current_session_started(now_utc)
+    today = now_utc.astimezone(_EASTERN).date()
+    dates_present = {b["session_date"] for b in bars}
+
+    if started:
+        target_date = today
+        current_session_evidence = today.isoformat() in dates_present
+    else:
+        current_session_evidence = None      # no session running to be current for
+        try:
+            target_date = datetime.fromisoformat(bars[-1]["session_date"]).date()
+        except (TypeError, ValueError):
+            last = bars[-1]
+            return (last["status"], last["time"],
+                    bool(last["confirmation_eligible"]), current_session_evidence)
+
+    present = {b["bucket_slot"]: b for b in bars
+               if b["session_date"] == target_date.isoformat()}
 
     latest = None
     for slot in sorted(_SLOT_ORDER, key=lambda k: _SLOT_ORDER[k]):
-        start_utc, _end_utc = _slot_bounds_utc(session_date, slot)
+        start_utc, _end_utc = _slot_bounds_utc(target_date, slot)
         if now_utc < start_utc:
             break                      # this bucket has not begun — not expected yet
         latest = (slot, start_utc)
 
     if latest is None:
         last = bars[-1]
-        return last["status"], last["time"], bool(last["confirmation_eligible"])
+        return (last["status"], last["time"],
+                bool(last["confirmation_eligible"]), current_session_evidence)
 
     slot, start_utc = latest
     bucket = present.get(slot)
     if bucket is None:
-        return "MISSING", start_utc.isoformat(), False
-    return bucket["status"], bucket["time"], bool(bucket["confirmation_eligible"])
+        return "MISSING", start_utc.isoformat(), False, current_session_evidence
+    return (bucket["status"], bucket["time"],
+            bool(bucket["confirmation_eligible"]), current_session_evidence)
 
 
 def aggregate_four_hour_bars(df, now_utc: datetime | None = None,
@@ -572,14 +609,17 @@ def aggregate_four_hour_bars(df, now_utc: datetime | None = None,
     hist["closed_complete_bars"] = confirmed
     hist["sessions_covered"] = len({b["session_date"] for b in bars})
 
-    latest_status, latest_time, latest_elig = _latest_bucket_health(bars, now_utc)
+    latest_status, latest_time, latest_elig, current_evidence = _latest_bucket_health(
+        bars, now_utc)
     env["latest_bucket_status"] = latest_status
     env["latest_bucket_time"] = latest_time
     env["latest_bucket_confirmation_eligible"] = latest_elig
+    env["current_session_evidence"] = current_evidence
 
     env["bars"] = bars
     if (hist["source_rows_unparseable"] or confirmed == 0
-            or latest_status in _DEGRADING_BUCKET_STATES):
+            or latest_status in _DEGRADING_BUCKET_STATES
+            or current_evidence is False):
         env["status"] = "DEGRADED"
     else:
         env["status"] = "OK"

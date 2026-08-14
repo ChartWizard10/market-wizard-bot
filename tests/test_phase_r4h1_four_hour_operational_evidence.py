@@ -74,6 +74,24 @@ def series(closes, spread=1.0, volume=1000.0):
     return out
 
 
+def nxt(bars, o, h, l, c, v=1000.0, is_open=False, complete=True, confirmed=True):
+    """The bucket that legitimately FOLLOWS `bars` in the session schedule.
+
+    MORNING -> AFTERNOON within a session, AFTERNOON -> next session's MORNING.
+    Hand-written session strings can silently skip an expected bucket, which
+    the R4H-1B continuity rule (correctly) treats as an evidence hole.
+    """
+    last = bars[-1]
+    if last["bucket_slot"] == "MORNING_4H":
+        slot, session = "AFTERNOON_CLOSE", last["session_date"]
+    else:
+        slot = "MORNING_4H"
+        session = (datetime.fromisoformat(last["session_date"]).date()
+                   + timedelta(days=1)).isoformat()
+    return bar(o, h, l, c, v=v, slot=slot, session=session,
+               is_open=is_open, complete=complete, confirmed=confirmed)
+
+
 def envelope(bars, status="OK"):
     return {
         "bars": bars, "status": status, "source_interval": "60m",
@@ -139,7 +157,7 @@ def test_31_insufficient_history_is_unknown_and_insufficient():
     assert obj["structural_state"] == "UNKNOWN"
     assert obj["state_confidence"] == "INSUFFICIENT"
     assert obj["operational_readiness"] == "INSUFFICIENT"
-    assert any("insufficient confirmed 4H history" in m for m in obj["missing_proofs"])
+    assert any("insufficient contiguous 4H history" in m for m in obj["missing_proofs"])
     assert obj["authority_mode"] == "SHADOW_EVIDENCE_ONLY"
 
 
@@ -167,8 +185,7 @@ def test_32_closed_structural_expansion_reads_expansion():
     bars = legs(UPTREND)
     # A confirmed displacement candle that accepts beyond the prior structure.
     top = max(b["high"] for b in bars)
-    bars.append(bar(top - 1, top + 12, top - 1.5, top + 11,
-                    slot="MORNING_4H", session="2025-06-10"))
+    bars.append(nxt(bars, top - 1, top + 12, top - 1.5, top + 11))
     obj = build(bars, price=top + 11)
     assert obj["displacement"]["state"] == "DISPLACEMENT_CONFIRMED"
     assert obj["structure"]["break_state"] == "BOS_CONFIRMED"
@@ -236,8 +253,7 @@ def test_39_live_structural_break_cannot_confirm_a_break():
     bars = legs(COMPRESSING)             # base has NO confirmed break
     assert build(bars, price=bars[-1]["close"])["structure"]["break_state"] == "NONE"
     top = max(b["high"] for b in bars)
-    live_only = bars + [bar(top - 1, top + 15, top - 1.5, top + 14,
-                            slot="AFTERNOON_CLOSE", session="2025-06-12", is_open=True)]
+    live_only = bars + [nxt(bars, top - 1, top + 15, top - 1.5, top + 14, is_open=True)]
     obj = build(live_only, price=top + 14)
     assert obj["structure"]["break_state"] != "BOS_CONFIRMED"
     assert obj["displacement"]["state"] != "DISPLACEMENT_CONFIRMED"
@@ -250,8 +266,8 @@ def test_40_same_bar_once_closed_may_confirm_the_break():
     bars = legs(COMPRESSING)             # base has NO confirmed break
     top = max(b["high"] for b in bars)
     ohlc = (top - 1, top + 15, top - 1.5, top + 14)
-    live = bars + [bar(*ohlc, slot="AFTERNOON_CLOSE", session="2025-06-12", is_open=True)]
-    closed = bars + [bar(*ohlc, slot="AFTERNOON_CLOSE", session="2025-06-12")]
+    live = bars + [nxt(bars, *ohlc, is_open=True)]
+    closed = bars + [nxt(bars, *ohlc)]
 
     a = build(live, price=ohlc[3])
     b = build(closed, price=ohlc[3])
@@ -268,12 +284,9 @@ def test_40_same_bar_once_closed_may_confirm_the_break():
 def test_41_closed_sweep_plus_reclaim_is_identifiable():
     bars = legs(UPTREND)
     low = min(b["low"] for b in bars[-6:])
-    bars.append(bar(low + 1, low + 2, low - 5, low + 1.5,
-                    slot="MORNING_4H", session="2025-06-12"))
-    bars.append(bar(low + 1.5, low + 4, low + 1.0, low + 3.5,
-                    slot="AFTERNOON_CLOSE", session="2025-06-12"))
-    bars.append(bar(low + 3.5, low + 6, low + 3.0, low + 5.5,
-                    slot="MORNING_4H", session="2025-06-13"))
+    bars.append(nxt(bars, low + 1, low + 2, low - 5, low + 1.5))
+    bars.append(nxt(bars, low + 1.5, low + 4, low + 1.0, low + 3.5))
+    bars.append(nxt(bars, low + 3.5, low + 6, low + 3.0, low + 5.5))
     obj = build(bars, price=low + 5.5)
     assert obj["liquidity"]["sweep_state"] == "SWEEP_CONFIRMED"
     assert obj["liquidity"]["swept_level"] is not None
@@ -283,8 +296,7 @@ def test_42_live_sweep_without_close_consequence_cannot_confirm():
     bars = legs(UPTREND)                 # base has NO confirmed sweep
     assert build(bars, price=bars[-1]["close"])["liquidity"]["sweep_state"] == "NONE"
     low = min(b["low"] for b in bars[-6:])
-    bars.append(bar(low + 1, low + 2, low - 5, low + 1.5, slot="MORNING_4H",
-                    session="2025-06-12", is_open=True))
+    bars.append(nxt(bars, low + 1, low + 2, low - 5, low + 1.5, is_open=True))
     obj = build(bars, price=low + 1.5)
     assert obj["liquidity"]["sweep_state"] != "SWEEP_CONFIRMED"
     assert obj["structure"]["reclaim_state"] != "RECLAIM_CONFIRMED"
@@ -293,8 +305,7 @@ def test_42_live_sweep_without_close_consequence_cannot_confirm():
 def test_43_dealing_range_comes_from_confirmed_evidence_only():
     bars = legs(UPTREND)
     confirmed_high = max(b["high"] for b in bars)
-    spiked = bars + [bar(100, confirmed_high + 50, 99, confirmed_high + 40,
-                         slot="AFTERNOON_CLOSE", session="2025-06-12", is_open=True)]
+    spiked = bars + [nxt(bars, 100, confirmed_high + 50, 99, confirmed_high + 40, is_open=True)]
     obj = build(spiked, price=confirmed_high + 40)
     assert obj["structure"]["range_high"] == confirmed_high
     assert obj["structure"]["range_high"] < confirmed_high + 50
@@ -308,16 +319,11 @@ def _fvg_bars():
     """Confirmed history containing one confirmed 4H FVG."""
     bars = legs([(1.5, 4), (-0.8, 2), (1.5, 4), (-0.8, 2), (1.5, 4)], spread=0.5)
     top = bars[-1]["close"]
-    bars.append(bar(top, top + 0.5, top - 0.5, top + 0.2, slot="MORNING_4H",
-                    session="2025-06-09"))                       # c1 high
-    bars.append(bar(top + 0.3, top + 9.0, top + 0.2, top + 8.5,
-                    slot="AFTERNOON_CLOSE", session="2025-06-09"))  # displacement
-    bars.append(bar(top + 8.5, top + 10.0, top + 6.0, top + 9.0,
-                    slot="MORNING_4H", session="2025-06-10"))    # c3 low = gap top
-    for i in range(3):
-        bars.append(bar(top + 9.0, top + 10.5, top + 8.0, top + 9.5,
-                        slot="AFTERNOON_CLOSE" if i % 2 == 0 else "MORNING_4H",
-                        session=f"2025-06-1{i}"))
+    bars.append(nxt(bars, top, top + 0.5, top - 0.5, top + 0.2))       # c1 high
+    bars.append(nxt(bars, top + 0.3, top + 9.0, top + 0.2, top + 8.5))  # displacement
+    bars.append(nxt(bars, top + 8.5, top + 10.0, top + 6.0, top + 9.0))  # c3 low
+    for _ in range(3):
+        bars.append(nxt(bars, top + 9.0, top + 10.5, top + 8.0, top + 9.5))
     return bars, top
 
 
@@ -420,8 +426,8 @@ def test_52_approach_to_a_real_level_reads_approaching():
 def test_53_live_contact_with_a_real_level_reads_in_progress():
     bars = legs(RUNAWAY)
     fvg = build(bars, price=bars[-1]["close"])["zone_context"]["fvg"]
-    live = bars + [bar(fvg["top"] + 1, fvg["top"] + 1.5, fvg["bot"] - 0.2, fvg["mid"],
-                       slot="AFTERNOON_CLOSE", session="2025-06-30", is_open=True)]
+    live = bars + [nxt(bars, fvg["top"] + 1, fvg["top"] + 1.5, fvg["bot"] - 0.2,
+                       fvg["mid"], is_open=True)]
     obj = build(live, price=fvg["mid"])
     assert obj["retest_truth"]["state"] == "IN_PROGRESS"
     assert obj["hold_truth"]["state"] == "FORMING"
@@ -433,8 +439,7 @@ def test_54_and_56_closed_body_defence_at_a_valid_retest_confirms():
     fvg = build(bars, price=None)["zone_context"]["fvg"]
     lo, hi = fvg["bot"], fvg["top"]
     # A closed candle that enters the zone and closes with body + control.
-    bars.append(bar(lo + 0.2, hi + 0.2, lo - 0.1, hi, slot="MORNING_4H",
-                    session="2025-06-14"))
+    bars.append(nxt(bars, lo + 0.2, hi + 0.2, lo - 0.1, hi))
     obj = build(bars, price=hi)
     assert obj["retest_truth"]["state"] in ("CORE_VALID", "CONFIRMED")
     assert obj["hold_truth"]["state"] == "CONFIRMED"
@@ -444,8 +449,8 @@ def test_54_and_56_closed_body_defence_at_a_valid_retest_confirms():
 def test_55_live_wick_defence_is_never_hold_confirmed():
     bars, _ = _fvg_bars()
     fvg = build(bars, price=None)["zone_context"]["fvg"]
-    live = bars + [bar(fvg["top"], fvg["top"] + 0.3, fvg["bot"] - 3, fvg["top"],
-                       slot="AFTERNOON_CLOSE", session="2025-06-14", is_open=True)]
+    live = bars + [nxt(bars, fvg["top"], fvg["top"] + 0.3, fvg["bot"] - 3,
+                       fvg["top"], is_open=True)]
     obj = build(live, price=fvg["top"])
     assert obj["hold_truth"]["state"] != "CONFIRMED"
     assert obj["candle_truth"]["status"] == "OPEN"
@@ -454,8 +459,7 @@ def test_55_live_wick_defence_is_never_hold_confirmed():
 def test_57_live_breach_reads_failure_threat():
     bars = legs(UPTREND)
     core = min(b["low"] for b in bars[-6:])
-    live = bars + [bar(core + 1, core + 1.2, core - 4, core - 3,
-                       slot="AFTERNOON_CLOSE", session="2025-06-12", is_open=True)]
+    live = bars + [nxt(bars, core + 1, core + 1.2, core - 4, core - 3, is_open=True)]
     obj = build(live, price=core - 3)
     assert obj["failure_truth"]["state"] == "FAILURE_THREAT"
     assert obj["hold_truth"]["state"] != "CONFIRMED"
@@ -464,8 +468,7 @@ def test_57_live_breach_reads_failure_threat():
 def test_58_closed_accepted_failure_reads_failed():
     bars = legs(UPTREND)
     core = min(b["low"] for b in bars[-6:])
-    bars.append(bar(core + 1, core + 1.2, core - 6, core - 5,
-                    slot="MORNING_4H", session="2025-06-12"))
+    bars.append(nxt(bars, core + 1, core + 1.2, core - 6, core - 5))
     obj = build(bars, price=core - 5)
     assert obj["failure_truth"]["state"] == "ACCEPTED_FAILURE"
     assert obj["hold_truth"]["state"] == "FAILED"
@@ -479,14 +482,10 @@ def test_58_closed_accepted_failure_reads_failed():
 def test_59_live_incomplete_bar_cannot_create_a_confirmed_fvg():
     bars = legs([(1.5, 4), (-0.8, 2), (1.5, 4), (-0.8, 2), (1.5, 4)], spread=0.5)
     top = bars[-1]["close"]
-    bars.append(bar(top, top + 0.5, top - 0.5, top + 0.2, slot="MORNING_4H",
-                    session="2025-06-09"))
-    bars.append(bar(top + 0.3, top + 9, top + 0.2, top + 8.5,
-                    slot="AFTERNOON_CLOSE", session="2025-06-09"))
-    live_third = bars + [bar(top + 8.5, top + 10, top + 6, top + 9,
-                             slot="MORNING_4H", session="2025-06-10", is_open=True)]
-    closed_third = bars + [bar(top + 8.5, top + 10, top + 6, top + 9,
-                               slot="MORNING_4H", session="2025-06-10")]
+    bars.append(nxt(bars, top, top + 0.5, top - 0.5, top + 0.2))
+    bars.append(nxt(bars, top + 0.3, top + 9, top + 0.2, top + 8.5))
+    live_third = bars + [nxt(bars, top + 8.5, top + 10, top + 6, top + 9, is_open=True)]
+    closed_third = bars + [nxt(bars, top + 8.5, top + 10, top + 6, top + 9)]
     live_fvg = build(live_third, price=top + 9)["zone_context"]["fvg"]
     closed_fvg = build(closed_third, price=top + 9)["zone_context"]["fvg"]
     # The gap the LIVE third candle would have completed exists only once the
@@ -515,8 +514,8 @@ def test_62_live_excursion_through_a_zone_does_not_destroy_it():
     bars, _ = _fvg_bars()
     baseline = build(bars, price=None)["zone_context"]["fvg"]
     fvg = baseline
-    live = bars + [bar(fvg["mid"], fvg["mid"] + 1, fvg["bot"] - 20, fvg["bot"] - 15,
-                       slot="AFTERNOON_CLOSE", session="2025-06-14", is_open=True)]
+    live = bars + [nxt(bars, fvg["mid"], fvg["mid"] + 1, fvg["bot"] - 20,
+                       fvg["bot"] - 15, is_open=True)]
     obj = build(live, price=fvg["bot"] - 15)
     assert obj["zone_context"]["fvg"] is not None
     assert obj["zone_context"]["fvg"]["bot"] == baseline["bot"]
@@ -526,8 +525,7 @@ def test_62_live_excursion_through_a_zone_does_not_destroy_it():
 def test_63_closed_accepted_loss_invalidates_the_zone():
     bars, _ = _fvg_bars()
     fvg = build(bars, price=None)["zone_context"]["fvg"]
-    bars.append(bar(fvg["mid"], fvg["mid"] + 1, fvg["bot"] - 20, fvg["bot"] - 15,
-                    slot="AFTERNOON_CLOSE", session="2025-06-14"))
+    bars.append(nxt(bars, fvg["mid"], fvg["mid"] + 1, fvg["bot"] - 20, fvg["bot"] - 15))
     obj = build(bars, price=fvg["bot"] - 15)
     assert obj["zone_context"]["fvg"] is None or \
         obj["zone_context"]["fvg"]["bot"] != fvg["bot"]
@@ -546,13 +544,19 @@ def test_64_zone_core_and_liquidity_edge_stay_distinguishable():
 # ===========================================================================
 
 def _slot_volume_bars(morning_v, afternoon_v, last_slot, last_v):
+    """Eight complete sessions, then one more bucket in `last_slot` — built in
+    schedule order so the whole run is one contiguous segment."""
     bars = []
     for d in range(8):
         session = f"2025-06-{d + 1:02d}"
         bars.append(bar(100, 102, 98, 101, v=morning_v, slot="MORNING_4H", session=session))
         bars.append(bar(101, 103, 99, 102, v=afternoon_v, slot="AFTERNOON_CLOSE",
                         session=session))
-    bars.append(bar(102, 104, 100, 103, v=last_v, slot=last_slot, session="2025-06-20"))
+    if last_slot == "MORNING_4H":
+        bars.append(nxt(bars, 102, 104, 100, 103, v=last_v))
+    else:
+        bars.append(nxt(bars, 102, 104, 100, 103, v=morning_v))
+        bars.append(nxt(bars, 102, 104, 100, 103, v=last_v))
     return bars
 
 
@@ -581,24 +585,45 @@ def test_66_and_67_afternoon_volume_is_not_called_weak_for_being_150_minutes():
 
 
 def test_68_insufficient_same_slot_baseline_reads_unknown():
-    bars = []
-    for d in range(14):
-        bars.append(bar(100, 102, 98, 101, v=1_000_000.0, slot="MORNING_4H",
-                        session=f"2025-06-{d + 1:02d}"))
-    bars.append(bar(101, 103, 99, 102, v=300_000.0, slot="AFTERNOON_CLOSE",
-                    session="2025-06-20"))
-    obj = build(bars, price=102.0)
-    vp = obj["volume_participation"]
+    """A slot with fewer than three completed peers of its own is UNKNOWN —
+    never a fabricated ratio against the other slot's history.
+
+    Exercised at the unit that owns the rule: a schedule-valid contiguous
+    segment alternates MORNING/AFTERNOON, so any segment long enough to reach
+    the 12-bucket structural minimum necessarily carries ~6 peers per slot.
+    A short segment cannot reach the volume engine at all (the organ returns
+    INSUFFICIENT first), which is asserted below.
+    """
+    seg = [bar(100, 102, 98, 101, v=1_000_000.0, slot="MORNING_4H",
+               session="2025-06-01")]
+    for _ in range(3):
+        seg.append(nxt(seg, 101, 103, 99, 102, v=400_000.0))   # AFTERNOON
+        seg.append(nxt(seg, 100, 102, 98, 101, v=1_000_000.0))  # MORNING
+    seg.append(nxt(seg, 101, 103, 99, 102, v=300_000.0))        # newest AFTERNOON
+
+    vp = fho._build_volume_participation(seg, seg, None)
     assert vp["slot"] == "AFTERNOON_CLOSE"
-    assert vp["baseline_samples"] == 0
-    assert vp["volume_behavior"] == "UNKNOWN"
-    assert vp["volume_ratio"] is None
+    assert vp["baseline_samples"] == 3
+    assert vp["volume_ratio"] is not None            # three peers is enough
+
+    # Two peers is not.
+    short = seg[:5] + [seg[-1]]
+    vp2 = fho._build_volume_participation(short, short, None)
+    assert vp2["slot"] == "AFTERNOON_CLOSE"
+    assert vp2["baseline_samples"] < 3
+    assert vp2["volume_behavior"] == "UNKNOWN"
+    assert vp2["volume_ratio"] is None
+    assert vp2["volume_comparison_basis"] == "SAME_SESSION_SLOT"
+
+    # ...and such a short history never reaches the volume engine in the organ.
+    obj = build(seg[:6], price=102.0)
+    assert obj["status"] == "INSUFFICIENT"
+    assert obj["volume_participation"]["volume_behavior"] == "UNKNOWN"
 
 
 def test_69_and_70_live_bucket_volume_is_provisional_only():
     bars = _slot_volume_bars(1_000_000.0, 400_000.0, "MORNING_4H", 1_000_000.0)
-    live = bars + [bar(103, 105, 101, 104, v=50.0, slot="AFTERNOON_CLOSE",
-                       session="2025-06-21", is_open=True)]
+    live = bars + [nxt(bars, 103, 105, 101, 104, v=50.0, is_open=True)]
     obj = build(live, price=104.0)
     vp = obj["volume_participation"]
     assert vp["live_bucket_provisional"] is True
@@ -764,8 +789,7 @@ def test_82_and_83_the_4h_never_grants_daily_or_weekly_permission():
 def test_84_live_4h_cannot_override_closed_daily_evidence():
     bars = legs(UPTREND)
     core = min(b["low"] for b in bars[-6:])
-    live = bars + [bar(core, core + 0.5, core - 9, core - 8,
-                       slot="AFTERNOON_CLOSE", session="2025-06-12", is_open=True)]
+    live = bars + [nxt(bars, core, core + 0.5, core - 9, core - 8, is_open=True)]
     daily = {"structure_confirmed": True, "current_price": core - 8,
              "sma_value_alignment": "supportive"}
     obj = build(live, enriched=daily)
@@ -1079,8 +1103,7 @@ def test_a5_the_last_good_confirmation_is_not_erased():
 
 def test_a6_the_incomplete_bucket_never_enters_confirmed_calculations():
     bars = legs(UPTREND)
-    intruder = bar(500, 900, 400, 850, slot="AFTERNOON_CLOSE",
-                   session="2025-06-11", complete=False, confirmed=False)
+    intruder = nxt(bars, 500, 900, 400, 850, complete=False, confirmed=False)
     clean = fho.build_four_hour_operational_context(
         "A", {}, {"current_price": bars[-1]["close"]}, _healthy_envelope(bars), CFG)
     withtail = fho.build_four_hour_operational_context(
@@ -1094,9 +1117,8 @@ def test_a6_the_incomplete_bucket_never_enters_confirmed_calculations():
 
 def test_a_live_latest_bucket_is_not_degraded_by_the_organ():
     bars = legs(UPTREND)
-    live = bars + [bar(bars[-1]["close"], bars[-1]["close"] + 1,
-                       bars[-1]["close"] - 1, bars[-1]["close"] + 0.5,
-                       slot="AFTERNOON_CLOSE", session="2025-06-11", is_open=True)]
+    live = bars + [nxt(bars, bars[-1]["close"], bars[-1]["close"] + 1,
+                       bars[-1]["close"] - 1, bars[-1]["close"] + 0.5, is_open=True)]
     obj = fho.build_four_hour_operational_context(
         "A", {}, {"current_price": bars[-1]["close"]},
         _healthy_envelope(live, "LIVE"), CFG)
@@ -1277,3 +1299,334 @@ def test_c6_forty_four_bar_production_shaped_fixture_is_unchanged():
     assert obj["value_context"]["sma20"] is not None
     assert obj["value_context"]["sma50"] is None          # honest at 44 bars
     assert obj["value_context"]["unavailable"] == [50]
+
+
+# ===========================================================================
+# PHASE R4H-1B — Codex P2 closure
+#
+#   Ambiguous data is not live evidence.
+#   A missing candle cannot be stitched out of existence.
+#   A closed candle can still be stale.
+# ===========================================================================
+
+def _tail(bars, status, is_open, o, h, l, c, v=1000.0):
+    """A trailing bucket with an explicitly forced provenance status."""
+    b = nxt(bars, o, h, l, c, v=v, is_open=is_open)
+    b["status"] = status
+    b["confirmation_eligible"] = status == "CONFIRMED" and not is_open
+    return b
+
+
+# ------------------------------- P2-A 3779105095 --------------------------
+
+ANOMALOUS = (400.0, 900.0, -400.0, -380.0)      # garbage extremes
+
+
+def test_p2a_1_a_normal_live_bucket_is_live_evidence():
+    bars = legs(UPTREND)
+    live = bars + [_tail(bars, "LIVE", True, bars[-1]["close"],
+                         bars[-1]["close"] + 2, bars[-1]["close"] - 2,
+                         bars[-1]["close"] + 1)]
+    obj = build(live, price=bars[-1]["close"])
+    assert obj["bar_context"]["live_bar_available"] is True
+    assert obj["bar_context"]["current_live_4h_time"] is not None
+    assert obj["candle_truth"]["status"] == "OPEN"
+
+
+@pytest.mark.parametrize("status", ["AMBIGUOUS", "INCOMPLETE", "MISSING"])
+def test_p2a_2_and_4_non_live_statuses_are_never_live_evidence(status):
+    bars = legs(UPTREND)
+    poisoned = bars + [_tail(bars, status, True, *ANOMALOUS)]
+    obj = build(poisoned, price=bars[-1]["close"])
+    assert obj["bar_context"]["live_bar_available"] is False
+    assert obj["bar_context"]["current_live_4h_time"] is None
+
+
+def test_p2a_3_anomalous_ambiguous_ohlc_cannot_alter_any_read():
+    bars = legs(UPTREND)
+    clean = build(bars, price=bars[-1]["close"])
+    poisoned = build(bars + [_tail(bars, "AMBIGUOUS", True, *ANOMALOUS)],
+                     price=bars[-1]["close"])
+    for block in ("displacement", "failure_truth", "retest_truth", "hold_truth",
+                  "candle_truth", "volume_participation", "structure",
+                  "zone_context", "liquidity", "value_context"):
+        assert poisoned[block] == clean[block], block
+    assert poisoned["structural_state"] == clean["structural_state"]
+    assert poisoned["operational_location"] == clean["operational_location"]
+    # The anomaly is not silently swallowed either — the bucket still exists.
+    assert poisoned["bar_context"]["history_bars"] == clean["bar_context"]["history_bars"] + 1
+
+
+def test_p2a_5_a_confirmed_bucket_stays_closed_evidence():
+    bars = legs(UPTREND)
+    obj = build(bars, price=bars[-1]["close"])
+    assert obj["bar_context"]["live_bar_available"] is False
+    assert obj["candle_truth"]["status"] == "CLOSED"
+    assert obj["bar_context"]["last_closed_4h_time"] == bars[-1]["time"]
+
+
+def test_p2a_6_live_to_confirmed_transition_is_unchanged():
+    bars = legs(COMPRESSING)
+    top = max(b["high"] for b in bars)
+    ohlc = (top - 1, top + 15, top - 1.5, top + 14)
+    live = build(bars + [nxt(bars, *ohlc, is_open=True)], price=ohlc[3])
+    closed = build(bars + [nxt(bars, *ohlc)], price=ohlc[3])
+    assert live["bar_context"]["live_bar_available"] is True
+    assert closed["bar_context"]["live_bar_available"] is False
+    assert live["structure"]["break_state"] == "NONE"
+    assert closed["structure"]["break_state"] == "BOS_CONFIRMED"
+
+
+# ------------------------------- P2-B 3779105099 --------------------------
+
+def _gapped(kind="INCOMPLETE", at=9):
+    """A contiguous run with one broken bucket injected in the middle."""
+    good = legs(UPTREND)
+    hole = dict(good[at])
+    hole["status"] = kind
+    hole["confirmation_eligible"] = False
+    hole["source_complete"] = kind != "INCOMPLETE"
+    return good, good[:at] + [hole] + good[at + 1:]
+
+
+def test_p2b_1_continuous_history_uses_the_whole_confirmed_run():
+    bars = legs(UPTREND)
+    bc = build(bars, price=bars[-1]["close"])["bar_context"]
+    assert bc["history_gap_detected"] is False
+    assert bc["structural_segment_bars"] == bc["confirmed_history_bars"] == len(bars)
+    assert bc["structural_segment_start"] == bars[0]["time"]
+
+
+@pytest.mark.parametrize("kind", ["INCOMPLETE", "AMBIGUOUS"])
+def test_p2b_2_and_3_a_broken_bucket_is_recorded_as_a_gap(kind):
+    _good, gapped = _gapped(kind)
+    bc = build(gapped, price=gapped[-1]["close"])["bar_context"]
+    assert bc["history_gap_detected"] is True
+    assert bc["structural_segment_bars"] < bc["confirmed_history_bars"]
+    assert bc["structural_segment_bars"] == len(gapped) - 10   # bars after the hole
+
+
+def test_p2b_4_no_calculation_bridges_the_gap():
+    good, gapped = _gapped("INCOMPLETE")
+    bridged = build(good, price=good[-1]["close"])
+    segmented = build(gapped, price=gapped[-1]["close"])
+    # Every sequential read must differ from the illegally-continuous run.
+    assert segmented["structure"] != bridged["structure"]
+    assert segmented["structural_state"] != bridged["structural_state"]
+    for block in ("displacement", "zone_context", "retest_truth", "hold_truth",
+                  "liquidity", "value_context"):
+        assert segmented[block] != bridged[block], block
+
+
+def test_p2b_5_atr_never_combines_true_ranges_across_the_gap():
+    _good, gapped = _gapped("INCOMPLETE")
+    eligible = [b for b in gapped if b["confirmation_eligible"]]
+    segment = fho._structural_segment(gapped)
+    assert len(segment) < len(eligible)
+    # The straddling ATR is a real, different number — and it is not used.
+    assert fho._atr(eligible, fho._ATR_PERIOD) is not None
+    assert fho._atr(segment, fho._ATR_PERIOD) != fho._atr(eligible, fho._ATR_PERIOD)
+
+
+def test_p2b_6_an_fvg_cannot_be_created_across_the_missing_bucket():
+    """The three candles either side of the hole form a textbook gap — which
+    must not become a confirmed FVG, because one of them is missing."""
+    good = legs(UPTREND)
+    c1 = bar(100, 100.5, 99.5, 100.0, slot=good[-1]["bucket_slot"],
+             session=good[-1]["session_date"])
+    bars = good + [nxt(good, 100.0, 100.5, 99.5, 100.2)]
+    bars.append(nxt(bars, 100.3, 112.0, 100.2, 111.5))          # displacement
+    hole = nxt(bars, 111.5, 112.0, 108.0, 110.0)
+    hole["status"] = "INCOMPLETE"
+    hole["confirmation_eligible"] = False
+    hole["source_complete"] = False
+    bars.append(hole)
+    bars.append(nxt(bars, 110.0, 113.0, 109.0, 112.0))
+
+    obj = build(bars, price=112.0)
+    assert obj["bar_context"]["history_gap_detected"] is True
+    segment = fho._structural_segment(bars)
+    assert len(segment) == 1                # only the post-gap bucket survives
+    assert obj["zone_context"]["fvg"] is None
+
+
+def test_p2b_7_break_and_reclaim_cannot_straddle_the_hole():
+    good, gapped = _gapped("INCOMPLETE", at=13)   # pivot before, acceptance after
+    bridged = build(good, price=good[-1]["close"])["structure"]
+    segmented = build(gapped, price=gapped[-1]["close"])["structure"]
+    assert bridged["break_state"] == "BOS_CONFIRMED"
+    assert segmented["break_state"] != "BOS_CONFIRMED"
+    assert segmented["break_level"] is None
+
+
+def test_p2b_8_retest_and_hold_cannot_cross_the_evidence_hole():
+    good, gapped = _gapped("AMBIGUOUS", at=13)
+    bridged = build(good, price=good[-1]["close"])
+    segmented = build(gapped, price=gapped[-1]["close"])
+    assert bridged["retest_truth"]["state"] in ("CORE_VALID", "CONFIRMED")
+    assert segmented["retest_truth"] != bridged["retest_truth"]
+    assert segmented["hold_truth"] != bridged["hold_truth"]
+
+
+def test_p2b_9_insufficient_post_gap_segment_degrades_honestly():
+    _good, gapped = _gapped("INCOMPLETE", at=13)
+    obj = build(gapped, price=gapped[-1]["close"])
+    assert obj["bar_context"]["structural_segment_bars"] < fho._MIN_CONFIRMED_BARS
+    assert obj["status"] == "INSUFFICIENT"
+    assert obj["structural_state"] == "UNKNOWN"
+    # It must NOT reach backward through the hole to satisfy the minimum.
+    assert obj["bar_context"]["confirmed_history_bars"] >= fho._MIN_CONFIRMED_BARS
+    assert any("gap detected" in m for m in obj["missing_proofs"])
+
+
+def test_p2b_10_sufficient_post_gap_segment_resumes_normal_evaluation():
+    """A long enough contiguous run AFTER the hole is evaluated normally —
+    using only that run."""
+    pre = legs(UPTREND)
+    hole = nxt(pre, pre[-1]["close"], pre[-1]["close"] + 1,
+               pre[-1]["close"] - 1, pre[-1]["close"])
+    hole["status"] = "INCOMPLETE"
+    hole["confirmation_eligible"] = False
+    hole["source_complete"] = False
+    bars = pre + [hole]
+    px = pre[-1]["close"]
+    for spec, count in ((2, 4), (-1, 2), (2, 4), (-1, 2), (2, 4)):
+        for _ in range(count):
+            px += spec
+            bars.append(nxt(bars, px - spec, max(px, px - spec) + 1,
+                            min(px, px - spec) - 1, px))
+    obj = build(bars, price=bars[-1]["close"])
+    seg = fho._structural_segment(bars)
+    assert obj["bar_context"]["history_gap_detected"] is True
+    assert len(seg) >= fho._MIN_CONFIRMED_BARS
+    assert obj["status"] in ("ENABLED", "DEGRADED")
+    assert obj["structural_state"] != "UNKNOWN"
+    assert seg[0]["time"] == obj["bar_context"]["structural_segment_start"]
+    # Nothing from before the hole is in the segment.
+    assert all(b not in pre for b in seg)
+
+
+def test_p2b_11_a_current_live_bucket_is_not_a_historical_gap():
+    bars = legs(UPTREND)
+    live = bars + [nxt(bars, bars[-1]["close"], bars[-1]["close"] + 2,
+                       bars[-1]["close"] - 2, bars[-1]["close"] + 1, is_open=True)]
+    bc = build(live, price=bars[-1]["close"])["bar_context"]
+    assert bc["history_gap_detected"] is False
+    assert bc["structural_segment_bars"] == len(bars)
+    assert bc["live_bar_available"] is True
+
+
+def test_p2b_12_a_trailing_incomplete_bucket_does_not_erase_history():
+    bars = legs(UPTREND)
+    tail = bars + [_tail(bars, "INCOMPLETE", False, 100, 101, 99, 100)]
+    bc = build(tail, price=bars[-1]["close"])["bar_context"]
+    assert bc["structural_segment_bars"] == len(bars)
+    assert bc["history_gap_detected"] is False
+    assert bc["last_closed_4h_time"] == bars[-1]["time"]
+
+
+# ------------------------------- P2-C 3779105102 --------------------------
+
+RTH_STARTS = ((9, 30), (10, 30), (11, 30), (12, 30), (13, 30), (14, 30), (15, 30))
+
+
+def _utc(y, m, d, hour, minute):
+    return datetime(y, m, d, hour, minute, tzinfo=ET).astimezone(timezone.utc)
+
+
+def _source_frame(day, starts=RTH_STARTS):
+    """A raw 60m provider frame for one RTH session."""
+    idx, rows = [], []
+    for i, (h, mnt) in enumerate(starts):
+        idx.append(pd.Timestamp(datetime(*day, h, mnt, tzinfo=ET)))
+        px = 100.0 + i
+        rows.append((px, px + 1.0, px - 1.0, px + 0.5, 1000.0))
+    return pd.DataFrame(
+        {"open": [r[0] for r in rows], "high": [r[1] for r in rows],
+         "low": [r[2] for r in rows], "close": [r[3] for r in rows],
+         "volume": [r[4] for r in rows]}, index=pd.DatetimeIndex(idx))
+
+
+def _stale_env(now_utc_value):
+    """Aggregate a PRIOR-session provider frame against a later clock."""
+    return market_data.aggregate_four_hour_bars(
+        _source_frame((2025, 6, 10)), now_utc=now_utc_value)
+
+
+def test_p2c_1_premarket_prior_session_evidence_is_not_falsely_stale():
+    for hour, minute in ((2, 0), (8, 0), (9, 29)):
+        env = _stale_env(_utc(2025, 6, 11, hour, minute))
+        assert env["current_session_evidence"] is None, (hour, minute)
+        assert env["latest_bucket_status"] == "CONFIRMED", (hour, minute)
+        assert env["status"] == "OK", (hour, minute)
+
+
+def test_p2c_1b_weekend_does_not_make_friday_evidence_stale():
+    friday = _source_frame((2025, 6, 13))
+    for day, hour in (((2025, 6, 14), 11), ((2025, 6, 15), 11)):
+        env = market_data.aggregate_four_hour_bars(
+            friday, now_utc=_utc(*day, hour, 0))
+        assert env["current_session_evidence"] is None
+        assert env["latest_bucket_status"] == "CONFIRMED"
+        assert env["status"] == "OK"
+
+
+@pytest.mark.parametrize("hour,minute", [(9, 35), (12, 0), (14, 0), (16, 5)])
+def test_p2c_2_and_3_current_session_with_no_current_data_is_stale(hour, minute):
+    env = _stale_env(_utc(2025, 6, 11, hour, minute))
+    assert env["current_session_evidence"] is False
+    assert env["latest_bucket_status"] == "MISSING"
+    assert env["status"] == "DEGRADED"
+
+
+def test_p2c_8_stale_history_is_never_advertised_as_healthy_current_evidence():
+    """The reviewer's exact scenario: enough history to be ENABLED, evaluated
+    against today's live price, while every bar is from a prior session."""
+    bars = legs(UPTREND)
+    fresh = envelope(bars)
+    fresh["latest_bucket_status"] = "CONFIRMED"
+    fresh["current_session_evidence"] = True
+    stale = envelope(bars)
+    stale["latest_bucket_status"] = "MISSING"
+    stale["current_session_evidence"] = False
+    stale["status"] = "DEGRADED"
+
+    ok = fho.build_four_hour_operational_context(
+        "C", {}, {"current_price": bars[-1]["close"]}, fresh, CFG)
+    old = fho.build_four_hour_operational_context(
+        "C", {}, {"current_price": bars[-1]["close"]}, stale, CFG)
+
+    assert ok["status"] == "ENABLED"
+    assert ok["bar_context"]["freshness_status"] == "CLOSED"
+    assert old["status"] == "STALE"
+    assert old["bar_context"]["freshness_status"] == "STALE"
+    assert "no current-session 4H evidence" in old["missing_proofs"]
+    # The structure itself is unchanged — only its advertised trust.
+    assert old["structure"] == ok["structure"]
+
+
+@pytest.mark.parametrize("hour,minute,expect_latest,expect_env", [
+    (12, 0, "LIVE", "OK"),          # C4 current live morning
+    (14, 0, "LIVE", "OK"),          # C6 current live afternoon
+    (16, 5, "CONFIRMED", "OK"),     # C5/C7 current confirmed evidence
+])
+def test_p2c_4_to_7_current_session_evidence_is_healthy(hour, minute,
+                                                        expect_latest, expect_env):
+    starts = tuple(st for st in RTH_STARTS if st <= (hour, minute))
+    # A prior complete session is included so the frame carries real confirmed
+    # history — otherwise a single partial session is degraded for having no
+    # confirmed bucket at all, which is a different fact from staleness.
+    frame = pd.concat([_source_frame((2025, 6, 10)),
+                       _source_frame((2025, 6, 11), starts=starts)])
+    env = market_data.aggregate_four_hour_bars(
+        frame, now_utc=_utc(2025, 6, 11, hour, minute))
+    assert env["current_session_evidence"] is True
+    assert env["latest_bucket_status"] == expect_latest
+    assert env["status"] == expect_env
+
+
+def test_p2c_freshness_never_uses_a_naive_datetime():
+    import inspect
+    src = inspect.getsource(market_data._latest_bucket_health)
+    assert "utcnow" not in src
+    assert "_EASTERN" in src or "astimezone" in src
