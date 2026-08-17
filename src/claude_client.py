@@ -3,11 +3,59 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Phase MR-1 — Anthropic model routing.
+#
+# Model intelligence and scanner doctrine are separate layers. The operator
+# selects the model at RUNTIME; the repository holds the fallback.
+#
+#     1. ANTHROPIC_MODEL environment variable (non-empty, trimmed)
+#     2. config["claude"]["model"]
+#     3. DEFAULT_CLAUDE_MODEL
+#
+# Deleting or blanking the Railway variable restores the config model on the
+# next redeploy — no code change, no strategy rollback.
+#
+# Deliberately NO model whitelist: Anthropic's catalog evolves, and requiring a
+# GitHub patch for every legitimate model ID would defeat the purpose. The
+# messages.create request is the runtime authority on whether an ID exists, so
+# no extra validation call, latency, cost or failure mode is introduced. An
+# explicitly selected model is never silently replaced after an API rejection —
+# that error surfaces through the existing API-error path so a configuration
+# mistake stays visible.
+# ---------------------------------------------------------------------------
+
+DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
+
+MODEL_SOURCE_ENVIRONMENT = "ENVIRONMENT"
+MODEL_SOURCE_CONFIG = "CONFIG"
+MODEL_SOURCE_DEFAULT = "DEFAULT"
+
+
+def resolve_claude_model(config: dict) -> tuple[str, str]:
+    """Return (model, source) for this runtime.
+
+    An empty or whitespace-only value at any level means "not supplied" and
+    falls through — an empty model string is never sent to Anthropic.
+    """
+    env_model = str(os.getenv("ANTHROPIC_MODEL") or "").strip()
+    if env_model:
+        return env_model, MODEL_SOURCE_ENVIRONMENT
+
+    claude_cfg = config.get("claude", {}) if isinstance(config, dict) else {}
+    config_model = str(claude_cfg.get("model") or "").strip()
+    if config_model:
+        return config_model, MODEL_SOURCE_CONFIG
+
+    return DEFAULT_CLAUDE_MODEL, MODEL_SOURCE_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +423,10 @@ async def claude_call(
     """Send one enriched ticker to Claude. Returns result dict with signal or error info."""
     ticker = enriched.get("ticker", "UNKNOWN")
     claude_cfg = config.get("claude", {})
-    model = claude_cfg.get("model", "claude-sonnet-4-6")
+    # Every Claude path resolves the same runtime model — including the manual
+    # !analyze path, which calls claude_call directly and never passes through
+    # async_claude_scan.
+    model, _model_source = resolve_claude_model(config)
     max_tokens = claude_cfg.get("max_tokens", 1200)
 
     prompt_text = build_prompt(enriched)
@@ -465,6 +516,11 @@ async def async_claude_scan(
         min_gap_secs=min_gap,
         max_tpm=tpm_budget,
     )
+
+    # Once per scan, not once per ticker. Model name only — never keys,
+    # tokens, environment contents or config dumps.
+    selected_model, model_source = resolve_claude_model(config)
+    log.info("CLAUDE_MODEL_SELECTED: model=%s source=%s", selected_model, model_source)
 
     results = []
     for enriched in candidates:
