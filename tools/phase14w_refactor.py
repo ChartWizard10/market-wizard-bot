@@ -134,7 +134,6 @@ text = text.replace(original_block, pipeline_replacement, 1)
 analyze_start = text.index("async def run_analyze(")
 analyze_block_start = text.index("        # Tiering (cannot be bypassed)", analyze_start)
 analyze_block_end = text.index("        # Alert", analyze_block_start)
-old_analyze_block = text[analyze_block_start:analyze_block_end]
 new_analyze_block = '''        # Tiering hard gates cannot be bypassed.
         tiering_result = tiering.validate(cr["signal"], pf_res, config)
 
@@ -183,4 +182,85 @@ assert pipeline.count("state_store.check_alert(") == 1
 assert analyze.count("state_store.check_alert(") == 1
 
 PATH.write_text(text, encoding="utf-8")
-print("Phase 14W scheduler refactor applied")
+
+# ---------------------------------------------------------------------------
+# Reconcile legacy architecture guards with the new shared production organ.
+# These tests still protect the same ordering laws; they now inspect the organ
+# that actually owns those operations instead of assuming they live inline in
+# run_scan_pipeline.
+# ---------------------------------------------------------------------------
+
+htf_test = Path("tests/test_phase_14i_higher_timeframe_context.py")
+htf_text = htf_test.read_text(encoding="utf-8")
+old_htf_guard = '''def test_scheduler_attaches_before_snipe_audit():
+    import inspect
+    from src import scheduler
+    src = inspect.getsource(scheduler.run_scan_pipeline)
+    htf_pos = src.find('tiering_result["higher_timeframe_context"]')
+    audit_pos = src.find('tiering_result["snipe_gate_audit"]')
+    assert htf_pos != -1 and audit_pos != -1
+    assert htf_pos < audit_pos
+'''
+new_htf_guard = '''def test_scheduler_attaches_before_snipe_audit():
+    import inspect
+    from src import scheduler
+    src = inspect.getsource(scheduler._complete_candidate_judgment)
+    htf_pos = src.find('tiering_result["higher_timeframe_context"]')
+    audit_pos = src.find('tiering_result["snipe_gate_audit"]')
+    assert htf_pos != -1 and audit_pos != -1
+    assert htf_pos < audit_pos
+'''
+assert htf_text.count(old_htf_guard) == 1, "HTF architecture guard changed unexpectedly"
+htf_test.write_text(htf_text.replace(old_htf_guard, new_htf_guard), encoding="utf-8")
+
+v14 = Path("tests/test_phase_14v_scan_time_funnel_telemetry.py")
+v14_text = v14.read_text(encoding="utf-8")
+old_guard_1 = '''def test_v1_check_alert_runs_once_after_final_tier_mutation():
+    """Phase 14S.4B law: judge first, dedup final executable truth second."""
+    src = Path("src/scheduler.py").read_text(encoding="utf-8")
+    scan = src[src.index("async def run_scan_pipeline"):src.index("async def run_full_scan")]
+    assert scan.count("state_store.check_alert(") == 1
+    assert scan.index("apply_ladder_arbitration") < scan.index("state_store.check_alert(")
+    assert scan.index("seal_snipe_confirmed_consistency") < scan.index("state_store.check_alert(")
+    assert scan.index("state_store.check_alert(") < scan.index("discord_alerts.send_alert")
+'''
+new_guard_1 = '''def test_v1_check_alert_runs_once_after_final_tier_mutation():
+    """Phase 14S.4B/14W: shared judgment finishes before final-tier dedup."""
+    src = Path("src/scheduler.py").read_text(encoding="utf-8")
+    organ = src[src.index("def _complete_candidate_judgment("):src.index("async def run_scan_pipeline")]
+    scan = src[src.index("async def run_scan_pipeline"):src.index("async def run_full_scan")]
+    assert organ.index("apply_ladder_arbitration") < organ.index("seal_snipe_confirmed_consistency")
+    assert scan.count("state_store.check_alert(") == 1
+    assert scan.index("_complete_candidate_judgment(") < scan.index("state_store.check_alert(")
+    assert scan.index("state_store.check_alert(") < scan.index("discord_alerts.send_alert")
+'''
+assert v14_text.count(old_guard_1) == 1, "14V timing guard #1 changed unexpectedly"
+v14_text = v14_text.replace(old_guard_1, new_guard_1)
+
+old_guard_2 = '''def test_v1c_24_25_check_alert_final_tier_timing_and_cap_unchanged():
+    src = Path("src/scheduler.py").read_text(encoding="utf-8")
+    scan = src[src.index("async def run_scan_pipeline"):src.index("async def run_full_scan")]
+    assert scan.count("state_store.check_alert(") == 1
+    assert scan.index("apply_ladder_arbitration") < scan.index("state_store.check_alert(")
+    assert scan.index("seal_snipe_confirmed_consistency") < scan.index("state_store.check_alert(")
+    assert scan.index("state_store.check_alert(") < scan.index("discord_alerts.send_alert")
+    import yaml
+    cfg = yaml.safe_load(open("config/doctrine_config.yaml"))
+    assert cfg["prefilter"]["max_claude_candidates_per_scan"] == 30
+'''
+new_guard_2 = '''def test_v1c_24_25_check_alert_final_tier_timing_and_cap_unchanged():
+    src = Path("src/scheduler.py").read_text(encoding="utf-8")
+    organ = src[src.index("def _complete_candidate_judgment("):src.index("async def run_scan_pipeline")]
+    scan = src[src.index("async def run_scan_pipeline"):src.index("async def run_full_scan")]
+    assert organ.index("apply_ladder_arbitration") < organ.index("seal_snipe_confirmed_consistency")
+    assert scan.count("state_store.check_alert(") == 1
+    assert scan.index("_complete_candidate_judgment(") < scan.index("state_store.check_alert(")
+    assert scan.index("state_store.check_alert(") < scan.index("discord_alerts.send_alert")
+    import yaml
+    cfg = yaml.safe_load(open("config/doctrine_config.yaml"))
+    assert cfg["prefilter"]["max_claude_candidates_per_scan"] == 30
+'''
+assert v14_text.count(old_guard_2) == 1, "14V timing guard #2 changed unexpectedly"
+v14.write_text(v14_text.replace(old_guard_2, new_guard_2), encoding="utf-8")
+
+print("Phase 14W scheduler refactor + architecture-test reconciliation applied")
