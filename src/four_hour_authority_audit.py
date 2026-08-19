@@ -36,7 +36,7 @@ _REQUIRED_VALIDATION_FLAGS = (
     "outcome_linked",
     "counterfactual_proxy_vs_real",
     "sample_size_accepted_under_predeclared_plan",
-    "regime_coverage_accepted",
+    "market_condition_coverage_accepted",
     "real_4h_improves_or_preserves_precision",
     "real_4h_does_not_materially_damage_recall",
     "capital_integrity_regressions_green",
@@ -166,7 +166,7 @@ def audit_authority_readiness(
             else [
                 "link scan-time real-4H/proxy states to forward three-barrier outcomes",
                 "run chronological out-of-sample proxy-vs-real counterfactual evaluation",
-                "predeclare sample/regime/precision/recall acceptance criteria",
+                "predeclare sample/market-condition/precision/recall acceptance criteria",
                 "re-run full capital-integrity regressions before any authority handoff",
             ]
         ),
