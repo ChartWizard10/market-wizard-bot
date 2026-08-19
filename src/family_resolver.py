@@ -21,6 +21,7 @@ The module is intentionally pure and side-effect free.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 VERSION = "CFR-1"
@@ -50,9 +51,6 @@ CONFLICT_NONE = "NONE"
 CONFLICT_LOCAL = "LOCAL"
 CONFLICT_SHARED = "SHARED"
 
-# These represent evidence that is common enough to the bullish thesis that it
-# must remain visible to common downstream gates. CFR-1 does not itself block
-# capital; it labels the scope so the existing sovereign gates keep ownership.
 _SHARED_FAILURE_CODES = {
     "OVERHEAD_BLOCKED",
     "RETEST_FAILED",
@@ -94,11 +92,7 @@ def _codes(obj: dict) -> set[str]:
 
 
 def _is_failed(obj: dict) -> bool:
-    """True when this *family's* own lifecycle has failed.
-
-    This is not synonymous with a universal bullish-thesis failure. Scope is
-    resolved separately by `_failure_scope`.
-    """
+    """True when this family's own lifecycle has failed."""
     if not isinstance(obj, dict) or not obj.get("detected"):
         return False
     state = str(obj.get("state") or "").upper()
@@ -147,9 +141,6 @@ def _priority_key(obj: dict) -> tuple:
     except ValueError:
         family_priority = -999
 
-    # Execution proof outranks a merely high family score. This prevents an
-    # unfinished 96-point pattern label from displacing a lower-scored family
-    # whose retest/hold lifecycle is actually complete.
     return (
         int(_bool(obj, "entry_structure_valid")),
         int(_bool(obj, "admission_ready")),
@@ -256,8 +247,6 @@ def resolve_families(families: dict[str, dict] | None) -> dict:
             if conflict_scope == CONFLICT_SHARED
             else "FAMILY_LOCAL_FAILURE_PRESENT"
         )
-        # Critical doctrine: a local sibling failure is information, not an
-        # automatic cancellation of a different valid family.
         if conflict_scope == CONFLICT_LOCAL and ready_viable:
             reason_codes.append("VALID_PRIMARY_PRESERVED_DESPITE_LOCAL_SIBLING_FAILURE")
     elif len(ready_viable) >= 2:
@@ -291,10 +280,55 @@ def resolve_families(families: dict[str, dict] | None) -> dict:
         "admission_ready": bool(viable and _bool(primary_obj, "admission_ready")),
         "entry_structure_valid": bool(viable and _bool(primary_obj, "entry_structure_valid")),
         "confluence_count": len(ready_viable),
-        # Explicit anti-inflation law: simultaneous labels never add scores.
         "score_stacking_allowed": False,
-        # Explicit capital firewall for audit/tests.
         "capital_authority": False,
         "reason_codes": reason_codes,
         "family_snapshots": [_family_snapshot(obj) for obj in detected],
     }
+
+
+def reconcile_compiled_evidence(evidence: dict | None) -> dict:
+    """Return a deep-copied SFC object with CFR-1 primary resolution applied.
+
+    SFC-1's family objects remain byte-semantically unchanged. CFR-1 updates only
+    the top-level *summary* to point at the resolved primary family and attaches
+    the complete resolution object for audit/prompt context.
+    """
+    source = evidence if isinstance(evidence, dict) else {}
+    out = deepcopy(source)
+    families = out.get("families")
+    families = families if isinstance(families, dict) else {}
+
+    resolution = resolve_families(families)
+    out["family_resolution"] = resolution
+    out["resolver_version"] = VERSION
+
+    primary = resolution["resolved_primary_family"]
+    primary_obj = families.get(primary) if primary != NONE else None
+    primary_obj = primary_obj if isinstance(primary_obj, dict) else None
+
+    out["primary_family"] = primary
+    out["detected_families"] = [
+        family_id
+        for family_id in FAMILY_ORDER
+        if isinstance(families.get(family_id), dict)
+        and families[family_id].get("detected")
+    ]
+    out["watch_ready"] = any(
+        bool(obj.get("watch_ready"))
+        for obj in families.values()
+        if isinstance(obj, dict) and not _is_failed(obj)
+    )
+    out["admission_ready"] = bool(
+        primary_obj and not _is_failed(primary_obj) and primary_obj.get("admission_ready")
+    )
+    out["entry_structure_valid"] = bool(
+        primary_obj and not _is_failed(primary_obj) and primary_obj.get("entry_structure_valid")
+    )
+    out["primary_state"] = primary_obj.get("state") if primary_obj else "NONE"
+    out["primary_family_score"] = _score(primary_obj) if primary_obj else 0
+    out["primary_invalidation_level"] = primary_obj.get("invalidation_level") if primary_obj else None
+    out["primary_target_1"] = primary_obj.get("target_1") if primary_obj else None
+    out["primary_rr_to_t1"] = primary_obj.get("rr_to_t1") if primary_obj else None
+
+    return out
