@@ -1,0 +1,222 @@
+name: Phase 14W One-Shot Shared Judgment Refactor V2
+
+on:
+  push:
+    branches: [phase-14w-manual-analyze-parity]
+
+permissions:
+  contents: write
+
+jobs:
+  refactor:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase-14w-manual-analyze-parity
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build one shared candidate judgment organ
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          path = Path('src/scheduler.py')
+          text = path.read_text(encoding='utf-8')
+          assert 'def _complete_candidate_judgment(' not in text, 'helper already exists'
+
+          # Capture the exact production judgment block before editing anything.
+          scan_fn = text.index('async def run_scan_pipeline(')
+          start = text.index('        # Step 6.5: Trajectory', scan_fn)
+          end = text.index('        # Step 6.7: FINAL-tier truth', start)
+          original = text[start:end]
+          shared = original
+
+          # Remove only scan-funnel accounting; chart judgment stays intact.
+          s = shared.index('        try:\n            _tlm_basket =')
+          e_marker = '        except Exception:\n            pass\n\n'
+          e = shared.index(e_marker, s) + len(e_marker)
+          shared = shared[:s] + shared[e:]
+
+          s = shared.index('        # Phase 14V.1 (B1):')
+          e = shared.index('        # Step 6.6: Score calibration', s)
+          shared = shared[:s] + shared[e:]
+
+          old = '''        try:
+              _ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
+              _previous_state = _ticker_states.get(ticker) if isinstance(_ticker_states, dict) else None
+              tiering_result["trajectory"] = trajectory_mod.compute(
+                  tiering_result, _previous_state
+              )
+          except Exception as exc:
+              log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
+              tiering_result["trajectory"] = {"label": "UNKNOWN", "text": ""}
+          '''
+          old = textwrap.dedent(old)
+          old = textwrap.indent(old, '        ')
+          new = '''        try:
+              tiering_result["trajectory"] = trajectory_mod.compute(
+                  tiering_result, previous_state
+              )
+          except Exception as exc:
+              log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
+              tiering_result["trajectory"] = {"label": "UNKNOWN", "text": ""}
+          '''
+          new = textwrap.dedent(new)
+          new = textwrap.indent(new, '        ')
+          assert shared.count(old) == 1, 'trajectory source contract changed'
+          shared = shared.replace(old, new)
+          shared = shared.replace('enriched_map.get(ticker, {})', 'enriched')
+          shared = shared.replace('market_results.get(ticker) or {}', 'market_result or {}')
+          for forbidden in ('_tlm_', 'enriched_map', 'market_results', 'state.get('):
+              assert forbidden not in shared, f'shared organ leaked caller concern: {forbidden}'
+
+          body = textwrap.indent(textwrap.dedent(shared).rstrip() + '\n', '    ')
+          helper = '''# ---------------------------------------------------------------------------
+          # Phase 14W — shared post-tiering candidate judgment
+          # ---------------------------------------------------------------------------
+          
+          def _complete_candidate_judgment(
+              ticker: str,
+              tiering_result: dict,
+              enriched: dict,
+              market_result: dict,
+              config: dict,
+              previous_state: dict | None = None,
+          ) -> dict:
+              """Run the complete post-tiering chart judgment stack.
+          
+              This is the single production path used by both autoscan and manual
+              ``!analyze``. Manual inspection may bypass universe admission/cooldown;
+              it may never bypass evidence, SNIPE arbitration, the capital floor, or
+              the downgrade-only truth seal.
+          
+              This organ deliberately owns no dedup, Discord routing, persistence, or
+              scan-funnel telemetry. Those execution concerns occur only after the
+              final executable tier is known.
+              """
+              tiering_result = tiering_result if isinstance(tiering_result, dict) else {}
+              enriched = enriched if isinstance(enriched, dict) else {}
+              market_result = market_result if isinstance(market_result, dict) else {}
+              final_tier = tiering_result.get("final_tier", "WAIT")
+          
+          ''' + body + '''
+              return tiering_result
+          
+          
+          '''
+          helper = textwrap.dedent(helper)
+
+          # Replace universe implementation with one call + scan-only telemetry.
+          replacement = '''        # Step 6.5–6.6: shared chart judgment. Phase 14W makes
+              # autoscan and manual !analyze use the exact same evidence/arbitration path.
+              _ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
+              _previous_state = _ticker_states.get(ticker) if isinstance(_ticker_states, dict) else None
+              tiering_result = _complete_candidate_judgment(
+                  ticker,
+                  tiering_result,
+                  enriched_map.get(ticker, {}),
+                  market_results.get(ticker) or {},
+                  config,
+                  _previous_state,
+              )
+              final_tier = tiering_result.get("final_tier", final_tier)
+          
+              # Phase 14V remains scan-only observation, never part of chart judgment.
+              try:
+                  _tlm_basket = (tiering_result.get("snipe_ladder") or {}).get("internal_ladder_tier")
+                  if _tlm_basket:
+                      _tlm_baskets[_tlm_basket] = _tlm_baskets.get(_tlm_basket, 0) + 1
+              except Exception:
+                  pass
+              try:
+                  _tlm_served = tiering_result.get("final_tier")
+                  if _tlm_served:
+                      _tlm_final_tiers[_tlm_served] = _tlm_final_tiers.get(_tlm_served, 0) + 1
+                      _tlm_analysis["judged"] += 1
+              except Exception:
+                  pass
+          
+          '''
+          replacement = textwrap.indent(textwrap.dedent(replacement), '        ')
+          text = text[:start] + replacement + text[end:]
+
+          marker = '# ---------------------------------------------------------------------------\n# Core pipeline (used by both scheduled and manual scans)\n# ---------------------------------------------------------------------------\n\n'
+          assert text.count(marker) == 1
+          text = text.replace(marker, helper + marker)
+
+          # Replace the manual command's shortcut with the same judgment helper.
+          analyze_fn = text.index('async def run_analyze(')
+          a_start = text.index('        # Tiering (cannot be bypassed)', analyze_fn)
+          a_end = text.index('        # Alert', a_start)
+          old_manual = text[a_start:a_end]
+          new_manual = '''        # Deterministic tiering hard gates cannot be bypassed.
+              tiering_result = tiering.validate(cr["signal"], pf_res, config)
+          
+              # Phase 14W: bypass universe admission/cooldown only. Chart judgment is
+              # identical to autoscan before execution governance is consulted.
+              state = state_store.load(config)
+              _ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
+              _previous_state = _ticker_states.get(ticker) if isinstance(_ticker_states, dict) else None
+              tiering_result = _complete_candidate_judgment(
+                  ticker, tiering_result, enriched, mres, config, _previous_state
+              )
+              final_tier = tiering_result.get("final_tier", "WAIT")
+          
+              # Manual override bypasses cooldown only. WAIT/safety/routing hard blocks bind.
+              dedup_decision = state_store.check_alert(
+                  tiering_result, state, config, manual_override=True
+              )
+          
+          '''
+          new_manual = textwrap.indent(textwrap.dedent(new_manual), '        ')
+          assert 'tiering.validate' in old_manual and 'state_store.check_alert' in old_manual
+          text = text[:a_start] + new_manual + text[a_end:]
+
+          text = text.replace(
+              '    Bypasses prefilter score floor and dedup cooldown.\n'
+              '    Still enforces: tiering hard gates, JSON validation, safe_for_alert, WAIT suppression.\n',
+              '    Bypasses universe prefilter admission and dedup cooldown only.\n'
+              '    Still enforces JSON validation, deterministic tiering hard gates, the complete\n'
+              '    post-tiering evidence/arbitration stack, safe_for_alert, and WAIT suppression.\n'
+          )
+
+          # Fail the refactor if either caller can drift away from the common organ.
+          pipeline = text[text.index('async def run_scan_pipeline('):text.index('async def run_full_scan')]
+          analyze = text[text.index('async def run_analyze'):]
+          assert pipeline.count('_complete_candidate_judgment(') == 1
+          assert analyze.count('_complete_candidate_judgment(') == 1
+          assert pipeline.index('_complete_candidate_judgment(') < pipeline.index('state_store.check_alert(')
+          assert analyze.index('_complete_candidate_judgment(') < analyze.index('state_store.check_alert(')
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Compile and run complete suite
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          python -m compileall -q src tests main.py
+          python -m pytest -q
+
+      - name: Commit verified refactor and remove temporary workflows
+        run: |
+          rm -f .github/workflows/phase14w-one-shot.yml .github/workflows/phase14w-one-shot-v2.yml .phase14w-trigger
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Phase 14W unify manual and autoscan judgment pipeline"
+          git push origin HEAD:phase-14w-manual-analyze-parity
