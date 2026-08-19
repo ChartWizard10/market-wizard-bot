@@ -3,8 +3,9 @@
 Runtime platform: Railway.
 Alert surface: Discord.
 Durable source of truth: GitHub repository.
+Intended deep-analysis model: OpenAI GPT-5.6.
 
-This runbook records only behavior verified in the repository. Railway project-level settings that are not committed here must be checked in Railway rather than guessed.
+This runbook records repository-verified behavior. Railway project-level settings that are not committed here must be checked in Railway rather than guessed.
 
 ## Application entry point
 
@@ -16,27 +17,33 @@ Local equivalent:
 python main.py
 ```
 
-`main.py` loads `config/doctrine_config.yaml`, validates environment, builds the Discord/Anthropic clients, loads `prompts/market_wizard_system.md`, registers commands, and starts the bot.
+`main.py` loads `config/doctrine_config.yaml`, validates environment, builds runtime clients, loads `prompts/market_wizard_system.md`, registers commands, and starts the bot.
 
-## Required/recognized environment
+## Important provider-alignment status
+
+Current `main` entering P0 still uses Anthropic in code. Operator intent is GPT-5.6. Therefore two states must not be confused:
+
+### Current deployed-code contract before AI-1
+
+- `ANTHROPIC_KEY` is required for the legacy deep-analysis client;
+- `ANTHROPIC_MODEL` can override the legacy model;
+- `requirements.txt` installs `anthropic`;
+- `main.py` instantiates `anthropic.AsyncAnthropic`.
+
+### Target contract after AI-1
+
+- `OPENAI_API_KEY` will authenticate the deep-analysis client;
+- `OPENAI_MODEL` will select the runtime model with `gpt-5.6` as the production default/flagship target;
+- OpenAI Structured Outputs will enforce the signal JSON schema;
+- Anthropic-specific runtime dependencies/environment will be removed or explicitly quarantined as historical compatibility only.
+
+Do not change Railway secrets to the target names until the AI-1 PR is merged and its deployment checklist explicitly authorizes the cutover.
+
+## Discord environment
 
 Required for bot authentication:
 
 - `DISCORD_TOKEN`
-
-Required for Claude-backed `!scan` / `!analyze` and scheduled deep analysis:
-
-- `ANTHROPIC_KEY`
-
-Optional runtime model override:
-
-- `ANTHROPIC_MODEL`
-
-Model resolution order is:
-
-1. non-empty `ANTHROPIC_MODEL` environment value;
-2. `config.claude.model`;
-3. code fallback.
 
 Discord channel environment overrides recognized by `src/discord_alerts.py`:
 
@@ -47,15 +54,6 @@ Discord channel environment overrides recognized by `src/discord_alerts.py`:
 If an override is absent, the corresponding channel ID in `config/doctrine_config.yaml` is used.
 
 Never commit live secrets.
-
-## Startup expectations
-
-`main.validate_startup` treats:
-
-- missing `DISCORD_TOKEN` as a hard startup error;
-- missing `ANTHROPIC_KEY` as a warning, with Claude-backed commands expected to fail gracefully.
-
-The system prompt must be readable from `prompts/market_wizard_system.md` for Claude analysis.
 
 ## Scheduled scanning
 
@@ -95,6 +93,22 @@ Scan telemetry file is maintained separately by the telemetry module. It must re
 
 Never treat telemetry-write failure as permission to modify market judgment.
 
+## Candidate-cap operations
+
+Current production cap: 30 deep-analysis candidates per scan.
+
+Ranks 31-60 are already recorded by near-cut telemetry without extra deep-analysis calls.
+
+Do not raise the cap merely because 40 sounds safer for recall. CAP-40 requires:
+
+1. GPT-5.6 runtime migration complete;
+2. setup-family compiler complete enough that ranking reflects all locked setup families;
+3. evidence that ranks 31-40 contain repeatable actionable opportunities missed by 30;
+4. worst-case scan duration remains comfortably below the 15-minute cadence;
+5. API rate/cost budget is acceptable.
+
+If those conditions pass, 40 is the preferred next ceiling.
+
 ## Pre-deploy checklist
 
 Before merging a strategy/runtime change:
@@ -110,28 +124,41 @@ Before merging a strategy/runtime change:
 9. real-4H authority has not changed unless the PR is explicitly R4H-2;
 10. candidate cap/universe/cadence/model/routing remain unchanged unless explicitly in scope.
 
-## Post-merge Railway validation
+## Post-merge Railway validation — general
 
 After Railway deploy/restart:
 
 1. confirm the service reaches the `Bot ready` / `Starting Market Wizard Bot` path;
 2. run `!status` and confirm the expected ticker count and scan cadence;
 3. confirm configured Discord channels resolve;
-4. confirm Claude model-selection log reflects the intended environment/config source;
-5. verify no repeated startup loop or scan-overlap error;
-6. during market hours, verify one scan reaches data -> prefilter -> Claude -> final tier -> dedup -> Discord/state without unexpected exceptions;
-7. confirm telemetry failure, if any, is isolated and does not stop alert state.
+4. verify no repeated startup loop or scan-overlap error;
+5. during market hours, verify one scan reaches data -> prefilter -> model -> final tier -> dedup -> Discord/state without unexpected exceptions;
+6. confirm telemetry failure, if any, is isolated and does not stop alert state.
+
+## AI-1 GPT-5.6 cutover checklist
+
+Only after the migration PR is green and merged:
+
+1. add/verify `OPENAI_API_KEY` in Railway;
+2. set `OPENAI_MODEL=gpt-5.6` unless the merged config/runbook specifies a tested snapshot instead;
+3. redeploy;
+4. confirm startup reports the intended OpenAI model source without printing secrets;
+5. run one controlled `!analyze` and verify strict signal-schema output reaches deterministic tiering;
+6. verify API/rate failure remains classified as MODEL failure, not WAIT;
+7. verify autoscan and manual analysis still share the same post-tiering judgment organ;
+8. verify alert/state/telemetry contracts are unchanged;
+9. remove legacy Anthropic Railway secrets only after successful GPT-5.6 validation and only if the merged migration explicitly removes fallback support.
 
 ## Rollback rule
 
-Rollback by returning GitHub/Railway to the last known-green production commit. Do not attempt an emergency strategy rewrite directly in runtime configuration unless that configuration was designed as an explicit runtime control (for example the model environment override).
+Rollback by returning GitHub/Railway to the last known-green production commit. Do not attempt an emergency strategy rewrite directly in runtime configuration unless that configuration was designed as an explicit runtime control.
 
 ## Incident classification
 
 Keep these distinct:
 
 - DATA: provider empty/error/stale/malformed bars;
-- MODEL: Anthropic API/JSON/rate-limit failure;
+- MODEL: OpenAI/legacy-provider API, schema, timeout, or rate-limit failure;
 - JUDGMENT: deterministic gate/logic failure;
 - DELIVERY: Discord routing/send failure;
 - STATE: alert-history read/write failure;
