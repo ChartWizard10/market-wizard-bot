@@ -1,0 +1,32 @@
+{
+  "name": "R4H real-vs-proxy forward OOS v1",
+  "version": "1.0",
+  "predeclared_before_outcome_review": true,
+  "chronological_out_of_sample": true,
+  "sampling_unit": "FIRST_OBSERVATION_PER_TICKER_SESSION",
+  "evaluation_start_date": "2026-08-20",
+  "evaluation_end_date": "2026-09-30",
+  "confidence_level": 0.95,
+  "min_evaluable_records": 150,
+  "min_real_adds_hard_block_evaluable": 40,
+  "min_real_removes_proxy_hard_block_evaluable": 30,
+  "max_ambiguous_or_censored_pct": 15.0,
+  "max_comparison_unavailable_pct": 10.0,
+  "max_real_adds_block_target_opportunity_cost_pct": 30.0,
+  "min_real_adds_block_objective_failure_protection_pct": 70.0,
+  "min_real_removes_block_target_recovery_pct": 60.0,
+  "max_real_removes_block_objective_failure_exposure_pct": 40.0,
+  "min_real_adds_block_protection_lcb_pct": 60.0,
+  "max_real_adds_block_target_cost_ucb_pct": 40.0,
+  "min_real_removes_block_recovery_lcb_pct": 50.0,
+  "max_real_removes_block_failure_ucb_pct": 50.0,
+  "market_condition_minimums": {
+    "TRENDING": 40,
+    "COMPRESSION": 15,
+    "REPAIR": 25,
+    "TRANSITION": 15,
+    "FAILURE": 5
+  },
+  "stop_rule": "Evaluate once after 2026-09-30 close plus five completed future trading sessions needed to mature the final observation cohort. Do not stop early because interim point estimates look favorable.",
+  "authority_boundary": "Research only. A passing report may support a separate narrow handoff review; it cannot change live 4H authority by itself."
+}
