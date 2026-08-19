@@ -293,6 +293,24 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
     vol_behavior = enriched.get("volume_behavior", "unknown")
     lines.append(f"VOLUME_BEHAVIOR: {vol_behavior}")
 
+    # Phase SFC-2 deterministic setup-family evidence. The broad model-side
+    # `setup_family` response field stays backward-compatible; PRIMARY_FAMILY_ID
+    # is the scanner's exact family taxonomy and must not be invented by Claude.
+    family = enriched.get("setup_family_evidence")
+    if isinstance(family, dict) and family.get("primary_family") not in (None, "NONE"):
+        lines.append(f"PRIMARY_FAMILY_ID: {family.get('primary_family')}")
+        lines.append(f"FAMILY_STATE: {family.get('primary_state')}")
+        lines.append(f"FAMILY_SCORE: {family.get('primary_family_score')}")
+        lines.append(f"FAMILY_WATCH_READY: {bool(family.get('watch_ready'))}")
+        lines.append(f"FAMILY_ADMISSION_READY: {bool(family.get('admission_ready'))}")
+        lines.append(f"FAMILY_ENTRY_STRUCTURE_VALID: {bool(family.get('entry_structure_valid'))}")
+        if family.get("primary_invalidation_level") is not None:
+            lines.append(f"FAMILY_INVALIDATION_LEVEL: {family.get('primary_invalidation_level')}")
+        if family.get("primary_target_1") is not None:
+            lines.append(f"FAMILY_TARGET_1: {family.get('primary_target_1')}")
+        if family.get("primary_rr_to_t1") is not None:
+            lines.append(f"FAMILY_RR_TO_T1: {family.get('primary_rr_to_t1')}")
+
     # Confirmation provenance for the three feature families a developing
     # Daily bar could otherwise contaminate (Phase MBT-2).
     if daily_status:
