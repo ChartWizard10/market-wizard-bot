@@ -290,14 +290,37 @@ def resolve_families(families: dict[str, dict] | None) -> dict:
 def reconcile_compiled_evidence(evidence: dict | None) -> dict:
     """Return a deep-copied SFC object with CFR-1 primary resolution applied.
 
-    SFC-1's family objects remain byte-semantically unchanged. CFR-1 updates only
-    the top-level summary to point at the resolved primary family and attaches
-    the complete resolution object for audit/prompt context.
+    The raw SFC compiler primary is retained under ``compiler_primary_*`` for
+    provenance. Reconciliation is idempotent: calling it again does not erase
+    the original compiler selection. Per-family objects are never mutated.
     """
     source = evidence if isinstance(evidence, dict) else {}
     out = deepcopy(source)
     families = out.get("families")
     families = families if isinstance(families, dict) else {}
+
+    compiler_primary = str(
+        source.get("compiler_primary_family")
+        or source.get("primary_family")
+        or NONE
+    )
+    compiler_primary_obj = families.get(compiler_primary)
+    compiler_primary_obj = (
+        compiler_primary_obj if isinstance(compiler_primary_obj, dict) else {}
+    )
+    out["compiler_primary_family"] = compiler_primary
+    out["compiler_primary_state"] = str(
+        source.get("compiler_primary_state")
+        or source.get("primary_state")
+        or compiler_primary_obj.get("state")
+        or "NONE"
+    )
+    out["compiler_primary_family_score"] = int(
+        source.get("compiler_primary_family_score")
+        or source.get("primary_family_score")
+        or compiler_primary_obj.get("family_score")
+        or 0
+    )
 
     resolution = resolve_families(families)
     out["family_resolution"] = resolution
