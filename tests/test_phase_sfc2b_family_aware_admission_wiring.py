@@ -133,7 +133,7 @@ def test_family_admitted_candidate_can_repair_generic_structure_midrange_blind_s
     assert result["admission_source"] == "family"
     assert result["family_admission"]["admitted_by_family"] is True
     assert "no_clear_structure" in result["family_admission"]["rescued_vetoes"]
-    assert result["veto_flags"]  # original ledger is not silently erased
+    assert result["veto_flags"]
 
 
 def test_family_never_rescue_overhead_blocker_still_rejects_candidate():
@@ -165,7 +165,17 @@ def test_no_family_evidence_preserves_legacy_prefilter_eligibility_and_score():
 
 def test_family_rank_repairs_selection_priority_without_overwriting_prefilter_score():
     cfg = _config()
-    legacy = _base_enriched(ticker="LEGACY")
+    # A legitimate legacy candidate, but not a perfect 100-point specimen. The
+    # family lane should be able to outrank this when deterministic family
+    # evidence is materially stronger; it must not be expected to outrank a
+    # genuinely higher-scoring legacy candidate merely because a family exists.
+    legacy = _base_enriched(
+        ticker="LEGACY",
+        sma_value_alignment="mixed",
+        structure_event="reclaim",
+        retest_status="partial",
+        volume_behavior="neutral",
+    )
     family = _base_enriched(
         ticker="FAMILY",
         structure_event="none",
@@ -183,6 +193,7 @@ def test_family_rank_repairs_selection_priority_without_overwriting_prefilter_sc
     rows = {r["ticker"]: r for r in result["all_results"]}
 
     assert rows["FAMILY"]["prefilter_score"] < rows["LEGACY"]["prefilter_score"]
+    assert rows["LEGACY"]["admission_rank_score"] < 90
     assert rows["FAMILY"]["admission_rank_score"] == 90
     assert result["ranked_results"][0]["ticker"] == "FAMILY"
     assert rows["FAMILY"]["prefilter_score"] != rows["FAMILY"]["admission_rank_score"]
@@ -269,8 +280,6 @@ def test_indicators_family_compiler_receives_completed_daily_frame_and_closed_re
         },
     )
 
-    # Force canonical closed retest to missing, while live interaction is in-zone
-    # and therefore promotes only the runtime display field to provisional partial.
     monkeypatch.setattr(
         indicators,
         "assess_retest",
