@@ -1,4 +1,4 @@
-"""VELOCITY-1B — scan-time research observation envelope.
+"""VELOCITY-1B/1C — scan-time research observation envelope.
 
 VELOCITY-1A defined two pure research contracts:
 
@@ -6,9 +6,9 @@ VELOCITY-1A defined two pure research contracts:
 * ex-post target / invalidation / time-barrier labels.
 
 VELOCITY-1B defines the immutable observation envelope that a later wiring
-phase may persist beside an analyzed decision trace.  The envelope joins the
-minimum facts required for chronological validation without creating a new
-trade gate or mutating the production judgment object.
+phase may persist beside an analyzed decision trace.  VELOCITY-1C adds a
+bounded compact projection for scan telemetry.  Neither layer creates a trade
+gate or mutates the production judgment object.
 
 This module is intentionally PURE.  It performs no file writes, network calls,
 model calls, state updates, routing, tiering, or capital decisions.  It never
@@ -23,6 +23,7 @@ from typing import Any
 from src import velocity_research
 
 VERSION = "VELOCITY-1B"
+TELEMETRY_VERSION = "VELOCITY-1C"
 
 _CAPITAL_TIERS = {"SNIPE_IT", "STARTER"}
 
@@ -210,4 +211,49 @@ def observation_to_label_input(envelope: dict | None) -> dict:
         "four_hour_proxy_state": _text(four.get("proxy_state")),
         "four_hour_proxy_agreement": _text(four.get("proxy_agreement")),
         "persistence_ready": env.get("persistence_ready") is True,
+    }
+
+
+def compact_for_telemetry(envelope: dict | None) -> dict:
+    """Return the bounded VELOCITY-1C block stored in an analyzed trace.
+
+    The scan trace already owns ``scan_id`` and ``ticker``, so this projection
+    avoids duplicating them.  It keeps only the immutable facts required for a
+    later chronological outcome linker and for setup-family / real-4H research
+    attribution.  No future bar or outcome field is accepted or emitted.
+    """
+    env = _dict(envelope)
+    geometry = _dict(env.get("geometry"))
+    feasibility = _dict(env.get("feasibility"))
+    observation = _dict(env.get("observation"))
+    family = _dict(env.get("setup_family"))
+    four = _dict(env.get("four_hour_shadow"))
+    missing = env.get("missing_required_fields")
+    missing = [str(x)[:64] for x in missing[:5]] if isinstance(missing, list) else []
+
+    return {
+        "version": TELEMETRY_VERSION,
+        "research_only": True,
+        "capital_authority": False,
+        "tier_authority": False,
+        "observed_at": _text(env.get("scan_timestamp")),
+        "ready": env.get("persistence_ready") is True,
+        "missing": missing,
+        "reference_price": _num(geometry.get("reference_price")),
+        "reference_source": _text(geometry.get("reference_price_source")),
+        "invalidation_level": _num(geometry.get("invalidation_level")),
+        "target_return_pct": _num(feasibility.get("target_return_pct")),
+        "horizon_sessions": _num(feasibility.get("horizon_sessions")),
+        "feasibility_status": _text(feasibility.get("status")),
+        "known_path_room_pct": _num(feasibility.get("known_path_room_pct")),
+        "atr_pct": _num(feasibility.get("atr_pct")),
+        "required_move_atr": _num(feasibility.get("required_move_atr")),
+        "final_tier": _text(observation.get("final_tier")),
+        "capital_authorized_at_observation": (
+            observation.get("capital_authorized_at_observation") is True
+        ),
+        "primary_family": _text(family.get("primary_family")),
+        "four_hour_state": _text(four.get("structural_state")),
+        "four_hour_proxy_state": _text(four.get("proxy_state")),
+        "four_hour_proxy_agreement": _text(four.get("proxy_agreement")),
     }

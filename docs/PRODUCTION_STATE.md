@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering VELOCITY-1B: `main` at `04da12749aa70e689de8b1487a2ef2bca87eb71a` (Phase VELOCITY-1A — pure five-session/+8% feasibility and three-barrier research contract, on top of R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the existing deterministic execution stack).
+Last merged production baseline entering VELOCITY-1C: `main` at `bf223c66c2b03f682abe581127a592b76f7bee1a` (Phase VELOCITY-1B — immutable scan-time research observation envelope, on top of VELOCITY-1A, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the existing deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -22,6 +22,7 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - CFR-1 defines the pure cross-family resolution contract and tier non-interference tests.
 - CFR-2 wires the cross-family resolver into the production family-evidence path and GPT-5.6 context without granting capital authority.
 - VELOCITY-1A defines the pure ex-ante feasibility snapshot and ex-post five-session/+8% three-barrier label without granting live authority.
+- VELOCITY-1B defines the immutable scan-time observation envelope and future-link input without granting live authority.
 - Scan-funnel telemetry is isolated from alert history and remains observational only.
 - Production ticker loader normalizes uppercase symbols, ignores blanks/comments, deduplicates, validates format, and never fetches market data.
 
@@ -197,7 +198,7 @@ Therefore proxy agreement cannot be used as a substitute for ground truth, and s
 2. forward outcome linkage;
 3. proxy-vs-real counterfactual evaluation;
 4. sample size accepted under a predeclared plan;
-5. accepted regime coverage;
+5. accepted market-condition coverage;
 6. precision improved or preserved;
 7. legitimate opportunity recall not materially damaged;
 8. full capital-integrity regressions green.
@@ -223,9 +224,9 @@ It defines:
 
 VELOCITY-1A merged after the permanent Python 3.13 gate completed with **2853 passed, 4 skipped**.
 
-### VELOCITY-1B — current branch phase
+### VELOCITY-1B — merged
 
-VELOCITY-1B defines the immutable observation envelope required before runtime telemetry wiring.
+VELOCITY-1B is production-green as a pure observation contract. It does not write telemetry or alter live judgment.
 
 The envelope joins only scan-time facts that existed before the future outcome:
 
@@ -238,17 +239,34 @@ The envelope joins only scan-time facts that existed before the future outcome:
 - the VELOCITY-1A feasibility snapshot;
 - an explicit persistence-readiness/missing-field ledger.
 
-Authority law:
+VELOCITY-1B merged after the permanent Python 3.13 gate completed with **2870 passed, 4 skipped**.
+
+### VELOCITY-1C — current branch phase
+
+VELOCITY-1C wires a bounded research projection into analyzed scan-time decision traces.
+
+Current implementation boundary:
+
+- the normal 14V decision trace is built first;
+- the VELOCITY observation is derived only from already-known `enriched` features plus the final post-judgment result;
+- only a compact block is attached to the trace, bounded below 1 KB in regression tests;
+- the block carries observation time, reference price, structural invalidation, +8%/five-session objective, feasibility state, path/ATR metrics, observed tier/capital truth, setup-family attribution, and real-4H/proxy states;
+- the compact block contains no future bar or outcome label;
+- a VELOCITY projection failure returns the original 14V trace unchanged;
+- `tiering_result` and enriched features are not mutated;
+- no schema-version reset is introduced, so the existing telemetry ledger is not quarantined merely for this additive optional field.
+
+Authority law remains absolute:
 
 - research only;
 - no tier authority;
 - no capital authority;
 - no routing authority;
+- no suppression authority;
 - no forecast authority;
-- no future bars or outcome labels inside the scan-time envelope;
-- input feature/judgment objects are never mutated.
+- real 4H remains shadow.
 
-After VELOCITY-1B is green and merged, VELOCITY-1C should wire this bounded envelope into scan telemetry for analyzed candidates only, preserving telemetry's isolated failure domain. VELOCITY-1D should then link completed observations to future Daily bars offline.
+After VELOCITY-1C is green and merged, VELOCITY-1D should link completed observations to future Daily bars offline.
 
 ## Candidate-cap decision: 30 vs 40
 
@@ -272,13 +290,12 @@ Do not use a larger model-call cap to compensate for weak candidate ranking.
 
 ## Next production sequence
 
-1. VELOCITY-1B: merge the pure observation-envelope contract.
-2. VELOCITY-1C: persist the bounded ex-ante observation envelope in scan telemetry with zero judgment authority.
-3. VELOCITY-1D: offline chronological linker from observations to future Daily three-barrier outcomes.
-4. R4H authority revisit: use outcome-linked real-vs-proxy counterfactual validation before any controlled handoff.
-5. CAP-40: measured 30-vs-40 capacity study and, if proven, controlled cap increase.
-6. Final requested universe expansion in its own reviewed PR.
-7. Chronological replay/out-of-sample validation and Railway observation.
+1. VELOCITY-1C: complete and merge bounded scan-telemetry wiring with zero judgment authority.
+2. VELOCITY-1D: offline chronological linker from observations to future Daily three-barrier outcomes.
+3. R4H authority revisit: use outcome-linked real-vs-proxy counterfactual validation before any controlled handoff.
+4. CAP-40: measured 30-vs-40 capacity study and, if proven, controlled cap increase.
+5. Final requested universe expansion in its own reviewed PR.
+6. Chronological replay/out-of-sample validation and Railway observation.
 
 ## Things that must NOT drift
 

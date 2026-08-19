@@ -33,6 +33,7 @@ from src import tiering
 from src import timeframe_alignment
 from src import trade_location
 from src import trajectory as trajectory_mod
+from src import velocity_observation
 from src.claude_client import async_claude_scan, claude_call
 
 log = logging.getLogger(__name__)
@@ -91,6 +92,60 @@ def _abort_summary(scan_id: str, started_at: str, total_tickers: int, error: str
         "failures": [{"type": "ABORT", "detail": error}],
         "first_data_failure_reasons": [],
     }
+
+
+def _build_decision_trace_with_velocity(
+    scan_id: str,
+    scan_timestamp: str,
+    ticker: str,
+    pf_res: dict,
+    rank,
+    tiering_result: dict,
+    dedup_decision: dict | None,
+    send_result: dict | None,
+    enriched: dict | None,
+    *,
+    claude_analyzed: bool = True,
+    base_final_tier=None,
+    check_alert_evaluated_tier=None,
+    check_alert_evaluated_capital_action=None,
+) -> dict:
+    """Build the normal 14V trace, then attach VELOCITY research evidence.
+
+    The base decision trace is created first.  The VELOCITY projection is a
+    strictly additive observational block derived from already-known scan-time
+    facts.  If that projection fails for any reason, the original 14V trace is
+    returned unchanged.  This helper never mutates ``tiering_result`` or
+    ``enriched`` and therefore cannot affect dedup, routing, capital, or state.
+    """
+    trace = scan_telemetry.build_decision_trace(
+        scan_id,
+        ticker,
+        pf_res,
+        rank,
+        tiering_result,
+        dedup_decision,
+        send_result,
+        claude_analyzed=claude_analyzed,
+        base_final_tier=base_final_tier,
+        check_alert_evaluated_tier=check_alert_evaluated_tier,
+        check_alert_evaluated_capital_action=check_alert_evaluated_capital_action,
+    )
+    try:
+        envelope = velocity_observation.build_observation_envelope(
+            scan_id,
+            scan_timestamp,
+            ticker,
+            enriched,
+            tiering_result,
+        )
+        compact = velocity_observation.compact_for_telemetry(envelope)
+        if isinstance(trace, dict) and isinstance(compact, dict):
+            trace = dict(trace)
+            trace["velocity_observation"] = compact
+    except Exception as exc:
+        log.warning("VELOCITY_TELEMETRY_ERROR: %s: %s", ticker, exc)
+    return trace
 
 
 # ---------------------------------------------------------------------------
@@ -546,14 +601,16 @@ async def run_scan_pipeline(
                 synthetic = scan_telemetry.exception_send_result(exc)
                 _tlm_delivery["send_alert_called"] += 1
                 _tlm_delivery["failed"] += 1
-                _tlm_traces.append(scan_telemetry.build_decision_trace(
+                _tlm_traces.append(_build_decision_trace_with_velocity(
                     scan_id,
+                    started_at,
                     ticker,
                     pf_res,
                     _tlm_rank_of(ticker),
                     tiering_result,
                     dedup_decision,
                     synthetic,
+                    enriched_map.get(ticker, {}),
                     claude_analyzed=True,
                     base_final_tier=_tlm_base_tier,
                     check_alert_evaluated_tier=_tlm_ca_tier,
@@ -581,14 +638,16 @@ async def run_scan_pipeline(
                 _tlm_delivery["failed"] += 1
             else:
                 _tlm_delivery["skipped"] += 1
-            _tlm_traces.append(scan_telemetry.build_decision_trace(
+            _tlm_traces.append(_build_decision_trace_with_velocity(
                 scan_id,
+                started_at,
                 ticker,
                 pf_res,
                 _tlm_rank_of(ticker),
                 tiering_result,
                 dedup_decision,
                 send_result,
+                enriched_map.get(ticker, {}),
                 claude_analyzed=True,
                 base_final_tier=_tlm_base_tier,
                 check_alert_evaluated_tier=_tlm_ca_tier,
