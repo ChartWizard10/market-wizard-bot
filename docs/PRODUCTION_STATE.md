@@ -1,23 +1,23 @@
 # Current Production State
 
-Last merged production baseline entering R4H-3B: `main` at `4c26f28ca500471ea0d8a182cf41c40e27272da6` (Phase R4H-3A — 4H location-layer counterfactual policy contract, on top of VELOCITY-1D outcome linkage, VELOCITY-1C telemetry wiring, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the existing deterministic execution stack).
+Last merged production baseline entering R4H-3C: `main` at `65abdcd762db94fe0323b7d262a850d54641cb32` (Phase R4H-3B — predeclared chronological 4H outcome study, on top of R4H-3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
 ## Production-green foundations
 
-- Python runtime contract: `.python-version` = 3.13.13.
-- Permanent GitHub Actions production gate: compile + full `pytest` on pull requests/pushes to main.
-- Daily market-bar truth enforces completed-vs-developing evidence.
-- 1H market-bar truth explicitly separates closed and live evidence.
+- Python runtime: `.python-version` = 3.13.13.
+- Permanent GitHub Actions gate: compile + full `pytest` on PRs/pushes to main.
+- Daily completed-vs-developing evidence law remains enforced.
+- 1H closed-vs-live evidence remains explicit.
 - Real 4H bars are session-aligned and reuse the existing 60m provider response.
 - Real 4H authority remains **SHADOW_EVIDENCE_ONLY**.
-- Higher-timeframe monthly/weekly context remains evidence-only.
+- Monthly/weekly context remains evidence-only where configured.
 - SNIPE gate audit, unified ladder, downgrade-only seal, final-state reconciliation and calibration remain production-authoritative.
 - Autoscan and manual `!analyze` share the same post-tiering judgment organ.
 - SFC-1/SFC-2A/SFC-2B and CFR-1/CFR-2 are production-green.
 - VELOCITY-1A/1B/1C/1D are production-green research infrastructure.
-- R4H-3A is production-green research infrastructure.
+- R4H-3A/3B are production-green research infrastructure.
 - Scan telemetry remains observational and isolated from alert history.
 - Production ticker loader normalizes/deduplicates/validates symbols without fetching market data.
 
@@ -27,15 +27,17 @@ Production deep analysis is **OpenAI GPT-5.6** through the Responses API with St
 
 `OPENAI_API_KEY` authenticates the client and `OPENAI_MODEL` may override the configured model. GPT-5.6 remains analyst/classifier only; deterministic tiering, ladder, seals, capital and routing remain sovereign.
 
-Historical internal `claude_*` field names remain compatibility debt only and do not indicate the production provider.
+Historical internal `claude_*` names remain compatibility debt only and do not indicate the production provider.
 
-## Current production universe
+## Current production universe and cadence
 
 Source: `config/tickers.txt`
 
-Validated baseline: **814 unique symbols**. Regression coverage asserts the expected count, valid formatting, no duplicates, stable boundaries, and specific DRAM/IBM membership.
+- universe: **814 unique symbols**
+- scan cadence: **15 minutes**
+- deep-analysis candidate cap: **30**
 
-Any universe expansion must occur in its own reviewed change and update the expected universe contract intentionally.
+Any universe or candidate-cap change must occur in its own reviewed phase with updated regression contracts.
 
 ## Current alert contract
 
@@ -56,7 +58,7 @@ A SNIPE does not need a score of 100. STARTER and NEAR_ENTRY remain legitimate d
 
 The scanner is a bullish swing-entry engine, not a scalper and not a pattern collector.
 
-Research objective: identify entries with a realistic structural/volatility path to approximately +8% within five trading sessions, subject to structural invalidation. This remains an evaluation target, never a promised forecast.
+Research objective: identify entries with a realistic structural/volatility path to approximately +8% within five trading sessions, subject to structural invalidation. This is an evaluation target, never a promised forecast.
 
 ## Locked setup families
 
@@ -65,7 +67,7 @@ Research objective: identify entries with a realistic structural/volatility path
 3. `SMA_CRADLE_CONTINUATION`
 4. `GAP_FILL_REVERSAL`
 
-Family labels may improve model admission/ranking only within the reviewed SFC rules. They never bypass fatal common gates or create capital permission by themselves. Cross-family confluence never stacks scores; execution proof remains primary.
+Family evidence may improve model admission/ranking only within reviewed SFC rules. It never bypasses fatal common gates or creates capital permission by itself. Cross-family confluence never stacks scores; execution proof remains primary.
 
 ## R4H — real 4H authority program
 
@@ -90,13 +92,13 @@ Before any real-4H authority handoff, a reviewed evidence package must establish
 7. legitimate opportunity recall not materially damaged;
 8. full capital-integrity regressions green.
 
-R4H-2 never auto-promotes. Even a fully green evidence package can only make a later controlled handoff eligible for review.
+R4H-2 never auto-promotes. A green evidence package can only make a later controlled handoff eligible for review.
 
 ### R4H-3A — merged
 
-R4H-3A defines a pure location-layer counterfactual contract and intentionally refuses to pretend it can replay the whole ladder from compact telemetry.
+R4H-3A defines the pure location-layer counterfactual between the production proxy and real 4H shadow evidence.
 
-Common location-effect vocabulary:
+Common effects:
 
 - `SUPPORTIVE`
 - `REPAIRING`
@@ -113,71 +115,119 @@ Comparison classes:
 - `NON_FATAL_LOCATION_DIFFERENCE`
 - `COMPARISON_UNAVAILABLE`
 
-R4H-3A joins these comparisons to VELOCITY-1D outcome rows by `(scan_id, ticker)`. It can measure the local 4H hard-failure disagreement but cannot reconstruct a final STARTER/SNIPE tier. Real 4H remains shadow.
+It joins comparisons to VELOCITY-1D rows by `(scan_id, ticker)` but explicitly cannot reconstruct a final STARTER/SNIPE verdict from the compact trace.
 
-R4H-3A merged with permanent Python 3.13 CI at **2911 passed, 4 skipped**.
+Merge CI: **2911 passed, 4 skipped**.
 
-### R4H-3B — current branch phase
+### R4H-3B — merged
 
-R4H-3B makes the R4H-3A/VELOCITY evidence statistically executable under a **predeclared** research plan without changing live authority.
+R4H-3B scores the location-layer counterfactual under an explicit predeclared chronological study plan.
 
 Outcome law:
 
-- `TARGET_FIRST`, `INVALIDATION_FIRST`, `TIME_BARRIER` are evaluable terminal outcomes for the five-session/+8% objective;
+- `TARGET_FIRST`, `INVALIDATION_FIRST`, `TIME_BARRIER` are evaluable terminal outcomes;
 - `AMBIGUOUS_SAME_SESSION` is ambiguous;
 - `INCOMPLETE_HORIZON` is censored;
-- `INVALID_DATA` is invalid;
-- ambiguous/censored/invalid rows never become fabricated wins or losses.
+- `INVALID_DATA` is invalid.
 
-The plan must explicitly declare and freeze sample/completeness thresholds before outcome review. No numeric trading/sample threshold is invented by the engine after seeing results.
+For `REAL_ADDS_HARD_BLOCK`, invalidation/time outcomes are objective-failure protection evidence and target outcomes are target opportunity cost. For `REAL_REMOVES_PROXY_HARD_BLOCK`, target outcomes are recovery evidence and invalidation/time outcomes are objective-failure exposure.
 
-R4H-3B reports:
+R4H-3B also reports non-fatal real states separately, applies sample/completeness thresholds, and requires separately auditable condition coverage before a narrow handoff review can be marked ready.
 
-- objective-failure protection versus target opportunity cost when real 4H adds a hard block;
-- target recovery versus objective-failure exposure when real 4H removes a proxy hard block;
-- separate outcome distributions for real `SUPPORTIVE`, `REPAIRING`, `NO_EDGE`, `EXTENDED`, and `UNAVAILABLE` states;
-- sample readiness against the predeclared plan;
-- separately auditable market-condition coverage when supplied;
-- optional predeclared effect-threshold evaluation.
+Full-tier reconstruction and full 4H replacement remain unsupported.
 
-Study decisions are research-only: `PLAN_INVALID`, `SAMPLE_INSUFFICIENT`, `DESCRIPTIVE_ONLY`, `NARROW_HARD_BLOCK_EVIDENCE_SUPPORTIVE`, or `NARROW_HARD_BLOCK_EVIDENCE_NOT_SUPPORTIVE`.
+Merge CI: **2925 passed, 4 skipped**.
 
-Even a supportive narrow result does not grant authority. Full-tier counterfactual and full 4H replacement remain explicitly unsupported in this phase.
+### R4H-3C — current branch phase
+
+R4H-3C locks the **forward** research design before the evaluation window begins.
+
+Independent sampling law:
+
+`FIRST_OBSERVATION_PER_TICKER_SESSION`
+
+Repeated 15-minute observations from the same ticker/session are not counted as independent evidence. The earliest valid observation survives, chosen from chronology/identity only and without reading the future outcome label.
+
+Timestamp law:
+
+- `observed_at` must be offset-aware;
+- UTC is used for absolute ordering;
+- ticker/session identity uses the calendar date encoded in the original timestamp offset, preventing UTC rollover from reassigning a session.
+
+Chart-native condition coverage uses persisted real-4H structural state only:
+
+- `TRENDING` = `EXPANSION` or `CONTINUATION`
+- `COMPRESSION`
+- `REPAIR`
+- `TRANSITION`
+- `FAILURE`
+- `UNKNOWN`
+
+Uncertainty law:
+
+- point estimates are not enough;
+- intervention proportions receive predeclared two-sided Wilson confidence intervals;
+- narrow handoff review readiness requires both the point-effect rules and confidence-bound rules to pass.
+
+Committed forward plan: `research/plans/r4h3_forward_oos_v1.json`.
+
+Declared evaluation window:
+
+- start: **2026-08-20**
+- end: **2026-09-30**
+- confidence level: **95%**
+- no early stop because interim estimates look favorable
+- final evaluation only after the end-date cohort has enough future completed sessions to mature its five-session VELOCITY label
+
+Predeclared v1 minimums:
+
+- 150 evaluable independent observations overall;
+- 40 `REAL_ADDS_HARD_BLOCK` evaluable observations;
+- 30 `REAL_REMOVES_PROXY_HARD_BLOCK` evaluable observations;
+- <=15% ambiguous/censored;
+- <=10% unavailable comparison;
+- condition coverage: TRENDING 40, COMPRESSION 15, REPAIR 25, TRANSITION 15, FAILURE 5.
+
+Point-effect requirements:
+
+- real-adds-block protection >=70%;
+- real-adds-block target cost <=30%;
+- real-removes-block target recovery >=60%;
+- real-removes-block objective-failure exposure <=40%.
+
+95% Wilson-bound requirements:
+
+- real-adds protection lower bound >=60%;
+- real-adds target-cost upper bound <=40%;
+- real-removes recovery lower bound >=50%;
+- real-removes failure-exposure upper bound <=50%.
+
+Even a fully passing R4H-3C report is research-only and can only justify opening a separately reviewed narrow-authority handoff branch. It cannot change runtime authority itself.
 
 ## VELOCITY-1 — five-session / +8% research stack
 
-### VELOCITY-1A — merged
-
-Pure ex-ante feasibility and ex-post three-barrier research contract. CI at merge: **2853 passed, 4 skipped**.
-
-### VELOCITY-1B — merged
-
-Immutable scan-time observation envelope preserving geometry, observed tier/capital truth, setup-family attribution, real-4H/proxy context and feasibility without future leakage. CI: **2870 passed, 4 skipped**.
-
-### VELOCITY-1C — merged
-
-Bounded additive scan-telemetry projection below 1 KB, failure-isolated from the normal 14V trace, with zero live tier/capital/routing/suppression/forecast authority. CI: **2876 passed, 4 skipped**.
-
-### VELOCITY-1D — merged
-
-Offline chronological linker from scan-time observations to completed future Daily sessions. Observation-day bars are excluded; duplicate/conflicting data is handled explicitly; partial history remains incomplete rather than false timeout. Local-only CLI produces deterministic research datasets. CI: **2892 passed, 4 skipped**.
+- VELOCITY-1A: pure feasibility + three-barrier contract. CI: **2853 passed, 4 skipped**.
+- VELOCITY-1B: immutable scan-time observation envelope. CI: **2870 passed, 4 skipped**.
+- VELOCITY-1C: bounded additive scan telemetry with zero live authority. CI: **2876 passed, 4 skipped**.
+- VELOCITY-1D: offline observation-to-future-Daily chronological linker. CI: **2892 passed, 4 skipped**.
 
 ## Candidate-cap decision: 30 vs 40
 
 Current production cap remains **30 deep-analysis candidates per scan**.
 
-The preferred next ceiling is 40 only if measured evidence proves incremental opportunity recall without unacceptable cadence/cost impact. A move from 30 to 40 is a 33.3% increase in maximum model calls.
+The next candidate ceiling is 40 only if measured evidence proves incremental opportunity recall without unacceptable cadence/cost impact. A move from 30 to 40 is a 33.3% increase in maximum model calls.
 
-Near-cut telemetry records ranks 31-60, but full VELOCITY observations currently apply to analyzed candidates. CAP-40 therefore still needs its own measured replay/study rather than assuming ranks 31-40 are beneficial.
+Near-cut telemetry records ranks 31-60, but full VELOCITY observations currently apply to analyzed candidates. CAP-40 therefore needs its own measured design/replay rather than assuming ranks 31-40 are beneficial.
 
 ## Next production sequence
 
-1. R4H-3B: complete and merge the predeclared chronological outcome-study engine/report generator.
-2. Collect/run a real R4H-3B dataset under a frozen plan. If evidence is insufficient, remain shadow and keep collecting.
-3. If evidence is strong enough, design a separately reviewed **narrow** R4H authority handoff scope before considering broader replacement.
-4. CAP-40: measured 30-vs-40 capacity study; raise only if recall/cadence/cost evidence clears review.
-5. Final requested universe expansion in its own reviewed PR.
-6. Chronological replay/out-of-sample validation and Railway observation.
+1. R4H-3C: complete and merge forward independence/coverage/uncertainty design with zero live authority.
+2. Allow the declared R4H forward window to accrue from 2026-08-20 through 2026-09-30 and then allow the final cohort's five-session outcome horizon to mature.
+3. Run the independent R4H-3C report only after the planned window matures. Do not use favorable interim evidence to stop early.
+4. If sample, condition coverage, point effects and Wilson bounds all pass, open a **separate narrow authority-handoff review**; otherwise remain shadow and continue evidence collection under a new reviewed plan if needed.
+5. While the R4H forward window accrues, CAP-40 may proceed as a separate measured capacity/replay phase because it does not require premature 4H authority.
+6. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint.
+7. Railway production observation remains part of final operational validation; no direct Railway connector is available in the current chat environment.
 
 ## Things that must NOT drift
 
@@ -190,8 +240,8 @@ Near-cut telemetry records ranks 31-60, but full VELOCITY observations currently
 - VELOCITY/R4H research evidence cannot promote, downgrade, route, suppress, size, or forecast a trade;
 - no disabled indicator may be reintroduced;
 - no family organ may treat a level touch as an entry;
-- no setup-family phase may casually change universe membership;
-- cross-family confluence may not stack family scores;
+- setup-family work may not casually change universe membership;
+- cross-family confluence may not stack scores;
 - proxy agreement is not ground truth;
 - model-provider work may not silently change strategy thresholds, capital rules, routing, cooldown or universe.
 
