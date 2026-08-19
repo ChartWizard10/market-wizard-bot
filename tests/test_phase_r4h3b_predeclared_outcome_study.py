@@ -11,7 +11,7 @@ def _plan(**overrides):
     base = {
         "name": "r4h-location-study",
         "version": "1",
-        "frozen_before_outcome_review": True,
+        "predeclared_before_outcome_review": True,
         "chronological_out_of_sample": True,
         "min_evaluable_records": 4,
         "min_real_adds_hard_block_evaluable": 2,
@@ -59,15 +59,16 @@ def _supportive_rows():
     ]
 
 
-def test_plan_requires_explicit_frozen_chronological_sample_rules():
+def test_plan_requires_explicit_predeclared_chronological_sample_rules():
     invalid = study.validate_study_plan({"name": "x", "version": "1"})
     assert invalid["valid"] is False
-    assert "PLAN_NOT_FROZEN_BEFORE_OUTCOME_REVIEW" in invalid["errors"]
+    assert "PLAN_NOT_PREDECLARED_BEFORE_OUTCOME_REVIEW" in invalid["errors"]
     assert "CHRONOLOGICAL_OUT_OF_SAMPLE_NOT_DECLARED" in invalid["errors"]
     assert any("min_evaluable_records" in err for err in invalid["errors"])
 
     valid = study.validate_study_plan(_plan())
     assert valid["valid"] is True
+    assert valid["predeclared_before_outcome_review"] is True
     assert valid["sample_thresholds"]["min_evaluable_records"] == 4
 
 
@@ -183,7 +184,7 @@ def test_report_is_descriptive_when_sample_is_ready_but_effect_plan_absent():
     assert report["narrow_hard_block_handoff_review_ready"] is False
 
 
-def test_report_can_mark_narrow_evidence_supportive_but_never_grants_authority():
+def test_effect_pass_without_condition_coverage_cannot_be_handoff_ready():
     plan = _plan(
         max_real_adds_block_target_opportunity_cost_pct=0,
         min_real_adds_block_objective_failure_protection_pct=100,
@@ -192,8 +193,29 @@ def test_report_can_mark_narrow_evidence_supportive_but_never_grants_authority()
     )
     report = study.build_study_report(_dataset(_supportive_rows()), plan)
 
+    assert report["effect_evaluation"]["accepted"] is True
+    assert report["market_condition_coverage"]["required"] is False
+    assert report["study_decision"] == study.STUDY_NARROW_NOT_SUPPORTIVE
+    assert report["narrow_hard_block_handoff_review_ready"] is False
+
+
+def test_report_can_mark_narrow_evidence_supportive_but_never_grants_authority():
+    plan = _plan(
+        max_real_adds_block_target_opportunity_cost_pct=0,
+        min_real_adds_block_objective_failure_protection_pct=100,
+        min_real_removes_block_target_recovery_pct=100,
+        max_real_removes_block_objective_failure_exposure_pct=0,
+        market_condition_minimums={"TREND": 2, "CHOP": 1},
+    )
+    report = study.build_study_report(
+        _dataset(_supportive_rows()),
+        plan,
+        coverage_counts={"TREND": 3, "CHOP": 2},
+    )
+
     assert report["study_decision"] == study.STUDY_NARROW_SUPPORTIVE
     assert report["narrow_hard_block_handoff_review_ready"] is True
+    assert report["market_condition_coverage"]["accepted"] is True
     assert report["capital_authority"] is False
     assert report["tier_authority"] is False
     assert report["automatic_promotion"] is False
@@ -228,6 +250,7 @@ def test_full_r4h2_promotion_flags_remain_unsatisfied_by_location_only_study():
     assert flags["outcome_linked"] is True
     assert flags["counterfactual_proxy_vs_real"] is True
     assert flags["sample_size_accepted_under_predeclared_plan"] is True
+    assert flags["market_condition_coverage_accepted"] is False
     assert flags["real_4h_improves_or_preserves_precision"] is False
     assert flags["real_4h_does_not_materially_damage_recall"] is False
     assert flags["capital_integrity_regressions_green"] is False
