@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src import indicators
+from src import indicators, tiering
 from src.claude_client import build_prompt
 from src.prefilter import prefilter, score_ticker
 
@@ -111,10 +111,9 @@ def _base_enriched(ticker="TEST", **overrides):
     return out
 
 
-def test_family_admitted_candidate_can_repair_generic_structure_midrange_blind_spot():
-    cfg = _config()
-    enriched = _base_enriched(
-        ticker="VCPX",
+def _family_blind_spot_enriched(ticker="VCPX", **overrides):
+    out = _base_enriched(
+        ticker=ticker,
         structure_event="none",
         fvg=None,
         ob=None,
@@ -124,16 +123,31 @@ def test_family_admitted_candidate_can_repair_generic_structure_midrange_blind_s
         estimated_rr=None,
         setup_family_evidence=_family_evidence(),
     )
-    result = score_ticker(enriched, cfg)
+    out.update(overrides)
+    return out
 
-    assert "no_clear_structure" in result["veto_flags"]
-    assert "mid_range_no_edge" in result["veto_flags"]
+
+def test_family_admitted_candidate_repairs_generic_blind_spot_without_erasing_audit_truth():
+    cfg = _config()
+    result = score_ticker(_family_blind_spot_enriched(), cfg)
+
+    assert "no_clear_structure" in result["original_veto_flags"]
+    assert "mid_range_no_edge" in result["original_veto_flags"]
+    assert "no_clear_invalidation_estimate" in result["original_veto_flags"]
+    assert "no_target_path" in result["original_veto_flags"]
+    assert result["veto_flags"] == []
+    assert result["effective_admission_vetoes"] == []
+    assert set(result["rescued_veto_flags"]) >= {
+        "no_clear_structure",
+        "mid_range_no_edge",
+        "no_clear_invalidation_estimate",
+        "no_target_path",
+    }
     assert result["eligible_for_model"] is True
     assert result["eligible_for_claude"] is True
     assert result["admission_source"] == "family"
     assert result["family_admission"]["admitted_by_family"] is True
-    assert "no_clear_structure" in result["family_admission"]["rescued_vetoes"]
-    assert result["veto_flags"]
+    assert result["key_features"]["original_prefilter_vetoes"] == result["original_veto_flags"]
 
 
 def test_family_never_rescue_overhead_blocker_still_rejects_candidate():
@@ -144,13 +158,14 @@ def test_family_never_rescue_overhead_blocker_still_rejects_candidate():
     )
     result = score_ticker(enriched, cfg)
 
+    assert "overhead_blocked" in result["original_veto_flags"]
     assert "overhead_blocked" in result["veto_flags"]
     assert "overhead_blocked" in result["effective_admission_vetoes"]
     assert result["eligible_for_model"] is False
     assert result["admission_source"] == "none"
 
 
-def test_no_family_evidence_preserves_legacy_prefilter_eligibility_and_score():
+def test_no_family_evidence_preserves_legacy_prefilter_eligibility_score_and_veto_semantics():
     cfg = _config()
     enriched = _base_enriched()
     baseline = score_ticker(enriched, cfg)
@@ -161,14 +176,50 @@ def test_no_family_evidence_preserves_legacy_prefilter_eligibility_and_score():
     assert baseline["admission_source"] == "legacy"
     assert baseline["admission_rank_score"] == baseline["prefilter_score"]
     assert baseline["family_admission"]["active"] is False
+    assert baseline["veto_flags"] == baseline["original_veto_flags"]
+
+
+def test_rescued_prefilter_blind_spot_does_not_poison_downstream_tiering():
+    cfg = _config()
+    pf = score_ticker(_family_blind_spot_enriched(), cfg)
+    assert pf["original_veto_flags"]
+    assert pf["veto_flags"] == []
+
+    # Family admission itself grants no capital. A fresh downstream signal must
+    # independently prove the existing STARTER execution contract.
+    raw_signal = {
+        "ticker": "VCPX",
+        "timestamp_et": "2026-08-19T10:30:00-04:00",
+        "tier": "STARTER",
+        "score": 80,
+        "setup_family": "compression_to_expansion",
+        "structure_event": "accepted_break",
+        "trend_state": "fresh_expansion",
+        "sma_value_alignment": "supportive",
+        "zone_type": "support_cluster",
+        "trigger_level": 100.0,
+        "retest_status": "confirmed",
+        "hold_status": "confirmed",
+        "invalidation_condition": "below defended family structure",
+        "invalidation_level": 96.0,
+        "targets": [{"label": "T1", "level": 112.0, "reason": "family target path"}],
+        "risk_reward": 3.0,
+        "overhead_status": "clear",
+        "forced_participation": "developing",
+        "missing_conditions": [],
+        "upgrade_trigger": "break and hold above next pivot",
+        "next_action": "starter only",
+        "discord_channel": "#starter-signals",
+        "capital_action": "starter_only",
+        "reason": "Family candidate independently proved starter execution gates.",
+    }
+    validated = tiering.validate(raw_signal, pf, cfg)
+    assert validated["final_tier"] == "STARTER"
+    assert validated["capital_action"] == "starter_only"
 
 
 def test_family_rank_repairs_selection_priority_without_overwriting_prefilter_score():
     cfg = _config()
-    # A legitimate legacy candidate, but not a perfect 100-point specimen. The
-    # family lane should be able to outrank this when deterministic family
-    # evidence is materially stronger; it must not be expected to outrank a
-    # genuinely higher-scoring legacy candidate merely because a family exists.
     legacy = _base_enriched(
         ticker="LEGACY",
         sma_value_alignment="mixed",
@@ -176,15 +227,8 @@ def test_family_rank_repairs_selection_priority_without_overwriting_prefilter_sc
         retest_status="partial",
         volume_behavior="neutral",
     )
-    family = _base_enriched(
+    family = _family_blind_spot_enriched(
         ticker="FAMILY",
-        structure_event="none",
-        fvg=None,
-        ob=None,
-        retest_status="missing",
-        invalidation_level=None,
-        targets=[],
-        estimated_rr=None,
         volume_behavior="neutral",
         setup_family_evidence=_family_evidence(score=90),
     )
@@ -279,7 +323,6 @@ def test_indicators_family_compiler_receives_completed_daily_frame_and_closed_re
             "live_row": live_row,
         },
     )
-
     monkeypatch.setattr(
         indicators,
         "assess_retest",
