@@ -20,35 +20,19 @@ disabled_indicators:
   - bollinger_bands
   - stochastic
 
-# Phase 14E.1 — dedicated 1H entry-trigger evidence engine. Separately acquired
-# 1H bars used for trigger proof only. Higher-timeframe (Weekly/Daily/4H) remains
-# sovereign; the 1H never creates the thesis. Evidence/display-layer only.
 one_hour:
   enabled: true
   interval: "60m"
   lookback_period: "1mo"
   max_bars: 80
 
-# Phase 14F — multi-timeframe alignment evidence object. Audit/display ledger
-# recording Weekly/Daily/4H/1H alignment in one place. Evidence-only: never
-# promotes, routes, authorizes capital, or mutates scanner behavior. Weekly is
-# inferred (no standalone weekly bars acquired); 4H uses the trade_location proxy.
 timeframe_alignment:
   enabled: true
 
-# Phase 14H — SNIPE_IT gate audit. Read-only diagnostic flight-recorder that
-# explains why a candidate did or did not qualify for SNIPE_IT. Never promotes,
-# downgrades, routes, or mutates scanner behavior. Compact Discord line is OFF by
-# default (no alert bloat); the object is always stored on tiering_result.
 snipe_gate_audit:
   enabled: true
   render_compact_line: false
 
-# Phase 14I — monthly/weekly structural memory engine. Resamples existing daily
-# bars into completed weekly/monthly context (campaign bias, dynamic SMA
-# support, HTF zones, bounce vs mid-range vs supply). Evidence-first: never
-# promotes SNIPE_IT, never mutates tier/capital. influence_tiering stays false in
-# this phase; compact alert line off by default; compact history snapshot on.
 higher_timeframe_context:
   enabled: true
   lookback_months: 60
@@ -58,12 +42,6 @@ higher_timeframe_context:
   influence_tiering: false
   persist_history_snapshot: true
 
-# Phase 14J — read-only operator audit-access bridge. Lets an authorized
-# operator retrieve compact alert_history evidence (tier/capital/score, 1H proxy
-# fields, snipe_gate_audit + higher_timeframe_context snapshots) by scan_id or
-# ticker via `!audit`. READ-ONLY: never writes/resets state, never changes
-# tiering/scoring/routing/suppression/dedup. Disabled by default until an
-# operator user ID or admin channel ID is configured (conservative gating).
 audit_access:
   enabled: true
   allowed_user_ids: []
@@ -72,9 +50,9 @@ audit_access:
   max_rows: 3
 
 prefilter:
-  # Historical key name is retained during AI-1 so a provider migration cannot
-  # also become a capacity/schema migration. It means DEEP-ANALYSIS candidates.
-  # CAP-40 is a separate measured phase; production remains 30 for now.
+  # Historical key name is retained during AI-1 so provider migration is not
+  # combined with a capacity/telemetry schema migration. It means deep-analysis
+  # candidates. CAP-40 is separately measured; production remains 30 for now.
   max_claude_candidates_per_scan: 30
   prefilter_min_score: 55
 
@@ -124,9 +102,8 @@ discord:
   near_entry_channel_id: 1497532274470551693
   scan_log_channel_id: null
 
-# AI-1 — canonical production deep-analysis model configuration.
-# OPENAI_MODEL may override `name` at Railway runtime. GPT-5.6 is the analyst;
-# deterministic tiering, ladder, seal and capital contracts remain sovereign.
+# AI-1 canonical production model configuration. The OpenAI compatibility
+# adapter reads this block directly and ignores the historical Claude model ID.
 model:
   provider: "openai"
   name: "gpt-5.6"
@@ -136,23 +113,18 @@ model:
   min_seconds_between_calls: 1
   max_input_tokens_per_minute_budget: 250000
 
-# Historical scheduler compatibility configuration. The hardened scheduler still
-# reads these pacing keys while AI-1 changes provider without combining that
-# migration with a telemetry/schema rewrite. The actual provider is OpenAI.
-# A later provider-neutral nomenclature phase may remove this block.
+# HISTORICAL TEST/COMPATIBILITY CONTRACT ONLY. Production main.py does not
+# instantiate Anthropic, and the OpenAI adapter ignores this model ID. These
+# values remain byte-semantically compatible with Phase MR-1 while AI-1 changes
+# the actual provider. Provider-neutral scheduler naming is a later phase.
 claude:
-  model: "gpt-5.6"
+  model: "claude-sonnet-4-6"
   max_tokens: 1200
-  max_concurrent_calls: 1
+  max_concurrent_calls: 8
   claude_concurrency: 1
-  claude_min_seconds_between_calls: 1
-  claude_max_input_tokens_per_minute_budget: 250000
+  claude_min_seconds_between_calls: 4
+  claude_max_input_tokens_per_minute_budget: 25000
 
-# Phase 14V — scan-time funnel telemetry retention. OBSERVABILITY ONLY:
-# nothing in this block influences tiering, capital, routing, suppression,
-# candidate admission, or cadence. Telemetry lives in its own file
-# (.state/scan_telemetry.json) so a malformed telemetry write can never
-# corrupt alert_history.json.
 telemetry:
   max_scan_summaries: 300
   max_decision_traces: 9000
