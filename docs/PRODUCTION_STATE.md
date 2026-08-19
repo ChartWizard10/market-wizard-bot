@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering SFC-2B: `main` at `744cd38f2fda060c1eb9b4f1bb344500ff78bee6` (Phase SFC-2A — setup-family admission arbitration contract, on top of OpenAI GPT-5.6 AI-1 runtime).
+Last merged production baseline entering CFR-2: `main` at `26e3a3ddf288e8559485c6bc31cb10c095401226` (Phase CFR-1 — pure cross-family confluence/contradiction resolver contract, on top of production-green SFC-2B family-aware admission wiring and OpenAI GPT-5.6 AI-1 runtime).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -18,6 +18,8 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - Autoscan and manual `!analyze` share the same post-tiering candidate-judgment organ.
 - Phase SFC-1 compiles normalized completed-Daily evidence for all four locked setup families.
 - Phase SFC-2A defines the pure family-admission arbitration contract.
+- Phase SFC-2B wires family-aware model admission/ranking into production while preserving common gates and downstream tier authority.
+- Phase CFR-1 defines the pure cross-family resolution contract and tier non-interference tests.
 - Scan-funnel telemetry is isolated from alert history and remains observational only.
 - Production ticker loader normalizes uppercase symbols, ignores blanks/comments, deduplicates, validates format, and never fetches market data.
 
@@ -119,6 +121,53 @@ Implemented contract:
 
 This solves a critical integration trap: a family candidate may be worth GPT-5.6 analysis even when the generic scorer cannot express its structure, but a rescued generic blocker must not remain active and mechanically force WAIT before downstream execution proof is evaluated. The original generic evidence remains preserved for audit rather than deleted.
 
+### CFR-1 — cross-family resolver contract
+
+CFR-1 is merged and production-green as a **pure contract**. It does not by itself alter the runtime family evidence path.
+
+Resolver taxonomy:
+
+- `NONE`
+- `SINGLE`
+- `CONFLUENT`
+- `COMPATIBLE`
+- `AMBIGUOUS`
+- `CONTRADICTORY`
+- `ALL_FAILED`
+
+Conflict scope is classified as `NONE`, `LOCAL`, or `SHARED`.
+
+Core laws:
+
+- execution proof outranks a merely higher family score;
+- confluence never stacks scores;
+- a local sibling-family failure does not automatically cancel a valid distinct family;
+- shared/common failure information remains visible for existing sovereign gates;
+- reconciliation deep-copies the compiled summary and preserves raw per-family objects;
+- resolver metadata has no independent tier, capital, or Discord authority.
+
+Tier-contract regressions prove confluence cannot upgrade STARTER to SNIPE, local sibling failure metadata cannot independently downgrade a valid execution, resolver metadata alone cannot alter tier output, and active common vetoes remain sovereign.
+
+### CFR-2 — production resolver wiring
+
+CFR-2 is the current branch phase.
+
+Target production evidence flow:
+
+`completed Daily evidence -> raw SFC-1 compiler -> CFR-1 resolver -> SFC-2B admission / GPT-5.6 context -> existing deterministic execution stack`
+
+CFR-2 implementation boundary:
+
+- `src/setup_family_runtime.py` is the package-level production facade;
+- raw `src.setup_family_compiler` remains unchanged for deterministic low-level tests;
+- package-level `from src import setup_family_compiler` resolves through the CFR-2 facade so `indicators.enrich()` receives reconciled evidence without changing Daily confirmation law;
+- resolved primary selection is execution-proof-first rather than raw-score-first;
+- cross-family relationship/conflict context is projected into a namespaced `cross_family_resolution` object inside the deep-copied resolved primary metrics, which the existing GPT-5.6 prompt already serializes;
+- raw SFC-1 family objects are not mutated;
+- no new tier, score-stacking, routing, or capital authority is introduced.
+
+CFR-2 must merge only after the permanent Python 3.13 production gate proves all legacy regressions plus its production-wiring tests.
+
 ## Candidate-cap decision: 30 vs 40
 
 Current production cap remains **30 deep-analysis candidates per scan**.
@@ -130,8 +179,8 @@ A move from 30 to 40 is a 33.3% increase in maximum model calls. The scanner rec
 CAP-40 acceptance sequence:
 
 1. keep GPT-5.6 runtime green;
-2. complete and merge SFC-2 family-aware admission;
-3. replay/inspect family-aware ranks 31-40 for legitimate missed NEAR/STARTER/SNIPE opportunities;
+2. complete and merge the family-aware stack through CFR-2;
+3. replay/inspect resolved family-aware ranks 31-40 for legitimate missed NEAR/STARTER/SNIPE opportunities;
 4. measure target/stop/time-barrier outcomes where labels are available;
 5. verify worst-case scan duration remains comfortably inside the 15-minute cadence;
 6. verify API rate/cost budget is acceptable;
@@ -141,13 +190,12 @@ Do not use a larger model-call cap to compensate for weak candidate ranking.
 
 ## Next production sequence
 
-1. Merge SFC-2B only after the permanent production gate is green.
-2. Cross-family contradiction resolver and tier contract tests.
-3. R4H-2: evidence-based decision on promoting real 4H from shadow to production authority.
-4. VELOCITY-1: five-session/+8% feasibility layer and three-barrier validation labels.
-5. CAP-40: measured 30-vs-40 capacity study and, if proven, controlled cap increase.
-6. Final requested universe expansion in its own reviewed PR.
-7. Chronological replay/out-of-sample validation and Railway observation.
+1. CFR-2: complete and merge production cross-family resolver wiring.
+2. R4H-2: evidence-based decision on promoting real 4H from shadow to production authority.
+3. VELOCITY-1: five-session/+8% feasibility layer and three-barrier validation labels.
+4. CAP-40: measured 30-vs-40 capacity study and, if proven, controlled cap increase.
+5. Final requested universe expansion in its own reviewed PR.
+6. Chronological replay/out-of-sample validation and Railway observation.
 
 ## Things that must NOT drift
 
@@ -160,6 +208,8 @@ Do not use a larger model-call cap to compensate for weak candidate ranking.
 - no disabled indicator may be reintroduced;
 - no family organ may treat a level touch as an entry;
 - no setup-family phase may casually change universe membership;
+- cross-family confluence may not stack family scores;
+- a resolver may not become a tier/capital/routing organ;
 - model-provider work may not silently change strategy thresholds, capital rules, routing, cooldown, or universe.
 
 ## Operational debt tracked but not blocking the next phase
