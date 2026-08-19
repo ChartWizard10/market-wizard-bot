@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering AI-1: `main` at `6e251a933835e1e24e2dcb2c02ddeea539453521` (Phase SFC-1 — deterministic setup family compiler).
+Last merged production baseline entering SFC-2A: `main` at `99d98080dfa5452df00cf8794ef0741c1d7aa1d2` (Phase AI-1 — OpenAI GPT-5.6 production runtime, built on Phase SFC-1).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -20,13 +20,11 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - Scan-funnel telemetry is isolated from alert history and remains observational only.
 - Production ticker loader normalizes uppercase symbols, ignores blanks/comments, deduplicates, validates format, and never fetches market data.
 
-## AI-1 provider correction
+## AI-1 provider correction — merged
 
-Operator intent and governing production target: **OpenAI GPT-5.6**.
+Production deep analysis is **OpenAI GPT-5.6**, not Claude.
 
-AI-1 is migrating the actual deep-analysis runtime away from Anthropic while preserving the hardened scanner judgment architecture.
-
-Target runtime contract:
+Runtime contract:
 
 - `OPENAI_API_KEY` authenticates the model client;
 - `OPENAI_MODEL` may override the configured model;
@@ -36,7 +34,7 @@ Target runtime contract:
 - response storage disabled (`store=False`);
 - GPT-5.6 remains analyst/classifier only; deterministic tiering, ladder, seal, capital and routing remain sovereign.
 
-During AI-1, some internal scheduler/telemetry field names still contain historical `claude_*` terminology for regression compatibility. Those names do **not** mean Anthropic is the production provider. Provider-neutral nomenclature can be migrated separately after the runtime cutover is green.
+Some internal scheduler/telemetry field names still contain historical `claude_*` terminology for regression compatibility. Those names do **not** mean Anthropic is the production provider. Provider-neutral nomenclature is tracked as operational debt and must be migrated separately without strategy drift.
 
 ## Current production universe
 
@@ -83,15 +81,34 @@ Research objective: identify entries with a realistic structural/volatility path
 3. `SMA_CRADLE_CONTINUATION`
 4. `GAP_FILL_REVERSAL`
 
-### Current implementation status
+### SFC-1 — compiler status
 
-Phase SFC-1 now provides a normalized deterministic evidence compiler for all four families from completed Daily evidence.
+SFC-1 provides a normalized deterministic evidence compiler for all four families from completed Daily evidence.
 
-That compiler is intentionally evidence-only. The next setup-family phase must integrate family evidence into broad-universe admission/readiness without allowing a family label to bypass the common execution laws: accepted structure, defensible location, invalidation, path, retest/hold requirements appropriate to the entry class, and final capital gates.
+The compiler remains evidence-first. A family label is never capital authority.
+
+### SFC-2A — admission arbitration contract
+
+SFC-2A defines, as a pure side-effect-free module, how strong family evidence may repair **generic prefilter/model-admission blind spots** without bypassing common fatal gates.
+
+Key laws:
+
+- bad/empty/insufficient/stale data is never rescued;
+- blocked overhead is never rescued;
+- excessive extension is never rescued;
+- failed retest is never rescued;
+- hostile value alignment is never rescued;
+- generic no-structure/mid-range blockers may be superseded for model admission when a normalized family is admission-ready;
+- missing generic invalidation/target/R:R can be superseded only when the family compiler provides explicit valid equivalents;
+- `watch_ready` alone is not enough to open the family lane;
+- family rank influence never overwrites the legacy prefilter score and is bounded;
+- the family-admission object contains no tier, capital or Discord authority.
+
+SFC-2A itself does not yet change production candidate selection. SFC-2B is the controlled wiring phase after the SFC-2A contract is green.
 
 ## Candidate-cap decision: 30 vs 40
 
-Current production cap remains **30 deep-analysis candidates per scan** during AI-1.
+Current production cap remains **30 deep-analysis candidates per scan**.
 
 The operator proposed 40 and delegated the engineering decision. The preferred next ceiling is **40 if measured evidence proves it adds recall without damaging cadence/cost**.
 
@@ -99,19 +116,19 @@ A move from 30 to 40 is a 33.3% increase in maximum model calls. The scanner alr
 
 CAP-40 acceptance sequence:
 
-1. finish GPT-5.6 runtime migration;
-2. integrate the setup-family compiler into candidate admission/readiness;
+1. keep GPT-5.6 runtime green;
+2. complete SFC-2 family admission/readiness integration;
 3. replay/inspect ranks 31-40 for legitimate missed STARTER/SNIPE opportunities;
 4. verify worst-case scan duration remains comfortably inside the 15-minute cadence;
 5. verify API rate/cost budget is acceptable;
 6. raise to 40 only if incremental opportunity capture is real.
 
-Do not use a larger model-call cap to compensate for weak prefilter logic.
+Do not use a larger model-call cap to compensate for weak candidate ranking.
 
 ## Next production sequence
 
-1. Complete AI-1 GPT-5.6 runtime migration and full CI.
-2. SFC-2: integrate normalized setup-family evidence into admission/readiness without bypassing common gates.
+1. SFC-2A: green the pure family-admission arbitration contract.
+2. SFC-2B: wire normalized family evidence into prefilter/model admission and GPT-5.6 prompt context while preserving common gates and the 30-candidate cap.
 3. Cross-family contradiction resolver and tier contract tests.
 4. R4H-2: evidence-based decision on promoting real 4H from shadow to production authority.
 5. VELOCITY-1: five-session/+8% feasibility layer and three-barrier validation labels.
@@ -130,13 +147,13 @@ Do not use a larger model-call cap to compensate for weak prefilter logic.
 - no disabled indicator may be reintroduced;
 - no family organ may treat a level touch as an entry;
 - no setup-family phase may casually change universe membership;
-- model-provider migration may not change strategy thresholds, capital rules, routing, cooldown, or universe.
+- model-provider work may not silently change strategy thresholds, capital rules, routing, cooldown, or universe.
 
 ## Operational debt tracked but not blocking the next phase
 
 - `datetime.utcnow()` deprecation warnings under Python 3.13 should be migrated deliberately in a dedicated timestamp phase.
 - Root historical artifacts (`bot.py`, legacy PDFs) are not the governing runtime path; do not modify/delete them casually without a dedicated cleanup review.
-- Historical `claude_*` internal naming should be migrated to provider-neutral names after AI-1 without changing behavior.
+- Historical `claude_*` internal naming should be migrated to provider-neutral names without changing behavior.
 
 ## Stop condition before universe expansion
 
