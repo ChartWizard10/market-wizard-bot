@@ -140,6 +140,7 @@ async def model_call(
         "instructions": system_prompt,
         "input": prompt_text,
         "max_output_tokens": max_output_tokens,
+        "store": False,
         "text": {
             "format": {
                 "type": "json_schema",
