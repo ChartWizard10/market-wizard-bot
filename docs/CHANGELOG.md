@@ -7,7 +7,9 @@ This is a durable high-level ledger. Git history remains the detailed source.
 - Replaced stale README-as-old-bot-code with current production documentation.
 - Added scanner constitution, architecture map, production-state ledger, universe-management contract, runbook and durable changelog.
 - Recorded the locked four-family production design and explicitly identified the current setup-family compiler gap before final universe expansion.
-- No strategy, scoring, tier, routing, cadence, data-provider, universe or runtime behavior change.
+- Corrected the governing model intent: OpenAI GPT-5.6 is the target production analyst/classifier; current `main` still contains Anthropic runtime code and therefore requires an explicit AI-1 migration rather than pretending the cutover is already complete.
+- Recorded the 30-vs-40 deep-analysis decision law: keep 30 during governance/family-admission work, use existing ranks-31-60 near-cut telemetry to prove incremental recall, and prefer 40 only after GPT-5.6 migration, family-compiler completion, and latency/cost validation.
+- No strategy, scoring, tier, routing, cadence, data-provider, universe or runtime behavior change in P0 itself.
 
 ## 2026-08-19 — Phase 14W Manual Analyze Judgment Parity
 
@@ -35,10 +37,13 @@ Main commit: `472de41a78c7befc0055e121783331ab702937e3`.
 - Standardized CI to repository Python 3.13.13.
 - Added Python 3.13 synchronous asyncio compatibility for legacy unit-test harnesses only.
 
-## 2026-08-17 — Phase MR-1 Anthropic Model Routing Control
+## 2026-08-17 — Phase MR-1 Legacy Anthropic Model Routing Control
+
+Historical runtime phase, now superseded in design by the GPT-5.6 target.
 
 - Added runtime `ANTHROPIC_MODEL` override with config/default fallback.
 - Kept model selection separate from scanner doctrine and gate logic.
+- AI-1 will replace this legacy provider path with OpenAI GPT-5.6 while preserving the separation law.
 
 ## 2026-08-14 — Phase R4H-1 Real Four-Hour Operational Evidence
 
