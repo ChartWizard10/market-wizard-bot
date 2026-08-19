@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering R4H-2: `main` at `2c2bc8fdfaf82519e7488f4b78c97643ace5d7f2` (Phase CFR-2 — production cross-family resolver wiring, on top of SFC-2B family-aware GPT-5.6 admission and the existing deterministic execution stack).
+Last merged production baseline entering VELOCITY-1B: `main` at `04da12749aa70e689de8b1487a2ef2bca87eb71a` (Phase VELOCITY-1A — pure five-session/+8% feasibility and three-barrier research contract, on top of R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the existing deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -21,6 +21,7 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - SFC-2B wires family-aware model admission/ranking into production while preserving common gates and downstream tier authority.
 - CFR-1 defines the pure cross-family resolution contract and tier non-interference tests.
 - CFR-2 wires the cross-family resolver into the production family-evidence path and GPT-5.6 context without granting capital authority.
+- VELOCITY-1A defines the pure ex-ante feasibility snapshot and ex-post five-session/+8% three-barrier label without granting live authority.
 - Scan-funnel telemetry is isolated from alert history and remains observational only.
 - Production ticker loader normalizes uppercase symbols, ignores blanks/comments, deduplicates, validates format, and never fetches market data.
 
@@ -205,6 +206,50 @@ The audit never auto-promotes. A fully green evidence package may only return `E
 
 The natural dependency is VELOCITY-1: its five-session/+8% three-barrier labels provide the forward-outcome layer needed to perform the later counterfactual 4H authority study.
 
+## VELOCITY-1 — five-session / +8% research stack
+
+### VELOCITY-1A — merged
+
+VELOCITY-1A is production-green as a pure research contract. It does not participate in live tiering.
+
+It defines:
+
+- an ex-ante feasibility snapshot using known structural path room and an explicit ATR-based range-capacity proxy;
+- a fixed research objective of approximately +8% within five completed future trading sessions by default;
+- a three-barrier outcome taxonomy: `TARGET_FIRST`, `INVALIDATION_FIRST`, `AMBIGUOUS_SAME_SESSION`, `TIME_BARRIER`, `INCOMPLETE_HORIZON`, `INVALID_DATA`;
+- strict same-session ambiguity law when Daily OHLC cannot prove target-vs-stop sequence;
+- explicit separation between watch observations and capital-authorized observations;
+- attribution summaries by observed tier and setup family.
+
+VELOCITY-1A merged after the permanent Python 3.13 gate completed with **2853 passed, 4 skipped**.
+
+### VELOCITY-1B — current branch phase
+
+VELOCITY-1B defines the immutable observation envelope required before runtime telemetry wiring.
+
+The envelope joins only scan-time facts that existed before the future outcome:
+
+- scan id/time/ticker;
+- final observed tier/capital action and capital-at-observation truth;
+- reference price plus source;
+- structural invalidation and observed risk geometry;
+- resolved setup-family attribution;
+- real-4H shadow state plus legacy proxy comparison context;
+- the VELOCITY-1A feasibility snapshot;
+- an explicit persistence-readiness/missing-field ledger.
+
+Authority law:
+
+- research only;
+- no tier authority;
+- no capital authority;
+- no routing authority;
+- no forecast authority;
+- no future bars or outcome labels inside the scan-time envelope;
+- input feature/judgment objects are never mutated.
+
+After VELOCITY-1B is green and merged, VELOCITY-1C should wire this bounded envelope into scan telemetry for analyzed candidates only, preserving telemetry's isolated failure domain. VELOCITY-1D should then link completed observations to future Daily bars offline.
+
 ## Candidate-cap decision: 30 vs 40
 
 Current production cap remains **30 deep-analysis candidates per scan**.
@@ -227,12 +272,13 @@ Do not use a larger model-call cap to compensate for weak candidate ranking.
 
 ## Next production sequence
 
-1. Merge R4H-2 evidence decision with real 4H remaining shadow.
-2. VELOCITY-1: five-session/+8% feasibility layer and three-barrier validation labels.
-3. R4H authority revisit: use outcome-linked proxy-vs-real counterfactual validation before any controlled handoff.
-4. CAP-40: measured 30-vs-40 capacity study and, if proven, controlled cap increase.
-5. Final requested universe expansion in its own reviewed PR.
-6. Chronological replay/out-of-sample validation and Railway observation.
+1. VELOCITY-1B: merge the pure observation-envelope contract.
+2. VELOCITY-1C: persist the bounded ex-ante observation envelope in scan telemetry with zero judgment authority.
+3. VELOCITY-1D: offline chronological linker from observations to future Daily three-barrier outcomes.
+4. R4H authority revisit: use outcome-linked real-vs-proxy counterfactual validation before any controlled handoff.
+5. CAP-40: measured 30-vs-40 capacity study and, if proven, controlled cap increase.
+6. Final requested universe expansion in its own reviewed PR.
+7. Chronological replay/out-of-sample validation and Railway observation.
 
 ## Things that must NOT drift
 
@@ -242,6 +288,7 @@ Do not use a larger model-call cap to compensate for weak candidate ranking.
 - score cannot override failed execution gates;
 - WAIT never posts;
 - telemetry remains observational;
+- VELOCITY research evidence cannot promote, downgrade, route, suppress, size, or forecast a trade until a later reviewed validation phase explicitly grants authority;
 - no disabled indicator may be reintroduced;
 - no family organ may treat a level touch as an entry;
 - no setup-family phase may casually change universe membership;
