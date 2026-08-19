@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 from src import candle_evidence
 from src import discord_alerts
+from src import four_hour_authority
 from src import four_hour_operational
 from src import higher_timeframe_context
 from src import indicators
@@ -108,10 +109,11 @@ def _complete_candidate_judgment(
     """Run every post-tiering chart judgment for one candidate.
 
     Fixed order:
-      trajectory -> trade location -> candle evidence -> 1H trigger -> MTF
-      alignment -> real 4H shadow evidence -> HTF context -> SNIPE gate audit
-      -> SNIPE ladder -> downgrade-only seal -> final audit reconcile
-      -> score calibration.
+      trajectory -> trade location -> candle evidence -> 1H trigger -> legacy
+      operational proxy snapshot -> REAL 4H evidence -> R4H-2 operational
+      authority + reconciled MTF alignment -> HTF context -> SNIPE gate audit
+      -> SNIPE ladder -> R4H-2 capital floor -> downgrade-only seal -> final
+      audit reconcile -> score calibration.
 
     This organ deliberately does not dedup, route, send Discord messages,
     persist state, or write scan-funnel telemetry. Execution governance begins
@@ -164,8 +166,9 @@ def _complete_candidate_judgment(
         log.warning("ONE_HOUR_ENTRY_ERROR: %s: %s", ticker, exc)
         tiering_result["one_hour_entry"] = None
 
-    # Phase 14F proxy remains authoritative until R4H-2. Real 4H is attached
-    # immediately afterwards from the SAME 60m response, with zero extra fetch.
+    # Build Phase-14F once to preserve its operational proxy as a diagnostic and
+    # emergency rollback baseline. R4H-2 reconciles this object after real 4H is
+    # known; no downstream gate sees the stale proxy as authority in production.
     try:
         tiering_result["timeframe_alignment"] = timeframe_alignment.build_timeframe_alignment_context(
             ticker,
@@ -177,23 +180,53 @@ def _complete_candidate_judgment(
         log.warning("TIMEFRAME_ALIGNMENT_ERROR: %s: %s", ticker, exc)
         tiering_result["timeframe_alignment"] = timeframe_alignment.error_timeframe_alignment_object(str(exc))
 
+    # REAL 4H comes from the SAME 60m provider response already fetched for 1H.
+    # There is no second network request and no fabricated aggregation.
     try:
         env = one_hour_envelope if isinstance(one_hour_envelope, dict) else {}
-        tiering_result["four_hour_operational"] = four_hour_operational.build_four_hour_operational_context(
+        real_four_hour = four_hour_operational.build_four_hour_operational_context(
             ticker,
             tiering_result,
             enriched_data=enriched,
             four_hour_bars=env.get("four_hour"),
             config=config,
         )
-        log.info(four_hour_operational.render_four_hour_log_line(
-            ticker,
-            tiering_result["four_hour_operational"],
-            tiering_result["four_hour_operational"].get("proxy_comparison"),
-        ))
     except Exception as exc:
         log.warning("FOUR_HOUR_OPERATIONAL_ERROR: %s: %s", ticker, exc)
-        tiering_result["four_hour_operational"] = four_hour_operational.error_four_hour_object(str(exc))
+        real_four_hour = four_hour_operational.error_four_hour_object(str(exc))
+
+    proxy_operational = (
+        (tiering_result.get("timeframe_alignment") or {}).get("operational_timeframe")
+        if isinstance(tiering_result.get("timeframe_alignment"), dict)
+        else None
+    ) or timeframe_alignment.derive_operational_timeframe(
+        tiering_result.get("trade_location") or {},
+        tiering_result.get("one_hour_entry") or {},
+    )
+
+    try:
+        real_four_hour["proxy_comparison"] = four_hour_operational.compare_real_vs_proxy(
+            proxy_operational.get("state"), real_four_hour
+        )
+    except Exception as exc:
+        log.warning("FOUR_HOUR_PROXY_COMPARE_ERROR: %s: %s", ticker, exc)
+
+    tiering_result["four_hour_operational"] = real_four_hour
+    tiering_result["four_hour_authority"] = four_hour_authority.build_operational_authority(
+        real_four_hour, proxy_operational, config
+    )
+    tiering_result["timeframe_alignment"] = four_hour_authority.reconcile_timeframe_alignment(
+        tiering_result.get("timeframe_alignment"),
+        tiering_result,
+        tiering_result.get("four_hour_authority"),
+        config,
+    )
+
+    log.info(four_hour_operational.render_four_hour_log_line(
+        ticker,
+        real_four_hour,
+        real_four_hour.get("proxy_comparison"),
+    ))
 
     try:
         daily_bars = higher_timeframe_context.daily_bars_from_df(market_result.get("df"))
@@ -235,6 +268,20 @@ def _complete_candidate_judgment(
             )
     except Exception as exc:
         log.warning("SNIPE_LADDER_ERROR: %s: %s", ticker, exc)
+
+    # R4H-2 path-independent execution barrier. It can only maintain or remove
+    # capital and therefore cannot create a SNIPE/STARTER the ladder did not earn.
+    tiering_result = four_hour_authority.enforce_operational_capital_floor(
+        tiering_result, config
+    )
+    authority = tiering_result.get("four_hour_authority") or {}
+    if authority.get("capital_floor_enforced"):
+        log.warning(
+            "R4H2_CAPITAL_FLOOR: %s -> %s reason=%s",
+            ticker,
+            tiering_result.get("final_tier"),
+            authority.get("capital_floor_reason"),
+        )
 
     try:
         tiering_result = snipe_confirmed_seal.seal_snipe_confirmed_consistency(
@@ -489,8 +536,8 @@ async def run_scan_pipeline(
         ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
         previous_state = ticker_states.get(ticker) if isinstance(ticker_states, dict) else None
 
-        # apply_ladder_arbitration and seal_snipe_confirmed_consistency execute
-        # inside this shared judgment organ before any final-tier check_alert.
+        # Ladder arbitration, R4H-2 capital floor, and the downgrade-only seal
+        # all execute inside this shared judgment organ before final-tier dedup.
         tiering_result = _complete_candidate_judgment(
             ticker,
             tiering_result,

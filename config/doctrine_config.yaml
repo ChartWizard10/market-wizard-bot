@@ -29,12 +29,16 @@ one_hour:
   lookback_period: "1mo"
   max_bars: 80
 
-# Phase 14F — multi-timeframe alignment evidence object. Audit/display ledger
-# recording Weekly/Daily/4H/1H alignment in one place. Evidence-only: never
-# promotes, routes, authorizes capital, or mutates scanner behavior. Weekly is
-# inferred (no standalone weekly bars acquired); 4H uses the trade_location proxy.
+# Phase R4H-2 — multi-timeframe alignment with REAL 4H operational authority.
+# Weekly/Daily remain sovereign over campaign/swing permission and 1H remains
+# trigger proof. The old Phase-14F trade_location/1H proxy is retained only as
+# a comparison + rollback diagnostic. When enabled, stale/incomplete/gapped/
+# ambiguous/insufficient real 4H evidence fails closed to no-capital; missing
+# proof is never relabeled as a market failure. Set false only for emergency
+# rollback to the prior proxy behavior.
 timeframe_alignment:
   enabled: true
+  real_4h_authority_enabled: true
 
 # Phase 14H — SNIPE_IT gate audit. Read-only diagnostic flight-recorder that
 # explains why a candidate did or did not qualify for SNIPE_IT. Never promotes,
