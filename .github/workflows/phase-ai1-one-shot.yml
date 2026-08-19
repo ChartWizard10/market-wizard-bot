@@ -1,0 +1,203 @@
+name: AI-1 One-Shot GPT-5.6 Runtime Integration
+
+on:
+  push:
+    branches: [phase-ai1-gpt56-runtime-migration]
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase-ai1-gpt56-runtime-migration
+          fetch-depth: 0
+
+      - name: Integrate OpenAI GPT-5.6 runtime
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          # ---------------- main.py ----------------
+          p = Path('main.py')
+          s = p.read_text()
+          s = s.replace('ANTHROPIC_KEY missing → warning only (Claude commands fail gracefully).',
+                        'OPENAI_API_KEY missing → warning only (GPT-5.6 commands fail gracefully).')
+          s = s.replace('if not os.environ.get("ANTHROPIC_KEY"):\n        warnings.append(\n            "ANTHROPIC_KEY is not set — !scan and !analyze will fail gracefully"\n        )',
+                        'if not os.environ.get("OPENAI_API_KEY"):\n        warnings.append(\n            "OPENAI_API_KEY is not set — !scan and !analyze will fail gracefully"\n        )')
+
+          old = '''    Returns (bot, anthropic_client, system_prompt).\n    anthropic_client is None if ANTHROPIC_KEY is absent.\n    system_prompt is None if the prompt file cannot be loaded.\n    \"\"\"\n    anthropic_key = os.environ.get("ANTHROPIC_KEY")\n\n    # Anthropic client\n    anthropic_client = None\n    if anthropic_key:\n        try:\n            import anthropic\n            anthropic_client = anthropic.AsyncAnthropic(api_key=anthropic_key)\n        except Exception as exc:\n            log.error("Could not create Anthropic client: %s", exc)\n\n    # System prompt\n    system_prompt = None\n    try:\n        from src.claude_client import load_system_prompt\n        system_prompt = load_system_prompt("prompts/market_wizard_system.md")\n    except Exception as exc:\n        log.error("Could not load system prompt: %s", exc)\n'''
+          new = '''    Returns (bot, model_client, system_prompt).\n    model_client is None if OPENAI_API_KEY is absent.\n    system_prompt is None if the prompt file cannot be loaded.\n    \"\"\"\n    openai_key = os.environ.get("OPENAI_API_KEY")\n\n    # OpenAI GPT-5.6 client\n    model_client = None\n    if openai_key:\n        try:\n            from openai import AsyncOpenAI\n            model_client = AsyncOpenAI(api_key=openai_key)\n        except Exception as exc:\n            log.error("Could not create OpenAI client: %s", exc)\n\n    # System prompt\n    system_prompt = None\n    try:\n        from src.model_client import load_system_prompt\n        system_prompt = load_system_prompt("prompts/market_wizard_system.md")\n    except Exception as exc:\n        log.error("Could not load system prompt: %s", exc)\n'''
+          assert old in s, 'main build_bot legacy block changed unexpectedly'
+          s = s.replace(old, new)
+          s = s.replace('return bot, anthropic_client, system_prompt', 'return bot, model_client, system_prompt')
+          s = s.replace('    anthropic_client,\n    system_prompt: str | None,', '    model_client,\n    system_prompt: str | None,')
+          s = s.replace('bot, config, system_prompt, anthropic_client', 'bot, config, system_prompt, model_client')
+          s = s.replace('if anthropic_client is None or system_prompt is None:', 'if model_client is None or system_prompt is None:')
+          s = s.replace('"ERROR: Claude not configured"\n                " (ANTHROPIC_KEY missing or system prompt not found)"',
+                        '"ERROR: GPT-5.6 not configured"\n                " (OPENAI_API_KEY missing or system prompt not found)"')
+          s = s.replace('f" | Claude candidates: {summary.get(\'total_claude_candidates\', 0)}\\n"',
+                        'f" | GPT-5.6 candidates: {summary.get(\'total_claude_candidates\', 0)}\\n"')
+          s = s.replace('bot, anthropic_client, system_prompt = build_bot(config)', 'bot, model_client, system_prompt = build_bot(config)')
+          s = s.replace('register_commands(bot, config, anthropic_client, system_prompt)', 'register_commands(bot, config, model_client, system_prompt)')
+          # User-facing legacy status label is normalized without breaking the scheduler result contract.
+          s = s.replace('detail = result.get("error") or result.get("error_type", "")\n                await ctx.send(f"{ticker}: {status} — {detail}")',
+                        'detail = result.get("error") or result.get("error_type", "")\n                display_status = "model_error" if status == "claude_error" else status\n                await ctx.send(f"{ticker}: {display_status} — {detail}")')
+          p.write_text(s)
+
+          # ---------------- scheduler.py ----------------
+          p = Path('src/scheduler.py')
+          s = p.read_text()
+          s = s.replace('market_data -> indicators -> prefilter -> Claude -> deterministic tiering',
+                        'market_data -> indicators -> prefilter -> GPT-5.6 -> deterministic tiering')
+          old_import = 'from src.claude_client import async_claude_scan, claude_call'
+          new_import = '''# Compatibility aliases preserve the hardened scheduler/test surface while the\n# production deep-analysis provider is now OpenAI GPT-5.6.\nfrom src.model_client import async_model_scan as async_claude_scan, model_call as claude_call'''
+          assert old_import in s, 'scheduler legacy model import changed unexpectedly'
+          s = s.replace(old_import, new_import)
+          s = s.replace('"error_type": "CLAUDE_API_ERROR",', '"error_type": "MODEL_API_ERROR",')
+          s = s.replace('if error_type == "claude_rate_limited":',
+                        'if error_type in ("model_rate_limited", "claude_rate_limited"):')
+          s = s.replace('rate_limited = error_type == "claude_rate_limited"',
+                        'rate_limited = error_type in ("model_rate_limited", "claude_rate_limited")')
+          s = s.replace('log.info("claude_complete: %d results", len(claude_results))',
+                        'log.info("model_complete: %d results", len(claude_results))')
+          s = s.replace('"error": "ANTHROPIC_KEY not configured",',
+                        '"error": "OPENAI_API_KEY not configured",')
+          p.write_text(s)
+
+          # ---------------- model_client.py privacy ----------------
+          p = Path('src/model_client.py')
+          s = p.read_text()
+          needle = '        "max_output_tokens": max_output_tokens,\n'
+          assert needle in s
+          s = s.replace(needle, needle + '        "store": False,\n')
+          p.write_text(s)
+
+          # ---------------- config ----------------
+          p = Path('config/doctrine_config.yaml')
+          s = p.read_text()
+          legacy = '''claude:\n  model: "claude-sonnet-4-6"\n  max_tokens: 1200\n  max_concurrent_calls: 8          # legacy — use claude_concurrency for pacing\n  claude_concurrency: 1\n  claude_min_seconds_between_calls: 4\n  claude_max_input_tokens_per_minute_budget: 25000\n'''
+          assert legacy in s, 'legacy model config block changed unexpectedly'
+          replacement = '''# AI-1 — production deep-analysis model boundary. GPT-5.6 is the analyst;\n# deterministic tiering remains sovereign. Runtime override: OPENAI_MODEL.\nmodel:\n  provider: "openai"\n  name: "gpt-5.6"\n  max_output_tokens: 1200\n  reasoning_effort: "medium"\n  concurrency: 1\n  min_seconds_between_calls: 1\n  max_input_tokens_per_minute_budget: 250000\n\n# Historical compatibility block retained temporarily because legacy contract\n# tests still exercise src/claude_client.py in isolation. Production ignores it.\nclaude:\n  model: "claude-sonnet-4-6"\n  max_tokens: 1200\n  max_concurrent_calls: 8\n  claude_concurrency: 1\n  claude_min_seconds_between_calls: 4\n  claude_max_input_tokens_per_minute_budget: 25000\n'''
+          p.write_text(s.replace(legacy, replacement))
+
+          # ---------------- requirements ----------------
+          p = Path('requirements.txt')
+          s = p.read_text()
+          if 'openai\n' not in s:
+              s = s.replace('anthropic\n', 'anthropic\nopenai\n')
+          p.write_text(s)
+
+          # ---------------- env example ----------------
+          p = Path('.env.example')
+          s = p.read_text()
+          s = re.sub(r'^ANTHROPIC_KEY=.*$', 'OPENAI_API_KEY=replace_with_openai_api_key\nOPENAI_MODEL=gpt-5.6', s, flags=re.M)
+          p.write_text(s)
+
+          # ---------------- scheduler tests: provider-facing startup only ----------------
+          p = Path('tests/test_scheduler.py')
+          s = p.read_text()
+          s = s.replace('if k not in ("DISCORD_TOKEN", "ANTHROPIC_KEY")',
+                        'if k not in ("DISCORD_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_KEY")')
+          s = s.replace('# 18. validate_startup: missing ANTHROPIC_KEY → ok=True (warning only)',
+                        '# 18. validate_startup: missing OPENAI_API_KEY → ok=True (warning only)')
+          s = s.replace('def test_missing_anthropic_key_safe():', 'def test_missing_openai_api_key_safe():')
+          s = s.replace('env_with_token = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_KEY"}',
+                        'env_with_token = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}')
+          s = s.replace('assert any("ANTHROPIC_KEY" in w for w in result["warnings"])',
+                        'assert any("OPENAI_API_KEY" in w for w in result["warnings"])')
+          s = s.replace('for key in ("DISCORD_TOKEN", "ANTHROPIC_KEY"):',
+                        'for key in ("DISCORD_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_KEY"):')
+          p.write_text(s)
+
+          # ---------------- config test ----------------
+          p = Path('tests/test_config.py')
+          s = p.read_text()
+          s = s.replace('assert "claude" in cfg\n', 'assert "model" in cfg\n    assert cfg["model"]["provider"] == "openai"\n    assert cfg["model"]["name"] == "gpt-5.6"\n')
+          p.write_text(s)
+
+          # ---------------- docs ----------------
+          files = {
+              'README.md': [
+                  ('builds the Discord/Anthropic clients', 'builds the Discord/OpenAI clients'),
+                  ('top-30 Claude deep analysis', 'configured GPT-5.6 deep analysis'),
+                  ('Claude candidate cap: 30 per scan', 'deep-analysis candidate cap: 30 per scan'),
+                  ('`ANTHROPIC_KEY` for Claude-backed scans/analysis', '`OPENAI_API_KEY` for GPT-5.6-backed scans/analysis'),
+                  ('`ANTHROPIC_MODEL`', '`OPENAI_MODEL`'),
+                  ('Claude is a classifier/analyst', 'GPT-5.6 is a classifier/analyst'),
+              ],
+              'docs/RUNBOOK.md': [
+                  ('builds the Discord/Anthropic clients', 'builds the Discord/OpenAI clients'),
+                  ('Required for Claude-backed `!scan` / `!analyze` and scheduled deep analysis:\n\n- `ANTHROPIC_KEY`\n\nOptional runtime model override:\n\n- `ANTHROPIC_MODEL`',
+                   'Required for GPT-5.6-backed `!scan` / `!analyze` and scheduled deep analysis:\n\n- `OPENAI_API_KEY`\n\nOptional runtime model override:\n\n- `OPENAI_MODEL`'),
+                  ('Claude model-selection log', 'GPT-5.6 model-selection log'),
+                  ('data -> prefilter -> Claude -> final tier', 'data -> prefilter -> GPT-5.6 -> final tier'),
+                  ('MODEL: Anthropic API/JSON/rate-limit failure', 'MODEL: OpenAI API/schema/rate-limit failure'),
+              ],
+              'docs/ARCHITECTURE.md': [
+                  ('prefilter.prefilter\n       score + veto + rank + top-30 deep-analysis cap\n  -> claude_client.async_claude_scan',
+                   'prefilter.prefilter\n       score + veto + rank + configured deep-analysis cap\n  -> model_client.async_model_scan (OpenAI GPT-5.6)'),
+                  ('`src/claude_client.py` + `prompts/market_wizard_system.md`', '`src/model_client.py` + `prompts/market_wizard_system.md`'),
+                  ('Claude client', 'GPT-5.6 model client'),
+                  ('Claude candidates', 'deep-analysis candidates'),
+              ],
+              'docs/PRODUCTION_STATE.md': [
+                  ('Claude runtime model override is supported through `ANTHROPIC_MODEL`; config fallback remains `claude-sonnet-4-6`.',
+                   'OpenAI GPT-5.6 is the production deep-analysis target through `OPENAI_API_KEY` with `OPENAI_MODEL` override; legacy Anthropic contract tests remain isolated for migration safety.'),
+                  ('candidate cap remains 30 unless a separate capacity study changes it;',
+                   'deep-analysis candidate cap remains 30 until the measured CAP-40 study changes it;'),
+              ],
+          }
+          for name, replacements in files.items():
+              p = Path(name)
+              s = p.read_text()
+              for old, new in replacements:
+                  s = s.replace(old, new)
+              p.write_text(s)
+
+          # Append explicit migration/cap state rather than relying on fragile prose replacement.
+          p = Path('docs/CHANGELOG.md')
+          s = p.read_text()
+          marker = '## 2026-08-19 — Phase P0 Production Governance\n'
+          entry = '''## 2026-08-19 — Phase AI-1 GPT-5.6 Runtime Migration\n\n- Production deep-analysis provider migrated from Anthropic to OpenAI GPT-5.6 (`gpt-5.6`) via the Responses API.\n- Strict Structured Outputs JSON Schema added at the model boundary; hardened parser and deterministic tiering remain authoritative.\n- `OPENAI_API_KEY` / `OPENAI_MODEL` become the production runtime controls; response storage is disabled (`store=False`).\n- Legacy Claude-named summary/telemetry compatibility fields remain temporarily to avoid an unnecessary schema migration in the provider cutover.\n- Candidate cap intentionally remains 30. CAP-40 will use ranks-31-60 near-cut telemetry after family-admission integration to prove whether ranks 31-40 add actionable recall without harming cadence/cost.\n- No tier threshold, doctrine gate, scan cadence, universe, Discord contract, or capital rule changed.\n\n'''
+          if entry not in s:
+              s = s.replace(marker, entry + marker)
+          p.write_text(s)
+
+          # AI-1 integration architecture guard.
+          Path('tests/test_phase_ai1_runtime_integration.py').write_text('''\nfrom pathlib import Path\nimport yaml\n\n\ndef test_production_main_uses_openai_not_anthropic_client():\n    src = Path("main.py").read_text()\n    assert "AsyncOpenAI" in src\n    assert "AsyncAnthropic" not in src\n    assert "OPENAI_API_KEY" in src\n\n\ndef test_scheduler_routes_production_calls_to_model_client():\n    src = Path("src/scheduler.py").read_text()\n    assert "from src.model_client import" in src\n    assert "from src.claude_client import async_claude_scan" not in src\n\n\ndef test_gpt56_config_and_cap_are_separate_contracts():\n    cfg = yaml.safe_load(Path("config/doctrine_config.yaml").read_text())\n    assert cfg["model"]["provider"] == "openai"\n    assert cfg["model"]["name"] == "gpt-5.6"\n    assert cfg["prefilter"]["max_claude_candidates_per_scan"] == 30\n\n\ndef test_env_example_uses_openai_production_credentials():\n    env = Path(".env.example").read_text()\n    assert "OPENAI_API_KEY=" in env\n    assert "OPENAI_MODEL=gpt-5.6" in env\n    assert "ANTHROPIC_KEY=" not in env\n'''.lstrip())
+          PY
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Compile and run full production suite
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          python -m compileall -q src tests main.py
+          python -m pytest -q
+
+      - name: Commit green integration and remove one-shot workflow
+        run: |
+          rm .github/workflows/phase-ai1-one-shot.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add main.py src/scheduler.py src/model_client.py config/doctrine_config.yaml requirements.txt .env.example tests/test_scheduler.py tests/test_config.py tests/test_phase_ai1_runtime_integration.py README.md docs/ARCHITECTURE.md docs/PRODUCTION_STATE.md docs/RUNBOOK.md docs/CHANGELOG.md .github/workflows/phase-ai1-one-shot.yml
+          git commit -m "AI-1 integrate OpenAI GPT-5.6 production runtime"
+          git push origin HEAD:phase-ai1-gpt56-runtime-migration
