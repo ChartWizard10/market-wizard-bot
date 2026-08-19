@@ -1,13 +1,13 @@
 """R4H-3B — predeclared chronological real-vs-proxy 4H outcome study.
 
-R4H-3A normalizes the production 4H proxy and the real 4H shadow engine into a
+R4H-3A normalizes the production 4H proxy and real 4H shadow evidence into a
 common location-effect vocabulary and joins those comparisons to VELOCITY-1D
 forward outcomes. R4H-3B makes that evidence statistically executable without
 creating live authority.
 
 Core laws:
 
-* the acceptance plan must be explicit and frozen before outcome review;
+* the acceptance plan must be explicit and predeclared before outcome review;
 * TARGET_FIRST, INVALIDATION_FIRST and TIME_BARRIER are evaluable terminal
   outcomes for the five-session/+8% research objective;
 * AMBIGUOUS_SAME_SESSION is ambiguous, INCOMPLETE_HORIZON is censored, and
@@ -15,8 +15,9 @@ Core laws:
 * REAL_ADDS_HARD_BLOCK and REAL_REMOVES_PROXY_HARD_BLOCK are studied as local
   4H-layer counterfactuals only, not reconstructed final STARTER/SNIPE trades;
 * non-fatal real 4H states are reported separately;
-* sample/completeness/effect thresholds are caller-predeclared — this module
-  invents no favorable trading threshold after seeing outcomes;
+* sample/completeness/effect thresholds are caller-predeclared;
+* market-condition coverage is required before a narrow handoff review can be
+  marked ready;
 * full 4H authority replacement remains unsupported because compact telemetry
   cannot reconstruct the whole decision-time ladder;
 * no network, model call, file I/O, random sampling, tiering, routing or capital
@@ -47,9 +48,6 @@ EVALUABLE_LABELS = {
     velocity_research.INVALIDATION_FIRST,
     velocity_research.TIME_BARRIER,
 }
-AMBIGUOUS_LABELS = {velocity_research.AMBIGUOUS_SAME_SESSION}
-CENSORED_LABELS = {velocity_research.INCOMPLETE_HORIZON}
-INVALID_LABELS = {velocity_research.INVALID_DATA}
 
 _SAMPLE_KEYS = (
     "min_evaluable_records",
@@ -83,18 +81,18 @@ def _num(value: Any) -> float | None:
     return out
 
 
-def _pct(num: int | float, den: int | float) -> float | None:
-    if not den:
+def _pct(numerator: int | float, denominator: int | float) -> float | None:
+    if not denominator:
         return None
-    return round(float(num) / float(den) * 100.0, 4)
+    return round(float(numerator) / float(denominator) * 100.0, 4)
 
 
 def validate_study_plan(plan: dict | None) -> dict:
-    """Validate the predeclared R4H-3B sample/effect plan.
+    """Validate an explicit R4H-3B sample/effect plan.
 
-    Required sample fields are deliberately not defaulted. The project must
-    choose them before examining outcomes. Effect thresholds are optional; if
-    omitted, the study can become sample-ready but remains descriptive only.
+    Sample thresholds are intentionally not defaulted. Effect thresholds and
+    market-condition minimums are optional for descriptive research, but a
+    narrow handoff-review-ready result requires accepted condition coverage.
     """
     p = deepcopy(plan) if isinstance(plan, dict) else {}
     name = _text(p.get("name"))
@@ -105,12 +103,12 @@ def validate_study_plan(plan: dict | None) -> dict:
         errors.append("MISSING_PLAN_NAME")
     if not version:
         errors.append("MISSING_PLAN_VERSION")
-    if p.get("frozen_before_outcome_review") is not True:
-        errors.append("PLAN_NOT_FROZEN_BEFORE_OUTCOME_REVIEW")
+    if p.get("predeclared_before_outcome_review") is not True:
+        errors.append("PLAN_NOT_PREDECLARED_BEFORE_OUTCOME_REVIEW")
     if p.get("chronological_out_of_sample") is not True:
         errors.append("CHRONOLOGICAL_OUT_OF_SAMPLE_NOT_DECLARED")
 
-    normalized: dict[str, float] = {}
+    samples: dict[str, float] = {}
     for key in _SAMPLE_KEYS:
         value = _num(p.get(key))
         if value is None:
@@ -118,7 +116,7 @@ def validate_study_plan(plan: dict | None) -> dict:
         elif value < 0:
             errors.append(f"NEGATIVE_THRESHOLD:{key}")
         else:
-            normalized[key] = value
+            samples[key] = value
 
     effects: dict[str, float] = {}
     for key in _EFFECT_KEYS:
@@ -138,11 +136,11 @@ def validate_study_plan(plan: dict | None) -> dict:
         else:
             for key, value in raw_coverage.items():
                 label = _text(key)
-                count = _num(value)
-                if not label or count is None or count < 0:
+                minimum = _num(value)
+                if not label or minimum is None or minimum < 0:
                     errors.append("INVALID_MARKET_CONDITION_MINIMUM")
                     continue
-                coverage_minimums[label] = count
+                coverage_minimums[label] = minimum
 
     return {
         "contract_version": VERSION,
@@ -150,9 +148,11 @@ def validate_study_plan(plan: dict | None) -> dict:
         "valid": not errors,
         "name": name,
         "version": version,
-        "frozen_before_outcome_review": p.get("frozen_before_outcome_review") is True,
+        "predeclared_before_outcome_review": (
+            p.get("predeclared_before_outcome_review") is True
+        ),
         "chronological_out_of_sample": p.get("chronological_out_of_sample") is True,
-        "sample_thresholds": normalized,
+        "sample_thresholds": samples,
         "effect_thresholds": effects,
         "market_condition_minimums": coverage_minimums,
         "errors": errors,
@@ -162,18 +162,6 @@ def validate_study_plan(plan: dict | None) -> dict:
 def _counterfactual(row: dict) -> dict:
     value = row.get("four_hour_counterfactual")
     return value if isinstance(value, dict) else {}
-
-
-def _label_class(label: str) -> str:
-    if label in EVALUABLE_LABELS:
-        return "EVALUABLE"
-    if label in AMBIGUOUS_LABELS:
-        return "AMBIGUOUS"
-    if label in CENSORED_LABELS:
-        return "CENSORED"
-    if label in INVALID_LABELS:
-        return "INVALID"
-    return "UNRECOGNIZED"
 
 
 def _terminal_outcome_counts(rows: list[dict]) -> dict:
@@ -197,8 +185,10 @@ def _terminal_outcome_counts(rows: list[dict]) -> dict:
 
 def _comparison_rows(rows: list[dict], comparison: str) -> list[dict]:
     return [
-        row for row in rows
-        if str(_counterfactual(row).get("comparison") or cf.COMPARE_UNAVAILABLE) == comparison
+        row
+        for row in rows
+        if str(_counterfactual(row).get("comparison") or cf.COMPARE_UNAVAILABLE)
+        == comparison
     ]
 
 
@@ -264,20 +254,30 @@ def _nonfatal_real_effects(rows: list[dict]) -> dict:
     out: dict[str, dict] = {}
     for effect in effects:
         subset = [
-            row for row in rows
-            if str((_counterfactual(row).get("real") or {}).get("location_effect") or cf.EFFECT_UNAVAILABLE)
+            row
+            for row in rows
+            if str(
+                (_counterfactual(row).get("real") or {}).get("location_effect")
+                or cf.EFFECT_UNAVAILABLE
+            )
             == effect
         ]
         counts = _terminal_outcome_counts(subset)
         evaluable_n = sum(counts[label] for label in EVALUABLE_LABELS)
-        target = counts[velocity_research.TARGET_FIRST]
         out[effect] = {
             "total_rows": len(subset),
             "evaluable_rows": evaluable_n,
             "outcome_counts": counts,
-            "target_first_rate_pct": _pct(target, evaluable_n),
+            "target_first_rate_pct": _pct(
+                counts[velocity_research.TARGET_FIRST], evaluable_n
+            ),
         }
     return out
+
+
+def _bump(group: dict[str, dict[str, int]], key: str, label: str) -> None:
+    bucket = group.setdefault(key, {})
+    bucket[label] = bucket.get(label, 0) + 1
 
 
 def summarize_outcomes(counterfactual_dataset: dict | None) -> dict:
@@ -291,24 +291,22 @@ def summarize_outcomes(counterfactual_dataset: dict | None) -> dict:
         + counts[velocity_research.INCOMPLETE_HORIZON]
     )
 
-    comparisons: dict[str, int] = {}
-    unavailable = 0
+    comparison_counts: dict[str, int] = {}
+    comparison_unavailable = 0
+    by_family: dict[str, dict[str, int]] = {}
+    by_tier: dict[str, dict[str, int]] = {}
+
     for row in records:
         comparison = str(
             _counterfactual(row).get("comparison") or cf.COMPARE_UNAVAILABLE
         )
-        comparisons[comparison] = comparisons.get(comparison, 0) + 1
+        comparison_counts[comparison] = comparison_counts.get(comparison, 0) + 1
         if comparison == cf.COMPARE_UNAVAILABLE:
-            unavailable += 1
+            comparison_unavailable += 1
 
-    by_family: dict[str, dict[str, int]] = {}
-    by_tier: dict[str, dict[str, int]] = {}
-    for row in records:
         label = str(row.get("label") or velocity_research.INVALID_DATA)
-        family = str(row.get("setup_family") or "UNKNOWN")
-        tier = str(row.get("final_tier") or "UNKNOWN")
-        by_family.setdefault(family, {})[label] = by_family.setdefault(family, {}).get(label, 0) + 1
-        by_tier.setdefault(tier, {})[label] = by_tier.setdefault(tier, {}).get(label, 0) + 1
+        _bump(by_family, str(row.get("setup_family") or "UNKNOWN"), label)
+        _bump(by_tier, str(row.get("final_tier") or "UNKNOWN"), label)
 
     return {
         "total_records": len(records),
@@ -316,11 +314,15 @@ def summarize_outcomes(counterfactual_dataset: dict | None) -> dict:
         "evaluable_records": evaluable_n,
         "ambiguous_or_censored_records": ambiguous_or_censored,
         "ambiguous_or_censored_pct": _pct(ambiguous_or_censored, len(records)),
-        "comparison_counts": comparisons,
-        "comparison_unavailable_records": unavailable,
-        "comparison_unavailable_pct": _pct(unavailable, len(records)),
-        "real_adds_hard_block": _intervention_metrics(records, cf.COMPARE_REAL_ADDS_BLOCK),
-        "real_removes_proxy_hard_block": _intervention_metrics(records, cf.COMPARE_REAL_REMOVES_BLOCK),
+        "comparison_counts": comparison_counts,
+        "comparison_unavailable_records": comparison_unavailable,
+        "comparison_unavailable_pct": _pct(comparison_unavailable, len(records)),
+        "real_adds_hard_block": _intervention_metrics(
+            records, cf.COMPARE_REAL_ADDS_BLOCK
+        ),
+        "real_removes_proxy_hard_block": _intervention_metrics(
+            records, cf.COMPARE_REAL_REMOVES_BLOCK
+        ),
         "nonfatal_real_effects": _nonfatal_real_effects(records),
         "by_setup_family": by_family,
         "by_final_tier": by_tier,
@@ -331,11 +333,11 @@ def evaluate_market_condition_coverage(
     plan: dict | None,
     coverage_counts: dict | None,
 ) -> dict:
-    """Evaluate caller-supplied market-condition counts against frozen minima.
+    """Evaluate supplied market-condition counts against predeclared minima.
 
-    R4H-3B does not invent regimes from fields that were never persisted. If a
-    study plan requires regime coverage, the counts must come from a separately
-    auditable chronological dataset/report.
+    The study does not synthesize market-condition labels from fields that were
+    never persisted. Required counts must come from a separately auditable
+    chronological dataset or report.
     """
     p = validate_study_plan(plan)
     minima = p.get("market_condition_minimums") or {}
@@ -357,7 +359,7 @@ def evaluate_market_condition_coverage(
             "minimum": minimum,
             "passed": passed,
         }
-    accepted = bool(checks) and all(c["passed"] for c in checks.values())
+    accepted = bool(checks) and all(check["passed"] for check in checks.values())
     return {
         "required": True,
         "accepted": accepted,
@@ -384,24 +386,28 @@ def evaluate_sample_readiness(summary: dict | None, plan: dict | None) -> dict:
         "min_evaluable_records": {
             "actual": s.get("evaluable_records"),
             "threshold": thresholds["min_evaluable_records"],
-            "passed": (s.get("evaluable_records") or 0) >= thresholds["min_evaluable_records"],
+            "passed": (s.get("evaluable_records") or 0)
+            >= thresholds["min_evaluable_records"],
         },
         "min_real_adds_hard_block_evaluable": {
             "actual": adds.get("evaluable_rows"),
             "threshold": thresholds["min_real_adds_hard_block_evaluable"],
-            "passed": (adds.get("evaluable_rows") or 0) >= thresholds["min_real_adds_hard_block_evaluable"],
+            "passed": (adds.get("evaluable_rows") or 0)
+            >= thresholds["min_real_adds_hard_block_evaluable"],
         },
         "min_real_removes_proxy_hard_block_evaluable": {
             "actual": removes.get("evaluable_rows"),
             "threshold": thresholds["min_real_removes_proxy_hard_block_evaluable"],
-            "passed": (removes.get("evaluable_rows") or 0) >= thresholds["min_real_removes_proxy_hard_block_evaluable"],
+            "passed": (removes.get("evaluable_rows") or 0)
+            >= thresholds["min_real_removes_proxy_hard_block_evaluable"],
         },
         "max_ambiguous_or_censored_pct": {
             "actual": s.get("ambiguous_or_censored_pct"),
             "threshold": thresholds["max_ambiguous_or_censored_pct"],
             "passed": (
                 s.get("ambiguous_or_censored_pct") is not None
-                and s["ambiguous_or_censored_pct"] <= thresholds["max_ambiguous_or_censored_pct"]
+                and s["ambiguous_or_censored_pct"]
+                <= thresholds["max_ambiguous_or_censored_pct"]
             ),
         },
         "max_comparison_unavailable_pct": {
@@ -409,11 +415,12 @@ def evaluate_sample_readiness(summary: dict | None, plan: dict | None) -> dict:
             "threshold": thresholds["max_comparison_unavailable_pct"],
             "passed": (
                 s.get("comparison_unavailable_pct") is not None
-                and s["comparison_unavailable_pct"] <= thresholds["max_comparison_unavailable_pct"]
+                and s["comparison_unavailable_pct"]
+                <= thresholds["max_comparison_unavailable_pct"]
             ),
         },
     }
-    accepted = all(c["passed"] for c in checks.values())
+    accepted = all(check["passed"] for check in checks.values())
     return {
         "accepted": accepted,
         "checks": checks,
@@ -446,24 +453,22 @@ def evaluate_effect_thresholds(summary: dict | None, plan: dict | None) -> dict:
     checks: dict[str, dict] = {}
 
     def maximum(key: str, actual: float | None) -> None:
-        if key not in thresholds:
-            return
-        threshold = thresholds[key]
-        checks[key] = {
-            "actual": actual,
-            "threshold": threshold,
-            "passed": actual is not None and actual <= threshold,
-        }
+        if key in thresholds:
+            threshold = thresholds[key]
+            checks[key] = {
+                "actual": actual,
+                "threshold": threshold,
+                "passed": actual is not None and actual <= threshold,
+            }
 
     def minimum(key: str, actual: float | None) -> None:
-        if key not in thresholds:
-            return
-        threshold = thresholds[key]
-        checks[key] = {
-            "actual": actual,
-            "threshold": threshold,
-            "passed": actual is not None and actual >= threshold,
-        }
+        if key in thresholds:
+            threshold = thresholds[key]
+            checks[key] = {
+                "actual": actual,
+                "threshold": threshold,
+                "passed": actual is not None and actual >= threshold,
+            }
 
     maximum(
         "max_real_adds_block_target_opportunity_cost_pct",
@@ -482,7 +487,7 @@ def evaluate_effect_thresholds(summary: dict | None, plan: dict | None) -> dict:
         removes.get("negative_evidence_pct"),
     )
 
-    accepted = bool(checks) and all(c["passed"] for c in checks.values())
+    accepted = bool(checks) and all(check["passed"] for check in checks.values())
     return {
         "declared": True,
         "accepted": accepted,
@@ -500,12 +505,7 @@ def build_study_report(
     plan: dict | None,
     coverage_counts: dict | None = None,
 ) -> dict:
-    """Build the auditable R4H-3B research report.
-
-    Passing this report is never a live authority handoff. At most it can mark
-    a narrow hard-block evidence package ready for a separately reviewed phase.
-    Full real-4H replacement remains unsupported here.
-    """
+    """Build the auditable R4H-3B research report with zero live authority."""
     p = validate_study_plan(plan)
     summary = summarize_outcomes(counterfactual_dataset)
     sample = evaluate_sample_readiness(summary, plan)
@@ -518,14 +518,11 @@ def build_study_report(
         decision = STUDY_SAMPLE_INSUFFICIENT
     elif not effects["declared"]:
         decision = STUDY_DESCRIPTIVE_ONLY
-    elif effects["accepted"] and (not coverage["required"] or coverage["accepted"]):
+    elif effects["accepted"] and coverage["required"] and coverage["accepted"]:
         decision = STUDY_NARROW_SUPPORTIVE
     else:
         decision = STUDY_NARROW_NOT_SUPPORTIVE
 
-    # This projection intentionally does NOT satisfy the full R4H-2 promotion
-    # contract. The location-layer study cannot prove full-stack precision or
-    # recall, and this pure module cannot assert CI state from outside itself.
     r4h2_projection = {
         "chronological_out_of_sample": p.get("chronological_out_of_sample") is True,
         "outcome_linked": summary.get("evaluable_records", 0) > 0,
@@ -554,13 +551,15 @@ def build_study_report(
         "effect_evaluation": effects,
         "market_condition_coverage": coverage,
         "study_decision": decision,
-        "narrow_hard_block_handoff_review_ready": decision == STUDY_NARROW_SUPPORTIVE,
+        "narrow_hard_block_handoff_review_ready": (
+            decision == STUDY_NARROW_SUPPORTIVE
+        ),
         "full_tier_counterfactual_supported": False,
         "full_4h_replacement_supported": False,
         "r4h2_validation_projection": r4h2_projection,
         "next_required_evidence": [
             "persist/replay enough decision-time evidence to reconstruct the full ladder before any full 4H replacement claim",
-            "obtain independently auditable market-condition coverage when required by the predeclared plan",
+            "obtain independently auditable market-condition coverage under the predeclared plan",
             "run full capital-integrity CI in the later handoff branch",
             "perform a separately reviewed authority handoff even if a narrow veto study passes",
         ],
