@@ -23,13 +23,13 @@ The study never converts ambiguous, censored, or invalid rows into wins or losse
 
 ## Predeclared plan law
 
-`validate_study_plan()` requires the project to freeze the sample rules **before outcome review**.
+`validate_study_plan()` requires the project to lock the sample rules **before outcome review**.
 
 Required plan fields:
 
 - `name`
 - `version`
-- `frozen_before_outcome_review: true`
+- `predeclared_before_outcome_review: true`
 - `chronological_out_of_sample: true`
 - `min_evaluable_records`
 - `min_real_adds_hard_block_evaluable`
@@ -86,7 +86,7 @@ This prevents a hard-failure study from erasing useful information about repair,
 
 ## Sample readiness
 
-`evaluate_sample_readiness()` applies only the plan thresholds that were frozen in advance. It checks:
+`evaluate_sample_readiness()` applies only the plan thresholds that were declared in advance. It checks:
 
 - total evaluable outcomes;
 - evaluable `REAL_ADDS_HARD_BLOCK` observations;
@@ -100,9 +100,11 @@ If the sample fails any declared threshold, the study returns `SAMPLE_INSUFFICIE
 
 R4H-2 requires accepted market-condition coverage before any authority handoff.
 
-The current compact VELOCITY/R4H dataset does not persist a canonical market-regime label. R4H-3B therefore does not invent one.
+The current compact VELOCITY/R4H dataset does not persist a canonical market-condition classification. R4H-3B therefore does not invent one.
 
 A study plan may declare `market_condition_minimums`, and `build_study_report()` may receive a separately auditable `coverage_counts` object. Missing or insufficient counts remain unaccepted.
+
+A key hardening rule applies: **effect thresholds can pass and the study can still be not ready for handoff review if market-condition coverage was not declared and accepted.** A `NARROW_HARD_BLOCK_EVIDENCE_SUPPORTIVE` result requires both a declared coverage plan and accepted coverage counts.
 
 ## Study decisions
 
