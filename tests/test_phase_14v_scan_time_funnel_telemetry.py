@@ -936,8 +936,12 @@ def test_v1_scheduler_records_delivery_by_state_not_by_sent_flag():
 
 # ---- M1: check_alert decision basis ---------------------------------------
 
-def test_v1_m1_check_alert_evaluated_tier_is_the_pre_ladder_tier(tmp_path):
-    """15, 16 — the ledger must never imply the FINAL tier was the basis."""
+def test_v1_m1_legacy_trace_preserves_pre_ladder_check_alert_basis(tmp_path):
+    """Historical pre-14S.4B traces preserve the tier check_alert actually saw.
+
+    This fixture models the old pipeline deliberately. It is serialization
+    provenance, not the current runtime ordering contract.
+    """
     cfg = _cfg(tmp_path)
     tr = _live_result("NEAR_ENTRY")
     ca_tier, ca_cap = tr["final_tier"], tr["capital_action"]      # scheduler :392
@@ -956,13 +960,14 @@ def test_v1_m1_check_alert_evaluated_tier_is_the_pre_ladder_tier(tmp_path):
     assert t["suppression"]["cooldown_suppressed"] is True
 
 
-def test_v1_check_alert_timing_was_not_changed():
-    """The ordering is MEASURED, not fixed. check_alert must still run before
-    the ladder, and must not be re-run afterwards."""
+def test_v1_check_alert_runs_once_after_final_tier_mutation():
+    """Phase 14S.4B law: judge first, dedup final executable truth second."""
     src = Path("src/scheduler.py").read_text(encoding="utf-8")
     scan = src[src.index("async def run_scan_pipeline"):src.index("async def run_full_scan")]
     assert scan.count("state_store.check_alert(") == 1
-    assert scan.index("state_store.check_alert(") < scan.index("apply_ladder_arbitration")
+    assert scan.index("apply_ladder_arbitration") < scan.index("state_store.check_alert(")
+    assert scan.index("seal_snipe_confirmed_consistency") < scan.index("state_store.check_alert(")
+    assert scan.index("state_store.check_alert(") < scan.index("discord_alerts.send_alert")
 
 
 # ---- H1: state_store must never depend on telemetry -----------------------
@@ -1897,11 +1902,13 @@ def test_v1c_19_20_21_json_exposes_window_and_evidence_without_secrets(tmp_path)
         assert secret not in blob, secret
 
 
-def test_v1c_24_25_check_alert_timing_and_cap_unchanged():
+def test_v1c_24_25_check_alert_final_tier_timing_and_cap_unchanged():
     src = Path("src/scheduler.py").read_text(encoding="utf-8")
     scan = src[src.index("async def run_scan_pipeline"):src.index("async def run_full_scan")]
     assert scan.count("state_store.check_alert(") == 1
-    assert scan.index("state_store.check_alert(") < scan.index("apply_ladder_arbitration")
+    assert scan.index("apply_ladder_arbitration") < scan.index("state_store.check_alert(")
+    assert scan.index("seal_snipe_confirmed_consistency") < scan.index("state_store.check_alert(")
+    assert scan.index("state_store.check_alert(") < scan.index("discord_alerts.send_alert")
     import yaml
     cfg = yaml.safe_load(open("config/doctrine_config.yaml"))
     assert cfg["prefilter"]["max_claude_candidates_per_scan"] == 30

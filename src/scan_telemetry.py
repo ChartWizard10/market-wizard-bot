@@ -50,13 +50,15 @@ One same-signal suppression path exists:
 dedup_key is not a suppression event, and independent dedup-key suppression is
 NOT IMPLEMENTED — carried as `dedup_key_suppression_supported: False`.
 
-CHECK_ALERT ORDERING (measured, deliberately NOT fixed here)
-------------------------------------------------------------
-`check_alert` runs at scheduler Step 6, BEFORE ladder arbitration (6.592) and
-the seal (6.595). A row can therefore be evaluated for cooldown as NEAR_ENTRY
-and later be served as SNIPE_IT while retaining that decision. 14V records both
-`check_alert_evaluated_tier` and the final served tier so the frequency of that
-architecture can be measured. It does not change check_alert timing.
+CHECK_ALERT ORDERING (Phase 14S.4B reconciled)
+------------------------------------------------------
+`check_alert` now runs exactly once AFTER ladder arbitration, the universal
+SNIPE capital floor, and the downgrade-only SNIPE seal, and immediately before
+Discord delivery. Cooldown / tier-improvement therefore evaluates the FINAL
+executable tier. `base_final_tier` remains separately persisted so the ledger
+still preserves the pre-arbitration tier. Historical pre-14S.4B traces may
+legitimately carry `check_alert_evaluated_tier != final_tier`; telemetry never
+rewrites those old facts.
 """
 
 import json
@@ -740,9 +742,10 @@ def build_decision_trace(scan_id, ticker, pf_res, rank, tiering_result,
             "check_alert_reason": reason,
             "should_alert": dd.get("should_alert") if dd else None,
             "dedup_key": _scalar(dd.get("dedup_key")) if dd else None,
-            # M1 — the tier check_alert ACTUALLY evaluated. check_alert runs at
-            # Step 6, before the ladder; final_tier above may be higher. The
-            # ledger must never imply the final tier was the decision basis.
+            # M1 / Phase 14S.4B — the tier check_alert ACTUALLY evaluated.
+            # Current scans evaluate the final executable tier after ladder/floor/seal.
+            # Historical pre-14S.4B traces may legitimately differ from final_tier;
+            # the ledger preserves the caller-supplied historical decision basis.
             "check_alert_evaluated_tier": _scalar(check_alert_evaluated_tier),
             "check_alert_evaluated_capital_action": _scalar(
                 check_alert_evaluated_capital_action),
