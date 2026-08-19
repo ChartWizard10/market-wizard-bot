@@ -1,20 +1,12 @@
-"""Auto-scan scheduler, pipeline orchestrator, and market hours gate.
+"""Auto-scan scheduler, pipeline orchestrator, and market-hours gate.
 
-Pipeline order (enforced — no shortcuts):
-  market_data.batch_download
-  → indicators.enrich
-  → prefilter.prefilter (score + veto + cap)
-  → claude_client.async_claude_scan (capped candidates only)
-  → tiering.validate (base tier authority)
-  → evidence organs + SNIPE gate audit
-  → SNIPE ladder arbitration
-  → SNIPE confirmed seal
-  → state_store.check_alert (dedup on final executable tier)
-  → discord_alerts.send_alert (route + post)
-  → state_store.record_alert + save
+Production order:
+  market_data -> indicators -> prefilter -> Claude -> deterministic tiering
+  -> shared post-tiering chart judgment -> final-tier dedup -> Discord -> state.
 
-Does not bypass tiering gates. Does not bypass JSON validation.
-WAIT never posts. Disabled indicators never introduced here.
+Phase 14W law: manual ``!analyze`` may bypass universe admission/cooldown, but
+it may never bypass chart judgment. Autoscan and manual analysis therefore use
+the same post-tiering evidence/arbitration organ.
 """
 
 import asyncio
@@ -23,12 +15,12 @@ import uuid
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from src import discord_alerts
-from src import indicators
-from src import market_data as market_data_mod
 from src import candle_evidence
+from src import discord_alerts
 from src import four_hour_operational
 from src import higher_timeframe_context
+from src import indicators
+from src import market_data as market_data_mod
 from src import one_hour_entry
 from src import prefilter as prefilter_mod
 from src import scan_telemetry
@@ -48,89 +40,233 @@ log = logging.getLogger(__name__)
 _SCAN_LOCK = asyncio.Lock()
 
 
-# ---------------------------------------------------------------------------
-# Market hours gate
-# ---------------------------------------------------------------------------
-
 def is_market_hours(config: dict, _now: datetime | None = None) -> bool:
-    """Return True if it is currently within configured market hours on a weekday.
-
-    Args:
-        config:  doctrine config dict
-        _now:    override current time (for testing); must be tz-aware
-    """
+    """Return True inside the configured weekday market-hours window."""
     scan_cfg = config.get("scan", {})
     if not scan_cfg.get("market_hours_only", True):
         return True
 
-    tz_name = scan_cfg.get("timezone", "America/New_York")
     try:
-        tz = ZoneInfo(tz_name)
+        tz = ZoneInfo(scan_cfg.get("timezone", "America/New_York"))
     except Exception:
         tz = ZoneInfo("America/New_York")
 
     now = _now if _now is not None else datetime.now(tz)
-
-    # Weekdays only: Monday=0 … Friday=4
     if now.weekday() >= 5:
         return False
 
-    open_str  = scan_cfg.get("market_open",  "09:35")
-    close_str = scan_cfg.get("market_close", "15:55")
+    open_h, open_m = map(int, scan_cfg.get("market_open", "09:35").split(":"))
+    close_h, close_m = map(int, scan_cfg.get("market_close", "15:55").split(":"))
+    minute = now.hour * 60 + now.minute
+    return (open_h * 60 + open_m) <= minute <= (close_h * 60 + close_m)
 
-    open_h,  open_m  = map(int, open_str.split(":"))
-    close_h, close_m = map(int, close_str.split(":"))
-
-    now_minutes   = now.hour * 60 + now.minute
-    open_minutes  = open_h  * 60 + open_m
-    close_minutes = close_h * 60 + close_m
-
-    return open_minutes <= now_minutes <= close_minutes
-
-
-# ---------------------------------------------------------------------------
-# Scan ID
-# ---------------------------------------------------------------------------
 
 def _make_scan_id() -> str:
     return f"scan_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
 
-# ---------------------------------------------------------------------------
-# Abort helper
-# ---------------------------------------------------------------------------
-
 def _abort_summary(scan_id: str, started_at: str, total_tickers: int, error: str) -> dict:
     return {
-        "scan_id":                    scan_id,
-        "started_at":                 started_at,
-        "ended_at":                   datetime.utcnow().isoformat(),
-        "duration_seconds":           0.0,
-        "is_manual":                  False,
-        "market_hours":               False,
-        "status":                     "aborted",
-        "error":                      error,
-        "total_tickers_input":        total_tickers,
-        "total_evaluated":            0,
-        "total_data_failures":        total_tickers,
-        "total_prefilter_rejected":   0,
-        "total_prefilter_passed":     0,
-        "total_claude_candidates":    0,
-        "total_claude_success":       0,
-        "total_claude_failed":        0,
-        "total_claude_rate_limited":  0,
-        "final_tier_counts":          {"SNIPE_IT": 0, "STARTER": 0, "NEAR_ENTRY": 0, "WAIT": 0},
-        "alerts_sent":                0,
-        "alerts_suppressed":          0,
-        "top_candidates":                [],
-        "failures":                      [{"type": "ABORT", "detail": error}],
-        "first_data_failure_reasons":    [],
+        "scan_id": scan_id,
+        "started_at": started_at,
+        "ended_at": datetime.utcnow().isoformat(),
+        "duration_seconds": 0.0,
+        "is_manual": False,
+        "market_hours": False,
+        "status": "aborted",
+        "error": error,
+        "total_tickers_input": total_tickers,
+        "total_evaluated": 0,
+        "total_data_failures": total_tickers,
+        "total_prefilter_rejected": 0,
+        "total_prefilter_passed": 0,
+        "total_claude_candidates": 0,
+        "total_claude_success": 0,
+        "total_claude_failed": 0,
+        "total_claude_rate_limited": 0,
+        "final_tier_counts": {"SNIPE_IT": 0, "STARTER": 0, "NEAR_ENTRY": 0, "WAIT": 0},
+        "alerts_sent": 0,
+        "alerts_suppressed": 0,
+        "top_candidates": [],
+        "failures": [{"type": "ABORT", "detail": error}],
+        "first_data_failure_reasons": [],
     }
 
 
 # ---------------------------------------------------------------------------
-# Core pipeline (used by both scheduled and manual scans)
+# Phase 14W — one shared post-tiering candidate judgment organ
 # ---------------------------------------------------------------------------
+
+def _complete_candidate_judgment(
+    ticker: str,
+    tiering_result: dict,
+    enriched: dict,
+    market_result: dict,
+    config: dict,
+    previous_state: dict | None = None,
+) -> dict:
+    """Run every post-tiering chart judgment for one candidate.
+
+    Fixed order:
+      trajectory -> trade location -> candle evidence -> 1H trigger -> MTF
+      alignment -> real 4H shadow evidence -> HTF context -> SNIPE gate audit
+      -> SNIPE ladder -> downgrade-only seal -> final audit reconcile
+      -> score calibration.
+
+    This organ deliberately does not dedup, route, send Discord messages,
+    persist state, or write scan-funnel telemetry. Execution governance begins
+    only after the final executable tier is known.
+    """
+    tiering_result = tiering_result if isinstance(tiering_result, dict) else {}
+    enriched = enriched if isinstance(enriched, dict) else {}
+    market_result = market_result if isinstance(market_result, dict) else {}
+    final_tier = tiering_result.get("final_tier", "WAIT")
+
+    try:
+        tiering_result["trajectory"] = trajectory_mod.compute(
+            tiering_result, previous_state
+        )
+    except Exception as exc:
+        log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
+        tiering_result["trajectory"] = {"label": "UNKNOWN", "text": ""}
+
+    try:
+        tiering_result["trade_location"] = trade_location.build_trade_location_context(
+            enriched, tiering_result
+        )
+    except Exception as exc:
+        log.warning("TRADE_LOCATION_ERROR: %s: %s", ticker, exc)
+        tiering_result["trade_location"] = None
+
+    try:
+        tiering_result["candle_evidence"] = candle_evidence.build_candle_evidence_context(
+            enriched, tiering_result
+        )
+    except Exception as exc:
+        log.warning("CANDLE_EVIDENCE_ERROR: %s: %s", ticker, exc)
+        tiering_result["candle_evidence"] = candle_evidence._unknown_context()
+
+    try:
+        one_hour_envelope = market_data_mod.fetch_one_hour_bars(ticker, config)
+    except Exception as exc:
+        log.warning("ONE_HOUR_FETCH_ERROR: %s: %s", ticker, exc)
+        one_hour_envelope = None
+
+    try:
+        tiering_result["one_hour_entry"] = one_hour_entry.build_one_hour_entry_context(
+            ticker,
+            tiering_result,
+            enriched_data=enriched,
+            one_hour_bars=one_hour_envelope,
+            config=config,
+        )
+    except Exception as exc:
+        log.warning("ONE_HOUR_ENTRY_ERROR: %s: %s", ticker, exc)
+        tiering_result["one_hour_entry"] = None
+
+    # Phase 14F proxy remains authoritative until R4H-2. Real 4H is attached
+    # immediately afterwards from the SAME 60m response, with zero extra fetch.
+    try:
+        tiering_result["timeframe_alignment"] = timeframe_alignment.build_timeframe_alignment_context(
+            ticker,
+            tiering_result,
+            enriched_data=enriched,
+            config=config,
+        )
+    except Exception as exc:
+        log.warning("TIMEFRAME_ALIGNMENT_ERROR: %s: %s", ticker, exc)
+        tiering_result["timeframe_alignment"] = timeframe_alignment.error_timeframe_alignment_object(str(exc))
+
+    try:
+        env = one_hour_envelope if isinstance(one_hour_envelope, dict) else {}
+        tiering_result["four_hour_operational"] = four_hour_operational.build_four_hour_operational_context(
+            ticker,
+            tiering_result,
+            enriched_data=enriched,
+            four_hour_bars=env.get("four_hour"),
+            config=config,
+        )
+        log.info(four_hour_operational.render_four_hour_log_line(
+            ticker,
+            tiering_result["four_hour_operational"],
+            tiering_result["four_hour_operational"].get("proxy_comparison"),
+        ))
+    except Exception as exc:
+        log.warning("FOUR_HOUR_OPERATIONAL_ERROR: %s: %s", ticker, exc)
+        tiering_result["four_hour_operational"] = four_hour_operational.error_four_hour_object(str(exc))
+
+    try:
+        daily_bars = higher_timeframe_context.daily_bars_from_df(market_result.get("df"))
+        tiering_result["higher_timeframe_context"] = higher_timeframe_context.build_higher_timeframe_context(
+            ticker,
+            tiering_result,
+            enriched_data=enriched,
+            daily_bars=daily_bars,
+            config=config,
+        )
+    except Exception as exc:
+        log.warning("HIGHER_TIMEFRAME_CONTEXT_ERROR: %s: %s", ticker, exc)
+        tiering_result["higher_timeframe_context"] = higher_timeframe_context.error_htf_object(str(exc))
+
+    try:
+        tiering_result["snipe_gate_audit"] = snipe_gate_audit.build_snipe_gate_audit(
+            ticker,
+            tiering_result,
+            enriched_data=enriched,
+            config=config,
+        )
+    except Exception as exc:
+        log.warning("SNIPE_GATE_AUDIT_ERROR: %s: %s", ticker, exc)
+        tiering_result["snipe_gate_audit"] = snipe_gate_audit.error_snipe_gate_audit_object(str(exc))
+
+    try:
+        tiering_result = snipe_ladder_judgment.apply_ladder_arbitration(
+            tiering_result, config
+        )
+        ladder = tiering_result.get("snipe_ladder") or {}
+        if ladder:
+            final_tier = tiering_result.get("final_tier", final_tier)
+            log.info(
+                "SNIPE_LADDER: %s %s (%s) -> final_tier=%s",
+                ticker,
+                ladder.get("internal_ladder_tier"),
+                ladder.get("proof_state"),
+                final_tier,
+            )
+    except Exception as exc:
+        log.warning("SNIPE_LADDER_ERROR: %s: %s", ticker, exc)
+
+    try:
+        tiering_result = snipe_confirmed_seal.seal_snipe_confirmed_consistency(
+            tiering_result, config
+        )
+        seal = tiering_result.get("snipe_confirmed_seal") or {}
+        if seal.get("applied"):
+            log.warning(
+                "SNIPE_CONFIRMED_SEAL: %s %s→%s blockers=%s",
+                ticker,
+                seal.get("original_tier"),
+                seal.get("corrected_tier"),
+                "; ".join(seal.get("blockers") or []),
+            )
+    except Exception as exc:
+        log.warning("SNIPE_CONFIRMED_SEAL_ERROR: %s: %s", ticker, exc)
+
+    try:
+        snipe_gate_audit.reconcile_final_snipe_audit_state(tiering_result)
+    except Exception as exc:
+        log.warning("SNIPE_AUDIT_RECONCILE_ERROR: %s: %s", ticker, exc)
+
+    try:
+        tiering_result["calibration"] = score_calibration.calibrate_score(
+            tiering_result, config
+        )
+    except Exception as exc:
+        log.warning("CALIBRATION_ERROR: %s: %s", ticker, exc)
+        tiering_result["calibration"] = None
+
+    return tiering_result
+
 
 async def run_scan_pipeline(
     tickers: list,
@@ -142,64 +278,51 @@ async def run_scan_pipeline(
     scan_id: str = "",
     is_manual: bool = False,
 ) -> dict:
-    """Execute the full scan pipeline for the given ticker list.
-
-    State is updated in-memory and saved to disk after the pipeline completes.
-    Does not acquire the scan lock — callers are responsible for that.
-
-    Returns a scan summary dict.
-    """
+    """Execute the full universe scan pipeline."""
     if not scan_id:
         scan_id = _make_scan_id()
 
     started_at = datetime.utcnow().isoformat()
-    start_ts   = datetime.utcnow()
-
-    total_tickers_input      = len(tickers)
-    total_data_failures      = 0
+    start_ts = datetime.utcnow()
+    total_tickers_input = len(tickers)
+    total_data_failures = 0
     total_prefilter_rejected = 0
-    total_prefilter_passed   = 0
-    total_claude_candidates  = 0
-    total_claude_success      = 0
-    total_claude_failed       = 0
+    total_prefilter_passed = 0
+    total_claude_candidates = 0
+    total_claude_success = 0
+    total_claude_failed = 0
     total_claude_rate_limited = 0
-    alerts_sent               = 0
-    alerts_suppressed        = 0
-    final_tier_counts        = {"SNIPE_IT": 0, "STARTER": 0, "NEAR_ENTRY": 0, "WAIT": 0}
-    failures: list           = []
-    top_candidates: list     = []
-    data_failure_sample: list = []
+    alerts_sent = 0
+    alerts_suppressed = 0
+    final_tier_counts = {"SNIPE_IT": 0, "STARTER": 0, "NEAR_ENTRY": 0, "WAIT": 0}
+    failures = []
+    top_candidates = []
+    data_failure_sample = []
 
-    # ---- Phase 14V telemetry accumulators (observation only) -------------
-    # Nothing below is read by strategy. Every value is COPIED from an outcome
-    # a production organ already computed.
-    _tlm_traces: list        = []
-    _tlm_base_tiers: dict    = {}     # tier right after tiering.validate()
-    _tlm_final_tiers: dict   = {}     # tier actually SERVED (post ladder/floor/seal)
-    _tlm_baskets: dict       = {}
-    _tlm_reasons: dict       = {}
-    _tlm_analysis            = {"admitted": 0, "claude_success": 0,
-                                "claude_failed": 0, "claude_rate_limited": 0,
-                                "tiering_failed": 0, "judged": 0}
-    _tlm_delivery            = {"send_alert_called": 0, "sent": 0,
-                                "skipped": 0, "failed": 0}
+    _tlm_traces = []
+    _tlm_base_tiers = {}
+    _tlm_final_tiers = {}
+    _tlm_baskets = {}
+    _tlm_reasons = {}
+    _tlm_analysis = {
+        "admitted": 0,
+        "claude_success": 0,
+        "claude_failed": 0,
+        "claude_rate_limited": 0,
+        "tiering_failed": 0,
+        "judged": 0,
+    }
+    _tlm_delivery = {"send_alert_called": 0, "sent": 0, "skipped": 0, "failed": 0}
 
     log.info("scan_start: scan_id=%s tickers=%d manual=%s", scan_id, total_tickers_input, is_manual)
 
-    # ------------------------------------------------------------------
-    # Step 1: Batch download all tickers
-    # ------------------------------------------------------------------
     try:
         market_results = market_data_mod.batch_download(tickers, config)
     except Exception as exc:
         log.error("batch_download aborted scan: %s", exc)
         return _abort_summary(scan_id, started_at, total_tickers_input, str(exc))
 
-    # ------------------------------------------------------------------
-    # Step 2: Enrich each OK ticker with structure-first features
-    # ------------------------------------------------------------------
-    enriched_map: dict = {}
-
+    enriched_map = {}
     for ticker in tickers:
         mres = market_results.get(ticker)
         if not mres:
@@ -211,23 +334,15 @@ async def run_scan_pipeline(
         if mres["data_status"] != "OK":
             total_data_failures += 1
             detail = mres.get("error", "")
-            failures.append({
-                "ticker": ticker,
-                "type":   mres["data_status"],
-                "detail": detail,
-            })
+            failures.append({"ticker": ticker, "type": mres["data_status"], "detail": detail})
             if len(data_failure_sample) < 10:
                 data_failure_sample.append(f"{ticker}: {mres['data_status']} — {detail}")
-            enriched_map[ticker] = {
-                "ticker":       ticker,
-                "data_status":  mres["data_status"],
-                "latest_close": None,
-            }
+            enriched_map[ticker] = {"ticker": ticker, "data_status": mres["data_status"], "latest_close": None}
             continue
 
         try:
             enriched = indicators.enrich(ticker, mres["df"], config)
-            enriched["data_status"]  = "OK"
+            enriched["data_status"] = "OK"
             enriched["latest_close"] = mres["latest_close"]
             enriched_map[ticker] = enriched
         except Exception as exc:
@@ -238,36 +353,27 @@ async def run_scan_pipeline(
                 data_failure_sample.append(f"{ticker}: ENRICH_ERROR — {exc}")
             enriched_map[ticker] = {"ticker": ticker, "data_status": "ERROR", "latest_close": None}
 
-    if total_data_failures > 0:
+    if total_data_failures:
         log.warning(
             "DATA_FAILURES: %d/%d tickers failed market data fetch. Sample: %s",
-            total_data_failures, total_tickers_input, data_failure_sample,
+            total_data_failures,
+            total_tickers_input,
+            data_failure_sample,
         )
 
-    # ------------------------------------------------------------------
-    # Step 3: Prefilter — score, veto, rank, cap
-    # ------------------------------------------------------------------
-    all_enriched = list(enriched_map.values())
     try:
-        pf_result = prefilter_mod.prefilter(all_enriched, config)
+        pf_result = prefilter_mod.prefilter(list(enriched_map.values()), config)
     except Exception as exc:
         log.error("prefilter aborted scan: %s", exc)
         return _abort_summary(scan_id, started_at, total_tickers_input, str(exc))
 
     bs = pf_result["board_summary"]
-    total_prefilter_rejected = (
-        bs["total_rejected_by_data_quality"] + bs["total_rejected_by_veto"]
-    )
-    total_prefilter_passed  = bs["total_above_prefilter_min_score"]
+    total_prefilter_rejected = bs["total_rejected_by_data_quality"] + bs["total_rejected_by_veto"]
+    total_prefilter_passed = bs["total_above_prefilter_min_score"]
     total_claude_candidates = bs["total_claude_candidates"]
-
-    # ticker → prefilter result dict (for veto flags passed to tiering.validate)
-    pf_map: dict = {r["ticker"]: r for r in pf_result["all_results"]}
-
-    # Enriched dicts for capped Claude candidates (preserves ranking order)
-    claude_candidate_tickers = [r["ticker"] for r in pf_result["claude_candidates"]]
-    claude_enriched = [enriched_map[t] for t in claude_candidate_tickers if t in enriched_map]
-
+    pf_map = {r["ticker"]: r for r in pf_result["all_results"]}
+    candidate_tickers = [r["ticker"] for r in pf_result["claude_candidates"]]
+    claude_enriched = [enriched_map[t] for t in candidate_tickers if t in enriched_map]
     top_candidates = [
         {"ticker": r["ticker"], "score": r["prefilter_score"]}
         for r in pf_result["ranked_results"][:10]
@@ -275,29 +381,24 @@ async def run_scan_pipeline(
 
     log.info(
         "prefilter_complete: %d input → %d ranked → %d claude_candidates",
-        total_tickers_input, len(pf_result["ranked_results"]), total_claude_candidates,
+        total_tickers_input,
+        len(pf_result["ranked_results"]),
+        total_claude_candidates,
     )
 
-    # ---- Phase 14V: admission-boundary observation (no API cost) ---------
-    # Rank is simply the position in the EXISTING ranked_results list, so the
-    # near-cut sample (ranks 31-60) is a copy. No Claude call, no market-data
-    # refetch, no strategy evaluation, no promotion, no cap change.
-    _tlm_rank_map: dict = {}
+    _tlm_rank_map = {}
     try:
-        for _i, _r in enumerate(pf_result.get("ranked_results") or []):
-            if isinstance(_r, dict) and _r.get("ticker"):
-                _tlm_rank_map[_r["ticker"]] = _i + 1
-        for _r, _rank in scan_telemetry.near_cut_slice(pf_result.get("ranked_results"), config):
-            _tlm_traces.append(scan_telemetry.build_near_cut_trace(scan_id, _r, _rank))
+        for i, row in enumerate(pf_result.get("ranked_results") or []):
+            if isinstance(row, dict) and row.get("ticker"):
+                _tlm_rank_map[row["ticker"]] = i + 1
+        for row, rank in scan_telemetry.near_cut_slice(pf_result.get("ranked_results"), config):
+            _tlm_traces.append(scan_telemetry.build_near_cut_trace(scan_id, row, rank))
     except Exception as exc:
         log.warning("TELEMETRY_NEAR_CUT_ERROR: %s", exc)
 
-    def _tlm_rank_of(_t):
-        return _tlm_rank_map.get(_t)
+    def _tlm_rank_of(symbol):
+        return _tlm_rank_map.get(symbol)
 
-    # ------------------------------------------------------------------
-    # Step 4: Claude analysis (capped candidates only)
-    # ------------------------------------------------------------------
     if claude_enriched and client is not None:
         try:
             claude_results = await async_claude_scan(
@@ -307,9 +408,9 @@ async def run_scan_pipeline(
             log.error("async_claude_scan failed: %s", exc)
             claude_results = [
                 {
-                    "ticker":        e.get("ticker", "UNKNOWN"),
-                    "signal":        None,
-                    "error_type":    "CLAUDE_API_ERROR",
+                    "ticker": e.get("ticker", "UNKNOWN"),
+                    "signal": None,
+                    "error_type": "CLAUDE_API_ERROR",
                     "error_message": str(exc),
                 }
                 for e in claude_enriched
@@ -319,12 +420,8 @@ async def run_scan_pipeline(
 
     log.info("claude_complete: %d results", len(claude_results))
 
-    # ------------------------------------------------------------------
-    # Steps 5–8: Per-result: tiering → evidence → final dedup → alert → record
-    # ------------------------------------------------------------------
     for cr in claude_results:
         ticker = cr.get("ticker", "UNKNOWN")
-
         if cr.get("signal") is None:
             error_type = cr.get("error_type", "UNKNOWN")
             if error_type == "claude_rate_limited":
@@ -337,20 +434,20 @@ async def run_scan_pipeline(
                 total_claude_failed += 1
             failures.append({
                 "ticker": ticker,
-                "type":   error_type,
+                "type": error_type,
                 "detail": cr.get("error_message", ""),
             })
-            final_tier_counts["WAIT"] = final_tier_counts.get("WAIT", 0) + 1
-            # Phase 14V.1: an analysis failure is NOT a market WAIT. It is
-            # recorded as a Stage-5 outcome with no invented judgment.
+            final_tier_counts["WAIT"] += 1
             try:
                 _tlm_analysis["admitted"] += 1
-                _rl = error_type == "claude_rate_limited"
-                _tlm_analysis["claude_rate_limited" if _rl else "claude_failed"] += 1
+                rate_limited = error_type == "claude_rate_limited"
+                _tlm_analysis["claude_rate_limited" if rate_limited else "claude_failed"] += 1
                 _tlm_traces.append(scan_telemetry.build_analysis_failure_trace(
-                    scan_id, ticker, pf_map.get(ticker, {}), _tlm_rank_of(ticker),
-                    scan_telemetry.TRACE_RATE_LIMITED if _rl
-                    else scan_telemetry.TRACE_ANALYSIS_FAILED,
+                    scan_id,
+                    ticker,
+                    pf_map.get(ticker, {}),
+                    _tlm_rank_of(ticker),
+                    scan_telemetry.TRACE_RATE_LIMITED if rate_limited else scan_telemetry.TRACE_ANALYSIS_FAILED,
                     failure_code=error_type,
                 ))
             except Exception as exc:
@@ -365,266 +462,61 @@ async def run_scan_pipeline(
         except Exception:
             pass
 
-        # Step 5: Tiering validation (base authority; Phase 14S may arbitrate later)
         try:
             tiering_result = tiering.validate(cr["signal"], pf_res, config)
         except Exception as exc:
             log.warning("TIERING_ERROR: %s: %s", ticker, exc)
             failures.append({"ticker": ticker, "type": "TIERING_ERROR", "detail": str(exc)})
-            final_tier_counts["WAIT"] = final_tier_counts.get("WAIT", 0) + 1
+            final_tier_counts["WAIT"] += 1
             try:
                 _tlm_analysis["tiering_failed"] += 1
                 _tlm_traces.append(scan_telemetry.build_analysis_failure_trace(
-                    scan_id, ticker, pf_res, _tlm_rank_of(ticker),
-                    scan_telemetry.TRACE_TIERING_FAILED, failure_code="TIERING_ERROR",
+                    scan_id,
+                    ticker,
+                    pf_res,
+                    _tlm_rank_of(ticker),
+                    scan_telemetry.TRACE_TIERING_FAILED,
+                    failure_code="TIERING_ERROR",
                 ))
             except Exception as terr:
                 log.warning("TELEMETRY_TIERING_TRACE_ERROR: %s: %s", ticker, terr)
             continue
 
         final_tier = tiering_result.get("final_tier", "WAIT")
-
-        # Phase 14V: the BASE tier, captured before the ladder can arbitrate it.
         _tlm_base_tier = final_tier
         _tlm_base_tiers[final_tier] = _tlm_base_tiers.get(final_tier, 0) + 1
 
-        # Step 6.5: Trajectory (informational — never affects tier, capital, or routing).
-        # Phase 14S.4B: trajectory needs prior ticker state, not an early dedup
-        # verdict. Dedup is intentionally deferred until every tier-mutating
-        # organ has finished so cooldown/tier-improvement truth is evaluated
-        # against the final executable tier.
-        try:
-            _ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
-            _previous_state = _ticker_states.get(ticker) if isinstance(_ticker_states, dict) else None
-            tiering_result["trajectory"] = trajectory_mod.compute(
-                tiering_result, _previous_state
-            )
-        except Exception as exc:
-            log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
-            tiering_result["trajectory"] = {"label": "UNKNOWN", "text": ""}
+        ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
+        previous_state = ticker_states.get(ticker) if isinstance(ticker_states, dict) else None
 
-        # Step 6.55: Trade location realism (Phase 14C.1 — audit/display only;
-        # never affects tier, capital, routing, suppression, or dedup). Must run
-        # before calibration, which reads tiering_result["trade_location"].
-        try:
-            tiering_result["trade_location"] = trade_location.build_trade_location_context(
-                enriched_map.get(ticker, {}), tiering_result
-            )
-        except Exception as exc:
-            log.warning("TRADE_LOCATION_ERROR: %s: %s", ticker, exc)
-            tiering_result["trade_location"] = None
+        # apply_ladder_arbitration and seal_snipe_confirmed_consistency execute
+        # inside this shared judgment organ before any final-tier check_alert.
+        tiering_result = _complete_candidate_judgment(
+            ticker,
+            tiering_result,
+            enriched_map.get(ticker, {}),
+            market_results.get(ticker) or {},
+            config,
+            previous_state,
+        )
+        final_tier = tiering_result.get("final_tier", final_tier)
 
-        # Step 6.56: Candle evidence quality (Phase 14C.3 — evidence/display only;
-        # never affects tier, capital, routing, suppression, dedup, or raw score).
-        # Must run after trade_location and before calibration, which reads
-        # tiering_result["candle_evidence"]["score_delta"].
         try:
-            tiering_result["candle_evidence"] = candle_evidence.build_candle_evidence_context(
-                enriched_map.get(ticker, {}), tiering_result
-            )
-        except Exception as exc:
-            log.warning("CANDLE_EVIDENCE_ERROR: %s: %s", ticker, exc)
-            tiering_result["candle_evidence"] = candle_evidence._unknown_context()
-
-        # Step 6.57: 1H entry-trigger evidence (Phase 14E.1 — evidence/display only;
-        # never affects tier, capital, routing, suppression, dedup, or raw score).
-        # Separately acquires 1H bars; degrades safely when unavailable. Must run
-        # before calibration, which may read a conservative 1H score-realism cap.
-        try:
-            one_hour_envelope = market_data_mod.fetch_one_hour_bars(ticker, config)
-        except Exception as exc:
-            log.warning("ONE_HOUR_FETCH_ERROR: %s: %s", ticker, exc)
-            one_hour_envelope = None
-        try:
-            tiering_result["one_hour_entry"] = one_hour_entry.build_one_hour_entry_context(
-                ticker,
-                tiering_result,
-                enriched_data=enriched_map.get(ticker, {}),
-                one_hour_bars=one_hour_envelope,
-                config=config,
-            )
-        except Exception as exc:
-            log.warning("ONE_HOUR_ENTRY_ERROR: %s: %s", ticker, exc)
-            tiering_result["one_hour_entry"] = None
-
-        # Step 6.58: Multi-timeframe alignment evidence (Phase 14F — evidence/
-        # display/audit only; never affects tier, capital, routing, suppression,
-        # dedup, or raw score). Reads one_hour_entry/trade_location/final_signal;
-        # the builder catches its own errors but the scheduler still guards.
-        try:
-            tiering_result["timeframe_alignment"] = timeframe_alignment.build_timeframe_alignment_context(
-                ticker,
-                tiering_result,
-                enriched_data=enriched_map.get(ticker, {}),
-                config=config,
-            )
-        except Exception as exc:
-            log.warning("TIMEFRAME_ALIGNMENT_ERROR: %s: %s", ticker, exc)
-            tiering_result["timeframe_alignment"] = timeframe_alignment.error_timeframe_alignment_object(str(exc))
-
-        # Step 6.583: REAL 4H operational evidence (Phase R4H-1 — SHADOW evidence
-        # only; never affects tier, capital, routing, suppression, dedup, or raw
-        # score). Aggregated from the SAME 60m provider response already fetched
-        # at Step 6.57 — no second network request. Runs after timeframe_alignment
-        # so the real-vs-proxy comparison can read the proxy state; the Phase-14F
-        # proxy remains production-authoritative until R4H-2.
-        try:
-            _four_hour_env = (one_hour_envelope or {}).get("four_hour")
-            tiering_result["four_hour_operational"] = (
-                four_hour_operational.build_four_hour_operational_context(
-                    ticker,
-                    tiering_result,
-                    enriched_data=enriched_map.get(ticker, {}),
-                    four_hour_bars=_four_hour_env,
-                    config=config,
-                )
-            )
-            log.info(four_hour_operational.render_four_hour_log_line(
-                ticker,
-                tiering_result["four_hour_operational"],
-                tiering_result["four_hour_operational"].get("proxy_comparison"),
-            ))
-        except Exception as exc:
-            log.warning("FOUR_HOUR_OPERATIONAL_ERROR: %s: %s", ticker, exc)
-            tiering_result["four_hour_operational"] = (
-                four_hour_operational.error_four_hour_object(str(exc))
-            )
-
-        # Step 6.585: Higher-timeframe structural context (Phase 14I — evidence/
-        # display/audit only; never affects tier, capital, routing, suppression,
-        # dedup, or raw score). Resamples the candidate's existing daily bars into
-        # weekly/monthly context (candidate-only — no extra fetch, no full-universe
-        # bloat). Attached before snipe_gate_audit so the audit can read it later.
-        try:
-            _mres = market_results.get(ticker) or {}
-            _daily_bars = higher_timeframe_context.daily_bars_from_df(_mres.get("df"))
-            tiering_result["higher_timeframe_context"] = higher_timeframe_context.build_higher_timeframe_context(
-                ticker,
-                tiering_result,
-                enriched_data=enriched_map.get(ticker, {}),
-                daily_bars=_daily_bars,
-                config=config,
-            )
-        except Exception as exc:
-            log.warning("HIGHER_TIMEFRAME_CONTEXT_ERROR: %s: %s", ticker, exc)
-            tiering_result["higher_timeframe_context"] = higher_timeframe_context.error_htf_object(str(exc))
-
-        # Step 6.59: SNIPE_IT gate audit (Phase 14H — diagnostic/audit only; never
-        # affects tier, capital, routing, suppression, dedup, or raw score).
-        # Reads tiering/one_hour_entry/timeframe_alignment/trade_location/
-        # candle_evidence to explain why a candidate did or did not qualify.
-        try:
-            tiering_result["snipe_gate_audit"] = snipe_gate_audit.build_snipe_gate_audit(
-                ticker,
-                tiering_result,
-                enriched_data=enriched_map.get(ticker, {}),
-                config=config,
-            )
-        except Exception as exc:
-            log.warning("SNIPE_GATE_AUDIT_ERROR: %s: %s", ticker, exc)
-            tiering_result["snipe_gate_audit"] = snipe_gate_audit.error_snipe_gate_audit_object(str(exc))
-
-        # Step 6.592: Unified SNIPE ladder judgment + arbitration (Phase 14S).
-        # Runs AFTER all evidence organs + the gate audit (so it judges the full
-        # card) and BEFORE the seal (promotion happens here, upstream — the seal
-        # stays downgrade-only). Grades every candidate onto
-        # PASS/WATCH_C/STARTER_B/STARTER_A/SNIPER_A/SNIPER_A_PLUS and lets that
-        # grade govern final_tier/capital/routing via the existing tier
-        # machinery. Promotion is whitelisted (NEAR_ENTRY->STARTER,
-        # STARTER->SNIPE_IT, one rung, never from WAIT). Guarded so a ladder
-        # fault can never break a scan.
-        try:
-            tiering_result = snipe_ladder_judgment.apply_ladder_arbitration(
-                tiering_result, config
-            )
-            _ladder = tiering_result.get("snipe_ladder") or {}
-            if _ladder:
-                final_tier = tiering_result.get("final_tier", final_tier)
-                log.info(
-                    "SNIPE_LADDER: %s %s (%s) -> final_tier=%s",
-                    ticker, _ladder.get("internal_ladder_tier"),
-                    _ladder.get("proof_state"), tiering_result.get("final_tier"),
-                )
-        except Exception as exc:
-            log.warning("SNIPE_LADDER_ERROR: %s: %s", ticker, exc)
-        try:
-            _tlm_basket = (tiering_result.get("snipe_ladder") or {}).get("internal_ladder_tier")
-            if _tlm_basket:
-                _tlm_baskets[_tlm_basket] = _tlm_baskets.get(_tlm_basket, 0) + 1
+            basket = (tiering_result.get("snipe_ladder") or {}).get("internal_ladder_tier")
+            if basket:
+                _tlm_baskets[basket] = _tlm_baskets.get(basket, 0) + 1
         except Exception:
             pass
 
-        # Step 6.595: SNIPE_CONFIRMED consistency seal (Phase 14M — TRUTH SEAL).
-        # Runs AFTER snipe_gate_audit so it can read the authoritative blocker
-        # evidence, and BEFORE rendering/routing/recording so a corrected tier
-        # cascades into wording (contract guard), channel routing, capital, dedup,
-        # and the persisted snapshot. It only ever DOWNGRADES a false SNIPE (a
-        # SNIPE_IT/full_quality_allowed/#snipe output whose own evidence still
-        # carries an active blocker); it never promotes and never deletes
-        # evidence. Guarded so a seal fault can never break a scan.
         try:
-            tiering_result = snipe_confirmed_seal.seal_snipe_confirmed_consistency(
-                tiering_result, config
-            )
-            _seal = tiering_result.get("snipe_confirmed_seal") or {}
-            if _seal.get("applied"):
-                final_tier = tiering_result.get("final_tier", final_tier)
-                log.warning(
-                    "SNIPE_CONFIRMED_SEAL: %s %s→%s blockers=%s",
-                    ticker, _seal.get("original_tier"), _seal.get("corrected_tier"),
-                    "; ".join(_seal.get("blockers") or []),
-                )
-        except Exception as exc:
-            log.warning("SNIPE_CONFIRMED_SEAL_ERROR: %s: %s", ticker, exc)
-
-        # Step 6.596: FINAL SNIPE audit-truth reconciliation (Phase 14S.5).
-        # The gate audit was built at Step 6.59 — BEFORE the ladder could promote
-        # STARTER -> SNIPE_IT (6.592) and before the seal (6.595). A legitimate
-        # SNIPER_A could therefore finish SNIPE_IT while the stored audit still
-        # described the older tier. This repairs the audit's DESCRIPTION of the
-        # final state only (current_final_tier/current_capital_action, and — when
-        # the seal did not downgrade — audit_label/promotion_state plus a
-        # grade-aware diagnostic naming SNIPER_A vs SNIPER_A_PLUS). It runs AFTER
-        # the seal, so it can never influence the seal decision, and it never
-        # touches tier, capital, routing, score, or any blocker evidence. When the
-        # seal DID downgrade, its SNIPE_CONFIRMATION_BLOCKED verdict is preserved.
-        try:
-            snipe_gate_audit.reconcile_final_snipe_audit_state(tiering_result)
-        except Exception as exc:
-            log.warning("SNIPE_AUDIT_RECONCILE_ERROR: %s: %s", ticker, exc)
-
-        # Phase 14V.1 (B1): the FINAL served tier — after 1H, HTF, gate,
-        # ladder arbitration, the 14S.7C capital floor, and the seal. Counted
-        # exactly once per candidate that reached a real tiering_result.
-        try:
-            _tlm_served = tiering_result.get("final_tier")
-            if _tlm_served:
-                _tlm_final_tiers[_tlm_served] = _tlm_final_tiers.get(_tlm_served, 0) + 1
+            served = tiering_result.get("final_tier")
+            if served:
+                _tlm_final_tiers[served] = _tlm_final_tiers.get(served, 0) + 1
                 _tlm_analysis["judged"] += 1
         except Exception:
             pass
 
-        # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
-        # capital_action, discord_channel, safe_for_alert, suppression, or dedup)
-        try:
-            tiering_result["calibration"] = score_calibration.calibrate_score(
-                tiering_result, config
-            )
-        except Exception as exc:
-            log.warning("CALIBRATION_ERROR: %s: %s", ticker, exc)
-            tiering_result["calibration"] = None
-
-        # Step 6.7: FINAL-tier truth + dedup reconciliation (Phase 14S.4B).
-        # This runs downstream from every tier-mutating organ. A preliminary
-        # STARTER can legitimately become SNIPE_IT; a preliminary SNIPE can be
-        # sealed down. Cooldown, tier-improvement and material-change logic must
-        # judge the state that can actually be served — never stale base state.
-        final_tier = tiering_result.get("final_tier", final_tier)
         final_tier_counts[final_tier] = final_tier_counts.get(final_tier, 0) + 1
-
-        # Phase 14V.3: telemetry now records the FINAL tier/capital state that
-        # check_alert is actually evaluating. The base tier remains separately
-        # persisted in _tlm_base_tier, so no information is lost.
         _tlm_ca_tier = tiering_result.get("final_tier")
         _tlm_ca_capital = tiering_result.get("capital_action")
 
@@ -637,16 +529,12 @@ async def run_scan_pipeline(
             dedup_decision = {"should_alert": False, "reason": "dedup_error"}
 
         try:
-            # Raw check_alert vocabulary, stored verbatim. This scanner's only
-            # same-signal suppression is duplicate_suppressed (cooldown); a
-            # dedup_key match is identity state, not a separate suppression.
-            _tlm_reason = (dedup_decision or {}).get("reason")
-            if _tlm_reason:
-                _tlm_reasons[_tlm_reason] = _tlm_reasons.get(_tlm_reason, 0) + 1
+            reason = (dedup_decision or {}).get("reason")
+            if reason:
+                _tlm_reasons[reason] = _tlm_reasons.get(reason, 0) + 1
         except Exception:
             pass
 
-        # Step 7: Discord alert
         try:
             send_result = await discord_alerts.send_alert(
                 tiering_result, dedup_decision, bot, config, scan_id
@@ -654,18 +542,20 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.error("DISCORD_SEND_FAILED: %s %s: %s", final_tier, ticker, exc)
             failures.append({"ticker": ticker, "type": "DISCORD_SEND_FAILED", "detail": str(exc)})
-            # Phase 14V.1 (B2): a real delivery failure must not vanish. The
-            # synthetic result below is TELEMETRY-ONLY and is never fed back
-            # into trading logic — no alert record, no suppression increment,
-            # no retry, no routing change. Production behavior is unchanged.
             try:
-                _tlm_synth = scan_telemetry.exception_send_result(exc)
+                synthetic = scan_telemetry.exception_send_result(exc)
                 _tlm_delivery["send_alert_called"] += 1
                 _tlm_delivery["failed"] += 1
                 _tlm_traces.append(scan_telemetry.build_decision_trace(
-                    scan_id, ticker, pf_res, _tlm_rank_of(ticker),
-                    tiering_result, dedup_decision, _tlm_synth,
-                    claude_analyzed=True, base_final_tier=_tlm_base_tier,
+                    scan_id,
+                    ticker,
+                    pf_res,
+                    _tlm_rank_of(ticker),
+                    tiering_result,
+                    dedup_decision,
+                    synthetic,
+                    claude_analyzed=True,
+                    base_final_tier=_tlm_base_tier,
                     check_alert_evaluated_tier=_tlm_ca_tier,
                     check_alert_evaluated_capital_action=_tlm_ca_capital,
                 ))
@@ -673,62 +563,53 @@ async def run_scan_pipeline(
                 log.warning("TELEMETRY_SEND_FAULT_TRACE_ERROR: %s: %s", ticker, terr)
             continue
 
-        # Step 8: Record alert to state if sent
         if send_result.get("sent"):
             alerts_sent += 1
             try:
                 state_store.record_alert(ticker, tiering_result, state, config, scan_id)
             except Exception as exc:
                 log.critical("CRITICAL: state record failed: %s: %s", ticker, exc)
-        else:
-            if dedup_decision and not dedup_decision.get("should_alert", True):
-                alerts_suppressed += 1
+        elif dedup_decision and not dedup_decision.get("should_alert", True):
+            alerts_suppressed += 1
 
-        # ---- Phase 14V: capture the decision trace (observation only) -----
-        # Runs after the alert decision so it sees the FINAL state, including
-        # rows whose delivery path disappears (cooldown-suppressed, routed to
-        # none, send failure). Fully guarded: a telemetry fault here cannot
-        # change tier, capital, routing, suppression, or delivery — all of
-        # which already happened above.
         try:
             _tlm_delivery["send_alert_called"] += 1
-            _tlm_state = scan_telemetry.delivery_state(send_result)
-            if _tlm_state == scan_telemetry.DELIVERY_SENT:
+            delivery_state = scan_telemetry.delivery_state(send_result)
+            if delivery_state == scan_telemetry.DELIVERY_SENT:
                 _tlm_delivery["sent"] += 1
-            elif _tlm_state == scan_telemetry.DELIVERY_FAILED:
+            elif delivery_state == scan_telemetry.DELIVERY_FAILED:
                 _tlm_delivery["failed"] += 1
             else:
-                # Intentional non-send: WAIT, cooldown suppression,
-                # routing-none. A skipped message is not a failed message.
                 _tlm_delivery["skipped"] += 1
             _tlm_traces.append(scan_telemetry.build_decision_trace(
-                scan_id, ticker, pf_res, _tlm_rank_of(ticker),
-                tiering_result, dedup_decision, send_result,
-                claude_analyzed=True, base_final_tier=_tlm_base_tier,
+                scan_id,
+                ticker,
+                pf_res,
+                _tlm_rank_of(ticker),
+                tiering_result,
+                dedup_decision,
+                send_result,
+                claude_analyzed=True,
+                base_final_tier=_tlm_base_tier,
                 check_alert_evaluated_tier=_tlm_ca_tier,
                 check_alert_evaluated_capital_action=_tlm_ca_capital,
             ))
         except Exception as exc:
             log.warning("TELEMETRY_TRACE_ERROR: %s: %s", ticker, exc)
 
-    # ------------------------------------------------------------------
-    # Save state after full cycle
-    # ------------------------------------------------------------------
     try:
         state_store.save(state, config)
     except Exception as exc:
         log.critical("CRITICAL: state write failed: %s", exc)
 
-    # ------------------------------------------------------------------
-    # Phase 14V: persist scan-time funnel telemetry (observation only).
-    # Isolated file, atomic write. A failure here logs and continues: the
-    # scan, its judgments, and its alerts are already complete and immutable
-    # at this point. Observability failure is not market failure.
-    # ------------------------------------------------------------------
     try:
-        _tlm_summary = scan_telemetry.build_scan_summary(
-            scan_id, started_at, total_tickers_input, total_data_failures,
-            pf_result, config,
+        summary = scan_telemetry.build_scan_summary(
+            scan_id,
+            started_at,
+            total_tickers_input,
+            total_data_failures,
+            pf_result,
+            config,
             final_tier_counts=_tlm_final_tiers,
             ladder_counts=_tlm_baskets,
             base_tier_counts=_tlm_base_tiers,
@@ -736,52 +617,50 @@ async def run_scan_pipeline(
             delivery=_tlm_delivery,
             analysis=_tlm_analysis,
         )
-        # Serialization of a multi-MB ledger blocks the event loop for ~1s.
-        # Awaited inside the existing scan lock: no new concurrent writer, no
-        # extra overlap, no strategy reordering. Observability I/O only.
         await asyncio.to_thread(
-            scan_telemetry.write_scan_telemetry, config, _tlm_summary, _tlm_traces
+            scan_telemetry.write_scan_telemetry,
+            config,
+            summary,
+            _tlm_traces,
         )
     except Exception as exc:
         log.warning("TELEMETRY_WRITE_ERROR: %s", exc)
 
-    ended_at         = datetime.utcnow().isoformat()
+    ended_at = datetime.utcnow().isoformat()
     duration_seconds = (datetime.utcnow() - start_ts).total_seconds()
-
     log.info(
         "scan_end: scan_id=%s duration=%.1fs alerts=%d suppressed=%d",
-        scan_id, duration_seconds, alerts_sent, alerts_suppressed,
+        scan_id,
+        duration_seconds,
+        alerts_sent,
+        alerts_suppressed,
     )
 
     return {
-        "scan_id":                  scan_id,
-        "started_at":               started_at,
-        "ended_at":                 ended_at,
-        "duration_seconds":         round(duration_seconds, 3),
-        "is_manual":                is_manual,
-        "market_hours":             is_market_hours(config),
-        "status":                   "complete",
-        "total_tickers_input":      total_tickers_input,
-        "total_evaluated":          total_tickers_input,
-        "total_data_failures":      total_data_failures,
+        "scan_id": scan_id,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_seconds": round(duration_seconds, 3),
+        "is_manual": is_manual,
+        "market_hours": is_market_hours(config),
+        "status": "complete",
+        "total_tickers_input": total_tickers_input,
+        "total_evaluated": total_tickers_input,
+        "total_data_failures": total_data_failures,
         "total_prefilter_rejected": total_prefilter_rejected,
-        "total_prefilter_passed":   total_prefilter_passed,
-        "total_claude_candidates":  total_claude_candidates,
-        "total_claude_success":       total_claude_success,
-        "total_claude_failed":        total_claude_failed,
-        "total_claude_rate_limited":  total_claude_rate_limited,
-        "final_tier_counts":        final_tier_counts,
-        "alerts_sent":              alerts_sent,
-        "alerts_suppressed":        alerts_suppressed,
-        "top_candidates":                top_candidates,
-        "failures":                      failures,
-        "first_data_failure_reasons":    data_failure_sample,
+        "total_prefilter_passed": total_prefilter_passed,
+        "total_claude_candidates": total_claude_candidates,
+        "total_claude_success": total_claude_success,
+        "total_claude_failed": total_claude_failed,
+        "total_claude_rate_limited": total_claude_rate_limited,
+        "final_tier_counts": final_tier_counts,
+        "alerts_sent": alerts_sent,
+        "alerts_suppressed": alerts_suppressed,
+        "top_candidates": top_candidates,
+        "failures": failures,
+        "first_data_failure_reasons": data_failure_sample,
     }
 
-
-# ---------------------------------------------------------------------------
-# Full scan with overlap lock (scheduled and manual !scan)
-# ---------------------------------------------------------------------------
 
 async def run_full_scan(
     bot,
@@ -792,48 +671,32 @@ async def run_full_scan(
     is_manual: bool = False,
     _lock: asyncio.Lock | None = None,
 ) -> dict:
-    """Load tickers + state, acquire overlap lock, run pipeline.
-
-    Returns scan summary. If the lock is already held, returns a skipped
-    summary without running the pipeline.
-
-    Args:
-        _lock: override the module-level lock (for testing)
-    """
+    """Load tickers/state, enforce overlap lock, and run a full scan."""
     lock = _lock if _lock is not None else _SCAN_LOCK
-
     if lock.locked():
         log.warning("SCAN_SKIPPED: previous scan still running (is_manual=%s)", is_manual)
         return {
-            "scan_id":   scan_id or "skipped",
-            "status":    "skipped",
-            "reason":    "scan_already_running",
+            "scan_id": scan_id or "skipped",
+            "status": "skipped",
+            "reason": "scan_already_running",
             "is_manual": is_manual,
         }
 
     async with lock:
         scan_id = scan_id or _make_scan_id()
-
-        ticker_file   = config.get("scan", {}).get("ticker_file", "config/tickers.txt")
+        ticker_file = config.get("scan", {}).get("ticker_file", "config/tickers.txt")
         ticker_result = market_data_mod.load_tickers(ticker_file)
-        tickers       = ticker_result.get("tickers", [])
-
+        tickers = ticker_result.get("tickers", [])
         if not tickers:
             log.error("No tickers loaded from %s", ticker_file)
             return _abort_summary(
                 scan_id, datetime.utcnow().isoformat(), 0, "no tickers loaded"
             )
-
         state = state_store.load(config)
-
         return await run_scan_pipeline(
             tickers, bot, config, state, system_prompt, client, scan_id, is_manual
         )
 
-
-# ---------------------------------------------------------------------------
-# Single-ticker manual analyze (!analyze TICKER)
-# ---------------------------------------------------------------------------
 
 async def run_analyze(
     ticker: str,
@@ -843,26 +706,25 @@ async def run_analyze(
     client,
     _lock: asyncio.Lock | None = None,
 ) -> dict:
-    """Single-ticker analysis with manual_override=True.
+    """Single-ticker manual inspection using the production judgment stack.
 
-    Bypasses prefilter score floor and dedup cooldown.
-    Still enforces: tiering hard gates, JSON validation, safe_for_alert, WAIT suppression.
+    Bypasses universe prefilter admission and dedup cooldown only. JSON
+    validation, deterministic tiering vetoes, chart evidence, ladder/capital
+    arbitration, the downgrade-only seal, WAIT suppression and safety bind.
     """
     lock = _lock if _lock is not None else _SCAN_LOCK
-
     if lock.locked():
         log.warning("ANALYZE_SKIPPED: scan lock held — cannot analyze %s", ticker)
         return {
-            "status":     "skipped",
-            "reason":     "scan_already_running",
-            "ticker":     ticker,
+            "status": "skipped",
+            "reason": "scan_already_running",
+            "ticker": ticker,
             "final_tier": "WAIT",
         }
 
     async with lock:
         scan_id = f"analyze_{ticker}_{datetime.utcnow().strftime('%H%M%S')}"
 
-        # Fetch
         try:
             mres = market_data_mod.fetch_ticker(ticker, config)
         except Exception as exc:
@@ -871,30 +733,29 @@ async def run_analyze(
 
         if mres["data_status"] != "OK":
             return {
-                "status":      "data_failure",
-                "ticker":      ticker,
+                "status": "data_failure",
+                "ticker": ticker,
                 "data_status": mres["data_status"],
-                "final_tier":  "WAIT",
+                "final_tier": "WAIT",
             }
 
-        # Enrich
         try:
             enriched = indicators.enrich(ticker, mres["df"], config)
-            enriched["data_status"]  = "OK"
+            enriched["data_status"] = "OK"
             enriched["latest_close"] = mres["latest_close"]
         except Exception as exc:
             log.warning("ENRICH_ERROR in !analyze %s: %s", ticker, exc)
             return {"status": "error", "ticker": ticker, "error": str(exc), "final_tier": "WAIT"}
 
-        # Prefilter (veto flags only — score floor bypassed for !analyze)
+        # Manual analysis bypasses only admission. Veto evidence is preserved
+        # and still passed to deterministic tiering.
         pf_res = prefilter_mod.score_ticker(enriched, config)
 
-        # Claude — cannot skip
         if client is None:
             return {
-                "status":     "error",
-                "ticker":     ticker,
-                "error":      "ANTHROPIC_KEY not configured",
+                "status": "error",
+                "ticker": ticker,
+                "error": "ANTHROPIC_KEY not configured",
                 "final_tier": "WAIT",
             }
 
@@ -907,24 +768,31 @@ async def run_analyze(
 
         if cr.get("signal") is None:
             return {
-                "status":        "claude_error",
-                "ticker":        ticker,
-                "error_type":    cr.get("error_type"),
+                "status": "claude_error",
+                "ticker": ticker,
+                "error_type": cr.get("error_type"),
                 "error_message": cr.get("error_message"),
-                "final_tier":    "WAIT",
+                "final_tier": "WAIT",
             }
 
-        # Tiering (cannot be bypassed)
         tiering_result = tiering.validate(cr["signal"], pf_res, config)
-        final_tier     = tiering_result.get("final_tier", "WAIT")
-
-        # State + dedup — manual_override=True bypasses cooldown
         state = state_store.load(config)
+        ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
+        previous_state = ticker_states.get(ticker) if isinstance(ticker_states, dict) else None
+
+        tiering_result = _complete_candidate_judgment(
+            ticker,
+            tiering_result,
+            enriched,
+            mres,
+            config,
+            previous_state,
+        )
+        final_tier = tiering_result.get("final_tier", "WAIT")
+
         dedup_decision = state_store.check_alert(
             tiering_result, state, config, manual_override=True
         )
-
-        # Alert
         send_result = await discord_alerts.send_alert(
             tiering_result, dedup_decision, bot, config, scan_id
         )
@@ -937,13 +805,13 @@ async def run_analyze(
                 log.critical("CRITICAL: state write failed after !analyze: %s", exc)
 
         return {
-            "status":         "complete",
-            "scan_id":        scan_id,
-            "ticker":         ticker,
-            "final_tier":     final_tier,
+            "status": "complete",
+            "scan_id": scan_id,
+            "ticker": ticker,
+            "final_tier": final_tier,
             "safe_for_alert": tiering_result.get("safe_for_alert"),
-            "dedup_reason":   dedup_decision.get("reason"),
-            "alert_sent":     send_result.get("sent", False),
-            "channel_id":     send_result.get("channel_id"),
+            "dedup_reason": dedup_decision.get("reason"),
+            "alert_sent": send_result.get("sent", False),
+            "channel_id": send_result.get("channel_id"),
             "tiering_result": tiering_result,
         }
