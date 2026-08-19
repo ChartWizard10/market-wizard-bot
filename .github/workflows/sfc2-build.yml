@@ -33,7 +33,9 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: Apply SFC-2 integration
-        run: python tools/sfc2_patch.py
+        run: |
+          python tools/sfc2_patch.py
+          python tools/sfc2_fix.py
 
       - name: Compile and run full tests
         env:
