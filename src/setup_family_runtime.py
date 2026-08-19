@@ -18,6 +18,13 @@ The GPT prompt already serializes the resolved primary family's ``metrics``.
 To expose cross-family context without widening the model schema in this phase,
 CFR-2 projects a compact, namespaced ``cross_family_resolution`` object into a
 copy of the resolved primary metrics.  The raw SFC-1 objects are never mutated.
+
+Prompt hygiene note: the compact projection intentionally omits the resolver's
+``version`` field because the historical disabled-indicator regression rejects
+the substring ``rsi`` anywhere in model payloads, including inside unrelated
+words such as ``version``.  Runtime provenance remains available at the
+separate top-level ``runtime_version`` / ``resolver_version`` fields and does
+not need to be repeated inside GPT metrics.
 """
 
 from __future__ import annotations
@@ -46,7 +53,6 @@ def _compact_resolution(resolution: dict | None) -> dict:
     """Return bounded model/audit context; no score or authority is created."""
     r = resolution if isinstance(resolution, dict) else {}
     return {
-        "version": r.get("version", family_resolver.VERSION),
         "relationship": r.get("relationship", family_resolver.REL_NONE),
         "conflict_scope": r.get("conflict_scope", family_resolver.CONFLICT_NONE),
         "resolved_primary_family": r.get("resolved_primary_family", NONE),
