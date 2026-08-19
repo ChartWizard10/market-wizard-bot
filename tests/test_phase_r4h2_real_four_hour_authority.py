@@ -1,19 +1,18 @@
 """Phase R4H-2 — real 4H operational authority handoff regression suite.
 
-These tests enforce the production hierarchy:
+Production hierarchy:
 
     Weekly campaign -> Daily permission -> REAL 4H operation -> 1H trigger.
 
-The old Phase-14F proxy remains visible for diagnosis/rollback but cannot
-outvote trusted real 4H evidence. Untrusted real 4H evidence is missing proof,
-not market failure, and must fail closed to no new capital.
+The Phase-14F operational proxy remains visible for diagnosis/rollback but
+cannot outvote trusted real 4H evidence. Untrusted real 4H evidence is missing
+proof, not market failure, and fails closed to no new capital.
 """
 
 from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 from src import four_hour_authority as r4h2
-from src import snipe_ladder_judgment as ladder
 from src import timeframe_alignment
 from src.scheduler import _complete_candidate_judgment
 from tests.test_scheduler import _cfg_market_hours, _enriched, _snipe_tiering_result
@@ -82,7 +81,7 @@ def test_01_closed_complete_fresh_defendable_4h_becomes_valid_authority():
 
 
 def test_02_live_bucket_cannot_create_full_4h_confirmation():
-    """Fresh LIVE context may exist, but forming retest/hold cannot map VALID."""
+    """LIVE context may exist, but forming retest/hold cannot map VALID."""
     auth = r4h2.build_operational_authority(
         _real(freshness="LIVE", retest="IN_PROGRESS", hold="FORMING"),
         _proxy(),
@@ -182,7 +181,7 @@ def test_09_untrusted_real_4h_withdraws_starter_capital_too():
     assert out["capital_action"] == "wait_no_capital"
 
 
-def test_10_trusted_real_4h_does_not_change_existing_capital_tier():
+def test_10_trusted_valid_real_4h_does_not_change_existing_capital_tier():
     result = _capital_result("STARTER")
     result["four_hour_authority"] = r4h2.build_operational_authority(
         _real(), _proxy(), _cfg()
@@ -193,7 +192,7 @@ def test_10_trusted_real_4h_does_not_change_existing_capital_tier():
     assert out["four_hour_authority"]["capital_floor_enforced"] is False
 
 
-def _alignment_input(authority, proxy_state="LOCATION_VALID"):
+def _alignment_input(proxy_state="LOCATION_VALID"):
     result = _snipe_tiering_result("AAPL")
     result["trade_location"] = {
         "location_state": "mid_zone_acceptance" if proxy_state == "LOCATION_VALID"
@@ -210,33 +209,38 @@ def _alignment_input(authority, proxy_state="LOCATION_VALID"):
         "invalidation": {"clear": True},
         "path_quality": {"path_label": "CLEAN"},
     }
-    result["four_hour_authority"] = authority
     return result
 
 
-def test_11_timeframe_alignment_real_4h_outvotes_legacy_proxy():
+def _build_and_reconcile(result, auth):
+    proxy_tf = timeframe_alignment.build_timeframe_alignment_context(
+        "AAPL", result, enriched_data={}, config=_cfg()
+    )
+    return r4h2.reconcile_timeframe_alignment(
+        proxy_tf, result, auth, _cfg()
+    )
+
+
+def test_11_reconciled_alignment_real_4h_outvotes_legacy_proxy():
     auth = r4h2.build_operational_authority(
         _real(location="HOSTILE", structural="FAILURE", failure="ACCEPTED_FAILURE"),
         _proxy("LOCATION_VALID"),
         _cfg(),
     )
-    result = _alignment_input(auth)
-    tf = timeframe_alignment.build_timeframe_alignment_context(
-        "AAPL", result, enriched_data={}, config=_cfg()
-    )
+    result = _alignment_input()
+    tf = _build_and_reconcile(result, auth)
     assert tf["operational_timeframe"]["state"] == "LOCATION_HOSTILE"
     assert tf["operational_proxy_timeframe"]["state"] == "LOCATION_VALID"
     assert tf["operational_authority"]["authority_mode"] == r4h2.AUTHORITY_MODE
     assert tf["alignment_label"] == "CONFLICTED"
 
 
-def test_12_timeframe_alignment_untrusted_4h_is_unknown_and_capital_blocked():
+def test_12_untrusted_real_4h_regrades_alignment_unknown_and_capital_blocked():
     auth = r4h2.build_operational_authority(
         _real(status="STALE", freshness="STALE"), _proxy("LOCATION_VALID"), _cfg()
     )
-    tf = timeframe_alignment.build_timeframe_alignment_context(
-        "AAPL", _alignment_input(auth), enriched_data={}, config=_cfg()
-    )
+    result = _alignment_input()
+    tf = _build_and_reconcile(result, auth)
     op = tf["operational_timeframe"]
     assert op["state"] == "UNKNOWN"
     assert op["blocks_capital"] is True
@@ -244,39 +248,42 @@ def test_12_timeframe_alignment_untrusted_4h_is_unknown_and_capital_blocked():
     assert tf["status"] == "DEGRADED"
 
 
-def test_13_real_extended_4h_cannot_be_upgraded_to_functionally_valid_repair():
-    card = {
-        "four_h": "LOCATION_EXTENDED",
-        "tl_state": "above_zone_extension",
-        "retest_truth": "RETEST_REAL",
-        "price_below_inval": False,
-        "real4h_active": True,
-    }
-    assert ladder._four_h_ok(card) == "REPAIRING"
+def test_13_trusted_extended_real_4h_blocks_fresh_snipe_chase_capital():
+    result = _capital_result("SNIPE_IT")
+    result["four_hour_authority"] = r4h2.build_operational_authority(
+        _real(location="EXTENDED", retest="CONFIRMED", hold="CONFIRMED"),
+        _proxy("LOCATION_REPAIRING"),
+        _cfg(),
+    )
+    out = r4h2.enforce_operational_capital_floor(result, _cfg())
+    assert out["final_tier"] == "NEAR_ENTRY"
+    assert out["capital_action"] == "wait_no_capital"
+    assert "extended" in out["four_hour_authority"]["capital_floor_reason"]
 
 
-def test_14_shared_scheduler_uses_same_60m_request_for_1h_and_real_4h():
+def test_14_shared_scheduler_reuses_one_60m_request_and_reconciles_real_4h():
     cfg = _cfg_market_hours()
     cfg.setdefault("timeframe_alignment", {})["real_4h_authority_enabled"] = True
     result = _snipe_tiering_result("AAPL")
     enriched = _enriched("AAPL")
     four_env = {"status": "OK", "bars": []}
     one_env = {"bars": [], "four_hour": four_env}
-    call_order = []
-
-    def _authority(real, proxy, config):
-        call_order.append("authority")
-        return {
-            "authority_mode": r4h2.AUTHORITY_MODE,
-            "authority_status": r4h2.TRUSTED,
-            "authority_usable": True,
-            "capital_floor_cleared": True,
-            "state": "LOCATION_VALID",
-            "blocks_trigger": False,
-            "blocks_capital": False,
-            "evidence": [], "warnings": [], "trust_failures": [],
-            "proxy_state": proxy.get("state"), "proxy_layer": proxy,
-        }
+    proxy_tfa = {"operational_timeframe": _proxy("LOCATION_VALID")}
+    authority = {
+        "authority_version": "R4H-2",
+        "authority_mode": r4h2.AUTHORITY_MODE,
+        "authority_status": r4h2.TRUSTED,
+        "authority_usable": True,
+        "capital_floor_cleared": True,
+        "state": "LOCATION_VALID",
+        "blocks_trigger": False,
+        "blocks_capital": False,
+        "evidence": [],
+        "warnings": [],
+        "trust_failures": [],
+        "proxy_state": "LOCATION_VALID",
+        "proxy_layer": _proxy(),
+    }
 
     with (
         patch("src.scheduler.trajectory_mod.compute", return_value={}),
@@ -284,10 +291,11 @@ def test_14_shared_scheduler_uses_same_60m_request_for_1h_and_real_4h():
         patch("src.scheduler.candle_evidence.build_candle_evidence_context", return_value={}),
         patch("src.scheduler.market_data_mod.fetch_one_hour_bars", return_value=one_env) as fetch,
         patch("src.scheduler.one_hour_entry.build_one_hour_entry_context", return_value={"status": "ENABLED"}),
+        patch("src.scheduler.timeframe_alignment.build_timeframe_alignment_context", return_value=proxy_tfa) as tfa_build,
         patch("src.scheduler.four_hour_operational.build_four_hour_operational_context", return_value=_real()) as real4h,
         patch("src.scheduler.four_hour_operational.compare_real_vs_proxy", return_value={"agreement": "AGREE"}),
-        patch("src.scheduler.four_hour_authority.build_operational_authority", side_effect=_authority),
-        patch("src.scheduler.timeframe_alignment.build_timeframe_alignment_context", return_value={"operational_timeframe": {"state": "LOCATION_VALID"}}) as tf,
+        patch("src.scheduler.four_hour_authority.build_operational_authority", return_value=authority) as auth_build,
+        patch("src.scheduler.four_hour_authority.reconcile_timeframe_alignment", return_value={"operational_timeframe": _proxy("LOCATION_VALID")}) as reconcile,
         patch("src.scheduler.higher_timeframe_context.daily_bars_from_df", return_value=[]),
         patch("src.scheduler.higher_timeframe_context.build_higher_timeframe_context", return_value={}),
         patch("src.scheduler.snipe_gate_audit.build_snipe_gate_audit", return_value={}),
@@ -303,17 +311,46 @@ def test_14_shared_scheduler_uses_same_60m_request_for_1h_and_real_4h():
 
     fetch.assert_called_once_with("AAPL", cfg)
     assert real4h.call_args.kwargs["four_hour_bars"] is four_env
-    assert out["four_hour_authority"]["authority_usable"] is True
-    assert call_order == ["authority"]
-    tf.assert_called_once()
+    tfa_build.assert_called_once()
+    auth_build.assert_called_once()
+    reconcile.assert_called_once()
     floor.assert_called_once()
+    assert out["four_hour_authority"]["authority_usable"] is True
 
 
-def test_15_authority_floor_executes_before_downgrade_only_seal():
+def test_15_authority_reconciliation_and_floor_run_before_gate_ladder_seal_boundaries():
     from pathlib import Path
 
     src = Path("src/scheduler.py").read_text(encoding="utf-8")
     helper = src[src.index("def _complete_candidate_judgment("):src.index("async def run_scan_pipeline")]
+    assert helper.index("build_timeframe_alignment_context") < helper.index("build_four_hour_operational_context")
+    assert helper.index("build_four_hour_operational_context") < helper.index("reconcile_timeframe_alignment")
+    assert helper.index("reconcile_timeframe_alignment") < helper.index("build_snipe_gate_audit")
+    assert helper.index("build_snipe_gate_audit") < helper.index("apply_ladder_arbitration")
     assert helper.index("apply_ladder_arbitration") < helper.index("enforce_operational_capital_floor")
     assert helper.index("enforce_operational_capital_floor") < helper.index("seal_snipe_confirmed_consistency")
-    assert helper.index("build_four_hour_operational_context") < helper.index("build_timeframe_alignment_context")
+
+
+def test_16_repairing_real_4h_caps_full_snipe_to_starter_not_watch():
+    result = _capital_result("SNIPE_IT")
+    result["four_hour_authority"] = r4h2.build_operational_authority(
+        _real(location="REPAIRING", retest="CONFIRMED", hold="FORMING"),
+        _proxy("LOCATION_VALID"),
+        _cfg(),
+    )
+    out = r4h2.enforce_operational_capital_floor(result, _cfg())
+    assert out["final_tier"] == "STARTER"
+    assert out["capital_action"] == "starter_only"
+    assert "reduced-size" in out["four_hour_authority"]["capital_floor_reason"]
+
+
+def test_17_authority_requires_explicit_opt_in_for_legacy_config_compatibility():
+    legacy_cfg = {"timeframe_alignment": {"enabled": True}}
+    auth = r4h2.build_operational_authority(
+        _real(status="STALE", freshness="STALE", location="HOSTILE"),
+        _proxy("LOCATION_VALID"),
+        legacy_cfg,
+    )
+    assert auth["authority_mode"] == r4h2.PROXY_MODE
+    assert auth["authority_status"] == r4h2.DISABLED
+    assert auth["state"] == "LOCATION_VALID"
