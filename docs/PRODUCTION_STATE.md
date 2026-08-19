@@ -17,9 +17,31 @@ Update this file when a production phase changes architecture, authority, runtim
 - SNIPE gate audit, unified ladder, downgrade-only consistency seal, final-state reconciliation, and calibration are installed.
 - Final-tier dedup reconciliation is installed: cooldown/tier-improvement sees the final executable tier.
 - Autoscan and manual `!analyze` share the same post-tiering candidate-judgment organ.
-- Claude runtime model override is supported through `ANTHROPIC_MODEL`; config fallback remains `claude-sonnet-4-6`.
 - Scan-funnel telemetry is isolated from alert history and remains observational only.
 - Production ticker loader normalizes uppercase symbols, ignores blanks/comments, deduplicates, validates format, and never fetches market data.
+
+## Model-provider correction — active P0 finding
+
+Operator intent is OpenAI GPT-5.6.
+
+Current production `main` is NOT yet aligned with that intent:
+
+- `main.py` still instantiates `anthropic.AsyncAnthropic`;
+- `requirements.txt` still installs `anthropic`;
+- `src/scheduler.py` still imports the legacy `claude_client` API;
+- `config/doctrine_config.yaml`, telemetry names, tests, README/runbook history and environment naming still contain Claude/Anthropic terminology.
+
+This is now an explicit production issue to repair. Documentation must not pretend GPT-5.6 is already the deployed model before the runtime migration is merged and Railway is updated.
+
+Target runtime:
+
+- OpenAI API;
+- GPT-5.6 model family;
+- preferred flagship alias: `gpt-5.6` / GPT-5.6 Sol;
+- Structured Outputs / strict JSON-schema contract;
+- deterministic tiering remains sovereign over capital/routing.
+
+No provider migration may silently modify scanner doctrine, thresholds, candidate admission, cadence, universe, routing, or capital contracts.
 
 ## Current production universe
 
@@ -74,27 +96,50 @@ Production design requires four explicit families:
 
 `VCP_BREAK_RETEST`: NOT yet represented by a dedicated deterministic family organ. Existing generic compression label is model-side only and broad-universe admission can miss pre-breakout VCPs.
 
-`SMA_CRADLE_CONTINUATION`: doctrine exists in the source stack, but the repository does NOT yet have the dedicated production evidence organ/normalized family object required by the A+ scanner doctrine.
+`SMA_CRADLE_CONTINUATION`: doctrine exists in the source stack, but the repository does NOT yet have the dedicated production evidence organ/normalized family object required by the scanner doctrine.
 
 `GAP_FILL_REVERSAL`: doctrine exists in the source stack, but the repository does NOT yet have a dedicated gap-state/fill/reclaim evidence organ.
 
 This is the primary strategy-build gap before the scanner is considered ready for the final requested universe expansion.
 
+## Candidate-cap decision
+
+Current production cap: 30 deep-analysis candidates per scan.
+
+Operator preference: consider 40.
+
+Engineering decision: do NOT raise blindly during P0. A move from 30 to 40 is a 33.3% increase in maximum model calls per scan. The repository already observes ranks 31-60 in near-cut telemetry without paying for deep analysis, so the next cap decision can be evidence-based.
+
+Preferred sequence:
+
+1. migrate the runtime to GPT-5.6;
+2. complete the setup-family compiler so candidate ranking reflects the actual doctrine;
+3. replay/inspect ranks 31-40;
+4. verify incremental STARTER/SNIPE capture;
+5. verify worst-case scan latency and API cost/rate budget remain comfortably inside the 15-minute cadence;
+6. raise to 40 if the incremental recall is real.
+
+40 is technically plausible and is the preferred next ceiling if those tests pass. Candidate-cap expansion must not be used to mask a weak prefilter.
+
 ## Next production sequence
 
-1. Setup Family Compiler contract/schema.
-2. SMA Cradle evidence organ and explicit gate integration.
-3. VCP evidence organ and admission/readiness integration.
-4. Gap Fill Reversal evidence organ and admission/readiness integration.
-5. Normalize Break/Retest family under the same family contract.
-6. Cross-family contradiction resolver and tier contract tests.
-7. Full CI and shadow/audit review.
-8. Universe expansion as a dedicated final change.
+1. P0 governance reconciliation and merge.
+2. AI-1: OpenAI GPT-5.6 runtime migration with structured-output parity and no doctrine drift.
+3. Setup Family Compiler contract/schema.
+4. SMA Cradle evidence organ and explicit gate integration.
+5. VCP evidence organ and admission/readiness integration.
+6. Gap Fill Reversal evidence organ and admission/readiness integration.
+7. Normalize Break/Retest family under the same family contract.
+8. Cross-family contradiction resolver and tier contract tests.
+9. R4H-2 evidence-based real-4H authority decision.
+10. Five-session/+8% feasibility research layer.
+11. CAP-40 measured 30-vs-40 capacity evaluation.
+12. Universe expansion as a dedicated final change.
+13. Chronological replay / out-of-sample validation and Railway observation.
 
-## Things that must NOT drift during the family work
+## Things that must NOT drift during the next phases
 
-- candidate cap remains 30 unless a separate capacity study changes it;
-- scan cadence remains 15 minutes;
+- scan cadence remains 15 minutes unless explicitly changed in a capacity phase;
 - Daily/Weekly/4H/1H jurisdiction remains intact;
 - real 4H remains shadow until R4H-2 is explicitly proven;
 - score cannot override failed execution gates;
@@ -102,10 +147,14 @@ This is the primary strategy-build gap before the scanner is considered ready fo
 - telemetry remains observational;
 - no disabled indicator may be reintroduced;
 - no family organ may treat a level touch as an entry;
-- no setup-family phase may casually change universe membership.
+- no setup-family phase may casually change universe membership;
+- no provider migration may alter trading doctrine as a side effect.
 
-## Operational debt tracked but not blocking family compiler work
+## Operational debt tracked but not blocking the next phase
 
 - `datetime.utcnow()` deprecation warnings under Python 3.13 should be migrated deliberately in a dedicated timestamp phase.
 - Root historical artifacts (`bot.py`, legacy PDFs) are not the governing runtime path; do not modify/delete them casually without a dedicated cleanup review.
-- The old README is being replaced by production documentation in this governance phase.
+
+## Stop condition before universe expansion
+
+Do not request the new ticker list until the pre-universe production checkpoint is reached. At that checkpoint, stop and explicitly ask the operator for the ticker list.
