@@ -5,8 +5,11 @@ Pipeline order (enforced — no shortcuts):
   → indicators.enrich
   → prefilter.prefilter (score + veto + cap)
   → claude_client.async_claude_scan (capped candidates only)
-  → tiering.validate (final tier authority)
-  → state_store.check_alert (dedup)
+  → tiering.validate (base tier authority)
+  → evidence organs + SNIPE gate audit
+  → SNIPE ladder arbitration
+  → SNIPE confirmed seal
+  → state_store.check_alert (dedup on final executable tier)
   → discord_alerts.send_alert (route + post)
   → state_store.record_alert + save
 
@@ -317,7 +320,7 @@ async def run_scan_pipeline(
     log.info("claude_complete: %d results", len(claude_results))
 
     # ------------------------------------------------------------------
-    # Steps 5–8: Per-result: tiering → dedup → alert → record
+    # Steps 5–8: Per-result: tiering → evidence → final dedup → alert → record
     # ------------------------------------------------------------------
     for cr in claude_results:
         ticker = cr.get("ticker", "UNKNOWN")
@@ -362,7 +365,7 @@ async def run_scan_pipeline(
         except Exception:
             pass
 
-        # Step 5: Tiering validation (sole final authority — cannot be bypassed)
+        # Step 5: Tiering validation (base authority; Phase 14S may arbitrate later)
         try:
             tiering_result = tiering.validate(cr["signal"], pf_res, config)
         except Exception as exc:
@@ -380,42 +383,21 @@ async def run_scan_pipeline(
             continue
 
         final_tier = tiering_result.get("final_tier", "WAIT")
-        final_tier_counts[final_tier] = final_tier_counts.get(final_tier, 0) + 1
 
         # Phase 14V: the BASE tier, captured before the ladder can arbitrate it.
         _tlm_base_tier = final_tier
         _tlm_base_tiers[final_tier] = _tlm_base_tiers.get(final_tier, 0) + 1
 
-        # Phase 14V.1 (M1): capture the state check_alert is about to be
-        # evaluated against. check_alert runs HERE, before the ladder (6.592)
-        # and seal (6.595), so the final served tier may differ. The ledger
-        # must never imply the final tier was the decision basis.
-        _tlm_ca_tier = tiering_result.get("final_tier")
-        _tlm_ca_capital = tiering_result.get("capital_action")
-
-        # Step 6: Dedup check
+        # Step 6.5: Trajectory (informational — never affects tier, capital, or routing).
+        # Phase 14S.4B: trajectory needs prior ticker state, not an early dedup
+        # verdict. Dedup is intentionally deferred until every tier-mutating
+        # organ has finished so cooldown/tier-improvement truth is evaluated
+        # against the final executable tier.
         try:
-            dedup_decision = state_store.check_alert(
-                tiering_result, state, config, manual_override=is_manual
-            )
-        except Exception as exc:
-            log.warning("DEDUP_ERROR: %s: %s", ticker, exc)
-            dedup_decision = {"should_alert": False, "reason": "dedup_error"}
-        try:
-            # Phase 14V: raw check_alert vocabulary, stored verbatim. This
-            # scanner's only same-signal suppression is `duplicate_suppressed`
-            # (the cooldown path); a dedup_key match is never a suppression
-            # event, so none is ever counted as one.
-            _tlm_reason = (dedup_decision or {}).get("reason")
-            if _tlm_reason:
-                _tlm_reasons[_tlm_reason] = _tlm_reasons.get(_tlm_reason, 0) + 1
-        except Exception:
-            pass
-
-        # Step 6.5: Trajectory (informational — never affects tier, capital, or routing)
-        try:
+            _ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
+            _previous_state = _ticker_states.get(ticker) if isinstance(_ticker_states, dict) else None
             tiering_result["trajectory"] = trajectory_mod.compute(
-                tiering_result, dedup_decision.get("previous_state")
+                tiering_result, _previous_state
             )
         except Exception as exc:
             log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
@@ -613,8 +595,7 @@ async def run_scan_pipeline(
 
         # Phase 14V.1 (B1): the FINAL served tier — after 1H, HTF, gate,
         # ladder arbitration, the 14S.7C capital floor, and the seal. Counted
-        # exactly once per candidate that reached a real tiering_result. The
-        # production counter final_tier_counts is left untouched.
+        # exactly once per candidate that reached a real tiering_result.
         try:
             _tlm_served = tiering_result.get("final_tier")
             if _tlm_served:
@@ -632,6 +613,38 @@ async def run_scan_pipeline(
         except Exception as exc:
             log.warning("CALIBRATION_ERROR: %s: %s", ticker, exc)
             tiering_result["calibration"] = None
+
+        # Step 6.7: FINAL-tier truth + dedup reconciliation (Phase 14S.4B).
+        # This runs downstream from every tier-mutating organ. A preliminary
+        # STARTER can legitimately become SNIPE_IT; a preliminary SNIPE can be
+        # sealed down. Cooldown, tier-improvement and material-change logic must
+        # judge the state that can actually be served — never stale base state.
+        final_tier = tiering_result.get("final_tier", final_tier)
+        final_tier_counts[final_tier] = final_tier_counts.get(final_tier, 0) + 1
+
+        # Phase 14V.3: telemetry now records the FINAL tier/capital state that
+        # check_alert is actually evaluating. The base tier remains separately
+        # persisted in _tlm_base_tier, so no information is lost.
+        _tlm_ca_tier = tiering_result.get("final_tier")
+        _tlm_ca_capital = tiering_result.get("capital_action")
+
+        try:
+            dedup_decision = state_store.check_alert(
+                tiering_result, state, config, manual_override=is_manual
+            )
+        except Exception as exc:
+            log.warning("DEDUP_ERROR: %s: %s", ticker, exc)
+            dedup_decision = {"should_alert": False, "reason": "dedup_error"}
+
+        try:
+            # Raw check_alert vocabulary, stored verbatim. This scanner's only
+            # same-signal suppression is duplicate_suppressed (cooldown); a
+            # dedup_key match is identity state, not a separate suppression.
+            _tlm_reason = (dedup_decision or {}).get("reason")
+            if _tlm_reason:
+                _tlm_reasons[_tlm_reason] = _tlm_reasons.get(_tlm_reason, 0) + 1
+        except Exception:
+            pass
 
         # Step 7: Discord alert
         try:
