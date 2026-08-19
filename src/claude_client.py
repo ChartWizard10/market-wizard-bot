@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from src import family_resolver
+
 log = logging.getLogger(__name__)
 
 
@@ -180,17 +182,18 @@ def load_system_prompt(path: str = "prompts/market_wizard_system.md") -> str:
 
 
 def _append_setup_family_context(lines: list[str], enriched: dict) -> None:
-    """Append compact normalized SFC evidence to the GPT-5.6 input payload.
+    """Append deterministic SFC+CFR context to the GPT-5.6 input payload.
 
-    Family evidence is deterministic context, not capital authority. The model
-    sees lifecycle/state/location/geometry so it can reason about VCP, SMA
-    cradle, gap-fill and break/retest candidates that the generic FVG/OB view
-    alone cannot express.
+    CFR is recomputed defensively here so direct prompt construction and the
+    normal prefilter->model path use the same resolved primary. The helper is
+    pure: it does not mutate ``enriched``. Confluence/contradiction is context,
+    never an automatic score or capital bonus.
     """
     evidence = enriched.get("setup_family_evidence")
     if not isinstance(evidence, dict):
         return
 
+    evidence = family_resolver.reconcile_compiled_evidence(evidence)
     primary = str(evidence.get("primary_family") or "NONE")
     if primary == "NONE":
         return
@@ -199,36 +202,60 @@ def _append_setup_family_context(lines: list[str], enriched: dict) -> None:
     families = families if isinstance(families, dict) else {}
     primary_obj = families.get(primary)
     primary_obj = primary_obj if isinstance(primary_obj, dict) else {}
+    resolution = evidence.get("family_resolution")
+    resolution = resolution if isinstance(resolution, dict) else {}
 
     lines.append(f"SETUP_FAMILY_PRIMARY: {primary}")
+    compiler_primary = str(evidence.get("compiler_primary_family") or "NONE")
+    if compiler_primary != "NONE":
+        lines.append(f"SETUP_FAMILY_COMPILER_PRIMARY: {compiler_primary}")
     lines.append(
         f"SETUP_FAMILY_STATE: {evidence.get('primary_state') or primary_obj.get('state') or 'UNKNOWN'}"
     )
     lines.append(
-        f"SETUP_FAMILY_SCORE: {int(evidence.get('primary_family_score') or primary_obj.get('family_score') or 0)}"
+        f"SETUP_FAMILY_SCORE: {int(evidence.get('primary_family_score') or 0)}"
     )
-    lines.append(f"SETUP_FAMILY_WATCH_READY: {bool(evidence.get('watch_ready') or primary_obj.get('watch_ready'))}")
-    lines.append(f"SETUP_FAMILY_ADMISSION_READY: {bool(evidence.get('admission_ready') or primary_obj.get('admission_ready'))}")
+    lines.append(f"SETUP_FAMILY_WATCH_READY: {bool(evidence.get('watch_ready'))}")
+    lines.append(f"SETUP_FAMILY_ADMISSION_READY: {bool(evidence.get('admission_ready'))}")
     lines.append(
         "SETUP_FAMILY_ENTRY_STRUCTURE_VALID: "
-        f"{bool(evidence.get('entry_structure_valid') or primary_obj.get('entry_structure_valid'))}"
+        f"{bool(evidence.get('entry_structure_valid'))}"
     )
 
-    invalidation = (
-        evidence.get("primary_invalidation_level")
-        if evidence.get("primary_invalidation_level") is not None
-        else primary_obj.get("invalidation_level")
+    relationship = str(resolution.get("relationship") or "NONE")
+    conflict_scope = str(resolution.get("conflict_scope") or "NONE")
+    lines.append(f"SETUP_FAMILY_RELATIONSHIP: {relationship}")
+    lines.append(f"SETUP_FAMILY_CONFLICT_SCOPE: {conflict_scope}")
+    lines.append(
+        f"SETUP_FAMILY_CONFLUENCE_COUNT: {int(resolution.get('confluence_count') or 0)}"
     )
-    target = (
-        evidence.get("primary_target_1")
-        if evidence.get("primary_target_1") is not None
-        else primary_obj.get("target_1")
+    lines.append(
+        "SETUP_FAMILY_SCORE_STACKING_ALLOWED: "
+        f"{bool(resolution.get('score_stacking_allowed', False))}"
     )
-    rr = (
-        evidence.get("primary_rr_to_t1")
-        if evidence.get("primary_rr_to_t1") is not None
-        else primary_obj.get("rr_to_t1")
+    lines.append(
+        "SETUP_FAMILY_CAPITAL_AUTHORITY: "
+        f"{bool(resolution.get('capital_authority', False))}"
     )
+
+    secondary = resolution.get("secondary_families") or []
+    if secondary:
+        lines.append("SETUP_FAMILY_SECONDARY: " + ", ".join(str(x) for x in secondary))
+    failed = resolution.get("failed_families") or []
+    if failed:
+        lines.append("SETUP_FAMILY_FAILED_SIBLINGS: " + ", ".join(str(x) for x in failed))
+    shared = resolution.get("shared_failure_codes") or []
+    if shared:
+        lines.append(
+            "SETUP_FAMILY_SHARED_FAILURE_CODES: " + ", ".join(str(x) for x in shared)
+        )
+    reason_codes = resolution.get("reason_codes") or []
+    if reason_codes:
+        lines.append("SETUP_FAMILY_RESOLUTION_REASONS: " + ", ".join(str(x) for x in reason_codes))
+
+    invalidation = evidence.get("primary_invalidation_level")
+    target = evidence.get("primary_target_1")
+    rr = evidence.get("primary_rr_to_t1")
     if invalidation is not None:
         lines.append(f"SETUP_FAMILY_INVALIDATION: {invalidation}")
     if target is not None:
@@ -358,7 +385,7 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
     if rr is not None:
         lines.append(f"ESTIMATED_RR: {rr:.2f}")
 
-    # SFC-2B deterministic family lifecycle context for GPT-5.6.
+    # SFC-2B + CFR-2 deterministic family lifecycle/context for GPT-5.6.
     _append_setup_family_context(lines, enriched)
 
     if prefilter_result:
