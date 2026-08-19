@@ -28,7 +28,6 @@ from datetime import date, datetime, timezone
 from statistics import NormalDist
 from typing import Any
 
-from src import four_hour_counterfactual as cf
 from src import four_hour_outcome_study as base_study
 
 VERSION = "R4H-3C"
@@ -88,7 +87,14 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
-def _parse_observed_at(value: Any) -> datetime | None:
+def _parse_observation_clock(value: Any) -> tuple[datetime, date] | None:
+    """Return (UTC ordering instant, original-offset calendar/session date).
+
+    Sampling identity follows the calendar date encoded by the scan timestamp,
+    while absolute chronology uses UTC.  Converting to UTC before taking the
+    date could move an evening offset-aware observation into the next calendar
+    day and would violate the stated ticker/session sampling contract.
+    """
     text = _text(value)
     if not text:
         return None
@@ -100,7 +106,7 @@ def _parse_observed_at(value: Any) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         return None
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(timezone.utc), parsed.date()
 
 
 def validate_forward_plan(plan: dict | None) -> dict:
@@ -172,21 +178,22 @@ def select_independent_records(
         "MISSING_SAMPLING_IDENTITY": 0,
         "OUTSIDE_EVALUATION_WINDOW": 0,
     }
-    eligible: list[tuple[datetime, str, str, dict]] = []
+    eligible: list[tuple[datetime, date, str, str, dict]] = []
 
     for row in raw_records:
         ticker = _text(row.get("ticker"))
-        observed = _parse_observed_at(row.get("observed_at"))
-        if not ticker or observed is None:
+        clock = _parse_observation_clock(row.get("observed_at"))
+        if not ticker or clock is None:
             excluded["MISSING_SAMPLING_IDENTITY"] += 1
             continue
-        session_date = observed.date()
+        observed_utc, session_date = clock
         if start is None or end is None or session_date < start or session_date > end:
             excluded["OUTSIDE_EVALUATION_WINDOW"] += 1
             continue
         eligible.append(
             (
-                observed,
+                observed_utc,
+                session_date,
                 ticker.upper(),
                 str(row.get("scan_id") or ""),
                 row,
@@ -195,11 +202,11 @@ def select_independent_records(
 
     # Chronology and identity decide the sample. Outcome labels are untouched
     # and are not part of the selection key or sort order.
-    eligible.sort(key=lambda item: (item[0], item[1], item[2]))
+    eligible.sort(key=lambda item: (item[0], item[2], item[3]))
     selected_by_key: dict[tuple[str, date], dict] = {}
     repeated_removed = 0
-    for observed, ticker, _, row in eligible:
-        key = (ticker, observed.date())
+    for _, session_date, ticker, _, row in eligible:
+        key = (ticker, session_date)
         if key in selected_by_key:
             repeated_removed += 1
             continue
@@ -411,7 +418,11 @@ def build_forward_report(
         "routing_authority": False,
         "automatic_promotion": False,
         "design": design,
-        "sampling": {k: v for k, v in selection.items() if k not in ("records", "dataset")},
+        "sampling": {
+            key: value
+            for key, value in selection.items()
+            if key not in ("records", "dataset")
+        },
         "condition_counts": counts,
         "base_study": base_report,
         "confidence_gate": confidence,
