@@ -291,7 +291,7 @@ def reconcile_compiled_evidence(evidence: dict | None) -> dict:
     """Return a deep-copied SFC object with CFR-1 primary resolution applied.
 
     SFC-1's family objects remain byte-semantically unchanged. CFR-1 updates only
-    the top-level *summary* to point at the resolved primary family and attaches
+    the top-level summary to point at the resolved primary family and attaches
     the complete resolution object for audit/prompt context.
     """
     source = evidence if isinstance(evidence, dict) else {}
@@ -317,7 +317,9 @@ def reconcile_compiled_evidence(evidence: dict | None) -> dict:
     out["watch_ready"] = any(
         bool(obj.get("watch_ready"))
         for obj in families.values()
-        if isinstance(obj, dict) and not _is_failed(obj)
+        if isinstance(obj, dict)
+        and obj.get("detected")
+        and not _is_failed(obj)
     )
     out["admission_ready"] = bool(
         primary_obj and not _is_failed(primary_obj) and primary_obj.get("admission_ready")
