@@ -105,12 +105,14 @@ Provider failure, stale data, malformed bars, rate limiting, and telemetry failu
 
 ## 8. Model law
 
-Claude is an analyst/classifier inside the system, not the sovereign risk engine.
+GPT-5.6 is the intended production analyst/classifier inside the system, not the sovereign risk engine.
 
-- JSON contract is mandatory.
+- The production runtime model family is OpenAI GPT-5.6. The preferred flagship alias is `gpt-5.6`, which resolves to GPT-5.6 Sol.
+- The repository must not silently run an Anthropic/Claude client while documentation or operator intent says GPT-5.6. Provider identity is part of production truth.
+- Structured output / JSON contract is mandatory.
 - Deterministic tiering and capital gates can downgrade or reject model output.
 - Model routing is runtime-configurable; model intelligence and scanner doctrine are separate layers.
-- No model change may silently change hard gates, scoring, routing, cooldown, universe, or capital contracts.
+- No model change may silently change hard gates, scoring, routing, cooldown, universe, cadence, or capital contracts.
 
 ## 9. Alert and state law
 
@@ -141,7 +143,17 @@ Universe changes must be:
 
 Expanding the universe does not authorize changing candidate cap, doctrine thresholds, scoring weights, cadence, or alert rules unless a separate reviewed phase proves that change is needed.
 
-## 11. Version-control and deployment law
+## 11. Deep-analysis capacity law
+
+The deep-analysis candidate cap is a recall/latency/cost control, not a doctrine threshold.
+
+- Current production baseline remains 30 candidates per scan until a reviewed capacity phase changes it.
+- Ranks 31-60 are already observable through near-cut telemetry and are the evidence pool for deciding whether the cap is starving valid opportunities.
+- A move from 30 to 40 increases potential model calls by 33.3%; it must be justified by measured incremental opportunity capture and must remain comfortably inside the 15-minute scan cadence and the configured API budget.
+- Raising the cap must not compensate for a weak prefilter. The setup-family compiler must improve admission truth first.
+- If ranks 31-40 contain repeatable valid STARTER/SNIPE opportunities after the compiler is installed, 40 is the preferred next cap subject to latency/cost validation.
+
+## 12. Version-control and deployment law
 
 GitHub is the durable source of truth. Railway is the runtime platform. Discord is the alert surface.
 
@@ -151,7 +163,7 @@ Every production change follows:
 
 Never patch production strategy casually in chat and leave the repository undocumented.
 
-## 12. Evaluation law
+## 13. Evaluation law
 
 Backtests and live-shadow evaluation must be chronological and must separate setup quality from outcome luck.
 
@@ -163,7 +175,7 @@ For the fast-swing objective, the preferred research label is a three-barrier ou
 
 Performance must be attributable by setup family, verdict tier, regime, and trigger state. An aspirational hit-rate target is not a production claim until proven out of sample.
 
-## 13. Anti-drift law
+## 14. Anti-drift law
 
 When doctrine, code, tests, prompt wording, and runtime behavior disagree, do not guess. Find the contradiction, identify the current production authority, and repair the architecture through reviewable version control.
 
