@@ -1,22 +1,26 @@
-"""Algorithmic prefilter scorer.
+"""Algorithmic prefilter scorer and GPT-5.6 candidate admission layer.
 
-Scans the full ticker universe using Phase 2 features, scores 0–100,
-applies pre-Claude hard vetoes, ranks candidates, and caps the list.
+Scans the full ticker universe using structure-first features, scores the legacy
+0-100 prefilter, applies common vetoes, arbitrates deterministic setup-family
+evidence, ranks candidates, and caps the deep-analysis list.
 
-This is NOT the final trade grader. It does NOT call Claude. It does NOT
-assign tiers. Its only job is to decide which tickers are worth Claude's time.
+This is NOT the final trade grader. It does NOT call the model and it does NOT
+assign trading tiers. SFC-2B may admit a candidate for GPT-5.6 inspection when
+a normalized setup family repairs a generic prefilter blind spot, but final
+tiering, ladder, seal, risk and capital authority remain downstream.
+
+Historical ``claude_*`` result keys are retained as compatibility aliases while
+provider-neutral nomenclature is migrated separately. Production provider truth
+is OpenAI GPT-5.6.
 
 No rsi, macd, bollinger_bands, or stochastic. Ever.
 """
 
 import logging
-from typing import Any
+
+from src import family_admission
 
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Veto flag constants
-# ---------------------------------------------------------------------------
 
 VETO_DATA_EMPTY = "data_empty"
 VETO_DATA_ERROR = "data_error"
@@ -32,7 +36,6 @@ VETO_MID_RANGE_NO_EDGE = "mid_range_no_edge"
 VETO_HOSTILE_ALIGNMENT = "hostile_value_alignment"
 VETO_RR_BELOW_THRESHOLD = "rr_below_threshold_estimate"
 
-# Vetoes that unconditionally block Claude eligibility
 _HARD_BLOCK_VETOES = {
     VETO_DATA_EMPTY,
     VETO_DATA_ERROR,
@@ -50,53 +53,42 @@ _HARD_BLOCK_VETOES = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Per-category scoring helpers
-# ---------------------------------------------------------------------------
-
 def _score_trend_alignment(enriched: dict, weight: int) -> int:
     alignment = enriched.get("sma_value_alignment", "unavailable")
     if alignment == "supportive":
         return weight
     if alignment == "mixed":
         return round(weight * 0.55)
-    # hostile or unavailable
     return 0
 
 
 def _score_structure_event(enriched: dict, weight: int) -> int:
     event = enriched.get("structure_event", "none")
     wick_only = enriched.get("wick_only_break", False)
-
     if event == "MSS":
-        return weight                        # sweep + structure shift = highest
+        return weight
     if event in ("BOS", "failed_breakdown_reclaim", "accepted_break"):
         return round(weight * 0.90)
     if event == "reclaim":
         return round(weight * 0.75)
     if event == "CHOCH":
-        return round(weight * 0.40)          # modest only — not a bullish full signal
+        return round(weight * 0.40)
     if wick_only:
-        return round(weight * 0.15)          # flagged noise, not rewarded
-    return 0                                 # none
+        return round(weight * 0.15)
+    return 0
 
 
 def _score_zone_quality(enriched: dict, weight: int) -> int:
     fvg = enriched.get("fvg")
     ob = enriched.get("ob")
     score = 0
-
     if fvg and ob:
-        score = weight                       # both present — strongest confluence
+        score = weight
     elif fvg or ob:
-        score = round(weight * 0.67)         # one present — decent
-
-    # Bonus: price is actively inside the zone
+        score = round(weight * 0.67)
     in_zone = (fvg and fvg.get("price_in_fvg")) or (ob and ob.get("price_at_ob"))
     if in_zone and score > 0:
-        bonus = round(weight * 0.20)
-        score = min(weight, score + bonus)
-
+        score = min(weight, score + round(weight * 0.20))
     return score
 
 
@@ -108,35 +100,29 @@ def _score_retest(enriched: dict, weight: int) -> int:
         return round(weight * 0.60)
     if status == "missing":
         return round(weight * 0.20)
-    return 0                                 # failed
+    return 0
 
 
 def _score_target_rr(enriched: dict, weight: int) -> int:
     overhead = enriched.get("overhead_status", "unknown")
     rr = enriched.get("estimated_rr")
     targets = enriched.get("targets", [])
-
     if overhead == "blocked" or not targets:
         return 0
-
     rr_strong = rr is not None and rr >= 3.0
     rr_weak = rr is not None and rr < 3.0
-
     if overhead == "clear":
         if rr_strong:
             return weight
         if rr_weak:
             return round(weight * 0.65)
-        return round(weight * 0.50)          # no RR computable but path is clear
-
+        return round(weight * 0.50)
     if overhead == "moderate":
         if rr_strong:
             return round(weight * 0.67)
         if rr_weak:
             return round(weight * 0.40)
         return round(weight * 0.30)
-
-    # unknown overhead
     if rr_strong:
         return round(weight * 0.53)
     if rr_weak:
@@ -149,10 +135,10 @@ def _score_volume(enriched: dict, weight: int) -> int:
     if behavior == "expansion":
         return weight
     if behavior == "dryup":
-        return round(weight * 0.80)          # dry-up on retest is constructive
+        return round(weight * 0.80)
     if behavior == "neutral":
         return round(weight * 0.50)
-    return round(weight * 0.20)              # unknown
+    return round(weight * 0.20)
 
 
 def _score_data_quality(enriched: dict, weight: int) -> int:
@@ -163,17 +149,12 @@ def _score_data_quality(enriched: dict, weight: int) -> int:
         return round(weight * 0.40)
     if status == "INSUFFICIENT":
         return round(weight * 0.20)
-    return 0                                 # EMPTY / ERROR
+    return 0
 
-
-# ---------------------------------------------------------------------------
-# Scoring entry point
-# ---------------------------------------------------------------------------
 
 def algo_score(enriched: dict, config: dict) -> tuple[int, dict]:
-    """Score a single enriched ticker 0–100. Returns (total, breakdown)."""
+    """Score one enriched ticker 0-100. Returns (total, breakdown)."""
     weights = config.get("prefilter", {}).get("scoring_weights", {})
-
     w_trend = weights.get("trend_value_alignment", 15)
     w_struct = weights.get("structure_event", 20)
     w_zone = weights.get("fvg_ob_demand_zone_quality", 15)
@@ -190,10 +171,8 @@ def algo_score(enriched: dict, config: dict) -> tuple[int, dict]:
     s_vol = _score_volume(enriched, w_vol)
     s_data = _score_data_quality(enriched, w_data)
 
-    total = s_trend + s_struct + s_zone + s_retest + s_rr + s_vol + s_data
-    total = max(0, min(100, total))
-
-    breakdown = {
+    total = max(0, min(100, s_trend + s_struct + s_zone + s_retest + s_rr + s_vol + s_data))
+    return total, {
         "trend_value_alignment": s_trend,
         "structure_event": s_struct,
         "fvg_ob_demand_zone_quality": s_zone,
@@ -202,41 +181,25 @@ def algo_score(enriched: dict, config: dict) -> tuple[int, dict]:
         "volume_participation": s_vol,
         "data_quality_recency": s_data,
     }
-    return total, breakdown
 
-
-# ---------------------------------------------------------------------------
-# Hard veto evaluation
-# ---------------------------------------------------------------------------
 
 def apply_hard_vetoes(enriched: dict, config: dict) -> list[str]:
-    """Return list of active veto flags for this ticker.
-
-    A veto does not silently drop the ticker — it is recorded so
-    summary stats can explain why it was rejected.
-    """
+    """Return the generic prefilter veto ledger before family arbitration."""
     thresholds = config.get("prefilter", {}).get("thresholds", {})
     max_extension = thresholds.get("max_price_extension_from_sma20_pct", 8)
     min_rr = config.get("tiers", {}).get("snipe_it", {}).get("min_rr", 3.0)
-
-    vetoes: list[str] = []
     status = enriched.get("data_status", "ERROR")
 
-    # --- Data quality vetoes ---
     if status == "EMPTY":
-        vetoes.append(VETO_DATA_EMPTY)
-        return vetoes                        # no features to check further
+        return [VETO_DATA_EMPTY]
     if status == "ERROR":
-        vetoes.append(VETO_DATA_ERROR)
-        return vetoes
+        return [VETO_DATA_ERROR]
     if status == "INSUFFICIENT":
-        vetoes.append(VETO_INSUFFICIENT_BARS)
-        return vetoes
+        return [VETO_INSUFFICIENT_BARS]
     if status == "STALE":
-        vetoes.append(VETO_STALE_DATA)
-        return vetoes
+        return [VETO_STALE_DATA]
 
-    # --- Structure vetoes ---
+    vetoes: list[str] = []
     has_structure = enriched.get("structure_event", "none") != "none"
     has_fvg = bool(enriched.get("fvg"))
     has_ob = bool(enriched.get("ob"))
@@ -244,59 +207,65 @@ def apply_hard_vetoes(enriched: dict, config: dict) -> list[str]:
 
     if not has_structure and not has_zone:
         vetoes.append(VETO_NO_CLEAR_STRUCTURE)
-
     if enriched.get("invalidation_level") is None:
         vetoes.append(VETO_NO_INVALIDATION)
-
     if not enriched.get("targets"):
         vetoes.append(VETO_NO_TARGET_PATH)
-
-    # --- Overhead ---
     if enriched.get("overhead_status") == "blocked":
         vetoes.append(VETO_OVERHEAD_BLOCKED)
 
-    # --- Price extension ---
     ext = enriched.get("price_extension_from_sma20_pct")
     if ext is not None and ext > max_extension:
         vetoes.append(VETO_PRICE_TOO_EXTENDED)
-
-    # --- Retest ---
     if enriched.get("retest_status") == "failed":
         vetoes.append(VETO_RETEST_FAILED)
-
-    # --- Value alignment ---
     if enriched.get("sma_value_alignment") == "hostile":
         vetoes.append(VETO_HOSTILE_ALIGNMENT)
 
-    # --- R:R ---
     rr = enriched.get("estimated_rr")
     if rr is not None and rr < min_rr:
         vetoes.append(VETO_RR_BELOW_THRESHOLD)
 
-    # --- Mid-range / no edge ---
-    # Trigger when: no structure, no zone, score would be near zero
     if (
         not has_structure
         and not has_zone
         and enriched.get("retest_status") in ("missing", "failed")
+        and VETO_MID_RANGE_NO_EDGE not in vetoes
     ):
-        if VETO_MID_RANGE_NO_EDGE not in vetoes:
-            vetoes.append(VETO_MID_RANGE_NO_EDGE)
-
+        vetoes.append(VETO_MID_RANGE_NO_EDGE)
     return vetoes
 
 
-# ---------------------------------------------------------------------------
-# Single-ticker prefilter result
-# ---------------------------------------------------------------------------
+def _family_key_features(enriched: dict) -> dict:
+    evidence = enriched.get("setup_family_evidence")
+    if not isinstance(evidence, dict):
+        return {
+            "setup_family_primary": "NONE",
+            "setup_family_state": "NONE",
+            "setup_family_score": 0,
+            "setup_family_watch_ready": False,
+            "setup_family_admission_ready": False,
+            "setup_family_entry_structure_valid": False,
+            "setup_family_invalidation": None,
+            "setup_family_target_1": None,
+            "setup_family_rr_to_t1": None,
+        }
+    return {
+        "setup_family_primary": evidence.get("primary_family", "NONE"),
+        "setup_family_state": evidence.get("primary_state", "NONE"),
+        "setup_family_score": int(evidence.get("primary_family_score") or 0),
+        "setup_family_watch_ready": bool(evidence.get("watch_ready")),
+        "setup_family_admission_ready": bool(evidence.get("admission_ready")),
+        "setup_family_entry_structure_valid": bool(evidence.get("entry_structure_valid")),
+        "setup_family_invalidation": evidence.get("primary_invalidation_level"),
+        "setup_family_target_1": evidence.get("primary_target_1"),
+        "setup_family_rr_to_t1": evidence.get("primary_rr_to_t1"),
+    }
+
 
 def _build_key_features(enriched: dict) -> dict:
-    """Assemble key_features dict forwarded to tiering. Includes current OHLC acceptance data."""
-    cp = (
-        enriched.get("current_price")
-        or enriched.get("latest_close")
-        or enriched.get("close")
-    )
+    """Assemble key features forwarded to deterministic tiering/audit layers."""
+    cp = enriched.get("current_price") or enriched.get("latest_close") or enriched.get("close")
     co = enriched.get("current_open")
     ch = enriched.get("current_high")
     cl = enriched.get("current_low")
@@ -332,7 +301,7 @@ def _build_key_features(enriched: dict) -> dict:
         except (TypeError, ValueError):
             pass
 
-    return {
+    features = {
         "sma_value_alignment": enriched.get("sma_value_alignment"),
         "structure_event": enriched.get("structure_event"),
         "zone_quality": _zone_label(enriched),
@@ -350,22 +319,26 @@ def _build_key_features(enriched: dict) -> dict:
         "current_bar_direction": bar_dir,
         "current_close_location_pct": close_loc,
     }
+    features.update(_family_key_features(enriched))
+    return features
 
 
 def score_ticker(enriched: dict, config: dict) -> dict:
-    """Score and veto a single ticker. Returns full prefilter result dict.
+    """Score, veto and arbitrate model admission for one enriched ticker.
 
-    enriched must include data_status and (if OK) all feature fields from
-    indicators.enrich(). Rejected tickers preserve veto_flags and
-    rejection_reason for summary stats.
+    ``original_veto_flags`` records the generic pre-arbitration ledger.
+    ``veto_flags`` is the active downstream ledger after family arbitration.
+    This distinction is critical: a rescued generic blind spot must not silently
+    disappear from audit, but it also must not force WAIT later as though it were
+    still an active capital blocker. The family label itself grants nothing;
+    deterministic tiering still requires fresh model/execution proof.
     """
     ticker = enriched.get("ticker", "UNKNOWN")
     data_status = enriched.get("data_status", "ERROR")
 
-    vetoes = apply_hard_vetoes(enriched, config)
-    has_hard_block = bool(set(vetoes) & _HARD_BLOCK_VETOES)
+    original_vetoes = apply_hard_vetoes(enriched, config)
+    has_legacy_hard_block = bool(set(original_vetoes) & _HARD_BLOCK_VETOES)
 
-    # Always compute score even for vetoed tickers (for transparency)
     if data_status == "OK":
         score, breakdown = algo_score(enriched, config)
     else:
@@ -378,24 +351,65 @@ def score_ticker(enriched: dict, config: dict) -> dict:
 
     min_score = config.get("prefilter", {}).get("prefilter_min_score", 55)
     score_below_floor = score < min_score and data_status == "OK"
-    eligible = not has_hard_block and not score_below_floor
+    legacy_eligible = not has_legacy_hard_block and not score_below_floor
+
+    family_decision = family_admission.build_family_admission_decision(
+        enriched, score, original_vetoes, config
+    )
+    family_eligible = bool(family_decision.get("admitted_by_family"))
+    eligible = bool(legacy_eligible or family_eligible)
+
+    active_vetoes = list(family_decision.get("remaining_vetoes") or [])
+    rescued_vetoes = list(family_decision.get("rescued_vetoes") or [])
+
+    family_rank = int(family_decision.get("admission_rank_score") or score)
+    admission_rank_score = max(score, family_rank) if eligible else score
+
+    if legacy_eligible and family_eligible:
+        admission_source = "legacy+family"
+    elif family_eligible:
+        admission_source = "family"
+    elif legacy_eligible:
+        admission_source = "legacy"
+    else:
+        admission_source = "none"
 
     rejection_reason: str | None = None
-    if has_hard_block:
-        rejection_reason = "hard_veto: " + ", ".join(vetoes)
-    elif score_below_floor:
-        rejection_reason = f"score_below_floor: {score} < {min_score}"
+    if not eligible:
+        if active_vetoes:
+            rejection_reason = "hard_veto: " + ", ".join(active_vetoes)
+        elif score_below_floor:
+            rejection_reason = f"score_below_floor: {score} < {min_score}"
+        else:
+            rejection_reason = "not_admitted"
+
+    key_features = _build_key_features(enriched)
+    key_features["family_admission_source"] = admission_source
+    key_features["family_rescued_vetoes"] = rescued_vetoes
+    key_features["original_prefilter_vetoes"] = original_vetoes
 
     return {
         "ticker": ticker,
         "data_status": data_status,
         "prefilter_score": score,
         "score_breakdown": breakdown,
-        "veto_flags": vetoes,
+        "original_veto_flags": original_vetoes,
+        "rescued_veto_flags": rescued_vetoes,
+        # Active downstream gate ledger consumed by tiering. For no-family
+        # candidates this is byte-semantically identical to legacy behavior.
+        "veto_flags": active_vetoes,
+        "effective_admission_vetoes": active_vetoes,
+        "legacy_prefilter_eligible": legacy_eligible,
+        "family_admission": family_decision,
+        "admission_source": admission_source,
+        "admission_rank_score": admission_rank_score,
+        "eligible_for_model": eligible,
         "eligible_for_claude": eligible,
         "rejection_reason": rejection_reason,
-        "ranking_reason": _ranking_summary(enriched, score, vetoes),
-        "key_features": _build_key_features(enriched),
+        "ranking_reason": _ranking_summary(
+            enriched, score, original_vetoes, family_decision
+        ),
+        "key_features": key_features,
     }
 
 
@@ -411,62 +425,74 @@ def _zone_label(enriched: dict) -> str:
     return "none"
 
 
-def _ranking_summary(enriched: dict, score: int, vetoes: list) -> str:
+def _ranking_summary(
+    enriched: dict,
+    score: int,
+    vetoes: list,
+    family_decision: dict | None = None,
+) -> str:
+    fd = family_decision if isinstance(family_decision, dict) else {}
+    family = fd.get("primary_family")
+    family_part = ""
+    if family and family != "NONE":
+        family_part = (
+            f" family={family}:{fd.get('primary_state', 'UNKNOWN')}"
+            f" fscore={fd.get('family_score', 0)}"
+        )
     if vetoes:
-        return f"score={score} vetoed=[{', '.join(vetoes[:3])}]"
+        rescued = fd.get("rescued_vetoes") or []
+        rescued_part = f" rescued=[{', '.join(rescued)}]" if rescued else ""
+        return f"score={score} vetoed=[{', '.join(vetoes[:3])}]{rescued_part}{family_part}"
     event = enriched.get("structure_event", "none")
     retest = enriched.get("retest_status", "missing")
     rr = enriched.get("estimated_rr")
     rr_str = f"RR={rr:.1f}" if rr else "RR=?"
-    return f"score={score} event={event} retest={retest} {rr_str}"
+    return f"score={score} event={event} retest={retest} {rr_str}{family_part}"
 
-
-# ---------------------------------------------------------------------------
-# Board-level prefilter
-# ---------------------------------------------------------------------------
 
 def prefilter(enriched_list: list, config: dict) -> dict:
-    """Score, veto, rank, and cap the full ticker board.
-
-    Args:
-        enriched_list: list of dicts, each with data_status and (if OK)
-                       all feature fields from indicators.enrich().
-        config:        loaded doctrine_config.yaml dict.
-
-    Returns:
-        all_results:                 every ticker result (eligible + rejected)
-        ranked_results:              eligible tickers sorted by score desc
-        claude_candidates:           top N eligible by score, capped per config
-        board_summary:               aggregate stats
-    """
+    """Score, arbitrate, rank and cap the full ticker board."""
     max_candidates = config.get("prefilter", {}).get("max_claude_candidates_per_scan", 30)
     min_score = config.get("prefilter", {}).get("prefilter_min_score", 55)
 
     all_results: list[dict] = []
-    rejected_data: int = 0
-    rejected_veto: int = 0
-    above_floor: int = 0
+    rejected_data = 0
+    rejected_veto = 0
+    above_floor = 0
+    family_admitted = 0
 
     for enriched in enriched_list:
         result = score_ticker(enriched, config)
         all_results.append(result)
-
         status = result["data_status"]
         if status != "OK":
             rejected_data += 1
-        elif result["veto_flags"] and set(result["veto_flags"]) & _HARD_BLOCK_VETOES:
-            rejected_veto += 1
-        elif result["prefilter_score"] >= min_score:
+            continue
+        if result["prefilter_score"] >= min_score:
             above_floor += 1
-        else:
-            rejected_veto += 1              # score below floor counts as rejected
+        if result.get("admission_source") in ("family", "legacy+family"):
+            family_admitted += 1
+        if not result["eligible_for_model"]:
+            rejected_veto += 1
 
-    eligible = [r for r in all_results if r["eligible_for_claude"]]
-    ranked = sorted(eligible, key=lambda r: r["prefilter_score"], reverse=True)
+    eligible = [r for r in all_results if r["eligible_for_model"]]
+    ranked = sorted(
+        eligible,
+        key=lambda r: (
+            int(r.get("admission_rank_score") or 0),
+            int(r.get("prefilter_score") or 0),
+        ),
+        reverse=True,
+    )
     candidates = ranked[:max_candidates]
 
     top_10 = [
-        {"ticker": r["ticker"], "score": r["prefilter_score"]}
+        {
+            "ticker": r["ticker"],
+            "score": r["prefilter_score"],
+            "admission_rank_score": r.get("admission_rank_score", r["prefilter_score"]),
+            "admission_source": r.get("admission_source", "legacy"),
+        }
         for r in ranked[:10]
     ]
 
@@ -476,18 +502,21 @@ def prefilter(enriched_list: list, config: dict) -> dict:
         "total_rejected_by_data_quality": rejected_data,
         "total_rejected_by_veto": rejected_veto,
         "total_above_prefilter_min_score": above_floor,
+        "total_family_admitted": family_admitted,
+        "total_model_candidates": len(candidates),
         "total_claude_candidates": len(candidates),
         "top_10_tickers_by_score": top_10,
     }
 
     log.info(
-        "Prefilter complete: %d input → %d eligible → %d claude_candidates",
-        len(enriched_list), len(eligible), len(candidates),
+        "Prefilter complete: %d input -> %d eligible -> %d GPT-5.6 candidates (family_admitted=%d)",
+        len(enriched_list), len(eligible), len(candidates), family_admitted,
     )
 
     return {
         "all_results": all_results,
         "ranked_results": ranked,
+        "model_candidates": candidates,
         "claude_candidates": candidates,
         "board_summary": board_summary,
     }

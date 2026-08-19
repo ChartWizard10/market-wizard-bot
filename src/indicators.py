@@ -11,6 +11,7 @@ import logging
 import numpy as np
 import pandas as pd
 
+from src import setup_family_compiler
 from src.market_data import partition_daily_bars
 
 log = logging.getLogger(__name__)
@@ -724,7 +725,7 @@ def _confirmed_view(confirmed_df: pd.DataFrame, config: dict,
 def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
     """Compute all structure-first features for a validated ticker DataFrame.
 
-    Returns a flat feature dict for use by prefilter and claude_client.
+    Returns a flat feature dict for use by prefilter and the GPT-5.6 model boundary.
     No rsi, macd, bollinger_bands, or stochastic computed or included.
 
     Phase MBT-2 — dual Daily view. When the newest row is a DEVELOPING daily
@@ -738,6 +739,10 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
     do is confirm: a live break is not a closed BOS, a live zone touch is not a
     confirmed retest, a live breach is not an accepted failure, and partial
     session volume is not a completed participation verdict.
+
+    SFC-2B law: the SFC-1 family compiler receives completed Daily bars and the
+    *closed* retest verdict. A developing Daily interaction may affect current
+    location fields but may never upgrade family confirmation.
 
     `now_utc` is injectable for deterministic tests; production reads the clock.
     """
@@ -780,8 +785,11 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
     # Current distance from confirmed value is a location metric — live price.
     extension = price_extension_from_sma20_pct(cur, smas.get("sma20"))
 
-    # Retest authority comes from closed evidence only.
-    retest = assess_retest(anchor, fvg, ob, atr)
+    # Retest authority comes from closed evidence only. Keep an immutable
+    # closed-bar copy for the family compiler before provisional live contact is
+    # allowed to lift the display/runtime retest field from missing -> partial.
+    confirmed_retest = assess_retest(anchor, fvg, ob, atr)
+    retest = dict(confirmed_retest)
     retest_proof = "CLOSED_CONFIRMED"
 
     live_retest = None
@@ -817,6 +825,23 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
     invalidation = estimate_invalidation(fvg, ob, swings)
     rr = estimate_rr(cur, targets, invalidation)
 
+    # SFC-2B: compile all four locked families from completed Daily truth. The
+    # family compiler receives the closed retest verdict, never the provisional
+    # developing-bar retest field.
+    family_base_features = {
+        "structure_event": structure["structure_event"],
+        "retest_status": confirmed_retest["retest_status"],
+        "overhead_status": overhead["overhead_status"],
+        "invalidation_level": invalidation["invalidation_level"],
+        "targets": targets,
+    }
+    setup_family_evidence = setup_family_compiler.compile_setup_families(
+        confirmed_df,
+        cur,
+        family_base_features,
+        config,
+    )
+
     prev_close: float | None = None
     if len(df) >= 2:
         prev_close = round(float(df["close"].iloc[-2]), 4)
@@ -836,6 +861,8 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
         "live_daily_volume": live_volume,
         "live_retest_context": live_retest,
         "live_structure_context": live_structure,
+        # Setup-family compiler (SFC-1 -> SFC-2B admission input)
+        "setup_family_evidence": setup_family_evidence,
         # SMA / value
         "sma20": smas["sma20"],
         "sma50": smas["sma50"],

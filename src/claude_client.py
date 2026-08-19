@@ -1,4 +1,10 @@
-"""Async Claude API wrapper. Sends structured prompts, validates strict JSON responses."""
+"""Historical model-boundary helpers and compatibility Claude API wrapper.
+
+Production deep analysis is OpenAI GPT-5.6. This module remains temporarily
+because the hardened prompt/parser/rate-governor contract is reused by the
+OpenAI runtime and historical scheduler tests. Direct Anthropic functions are
+compatibility debt and are not instantiated by production ``main.py``.
+"""
 
 import asyncio
 import json
@@ -12,25 +18,7 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Phase MR-1 — Anthropic model routing.
-#
-# Model intelligence and scanner doctrine are separate layers. The operator
-# selects the model at RUNTIME; the repository holds the fallback.
-#
-#     1. ANTHROPIC_MODEL environment variable (non-empty, trimmed)
-#     2. config["claude"]["model"]
-#     3. DEFAULT_CLAUDE_MODEL
-#
-# Deleting or blanking the Railway variable restores the config model on the
-# next redeploy — no code change, no strategy rollback.
-#
-# Deliberately NO model whitelist: Anthropic's catalog evolves, and requiring a
-# GitHub patch for every legitimate model ID would defeat the purpose. The
-# messages.create request is the runtime authority on whether an ID exists, so
-# no extra validation call, latency, cost or failure mode is introduced. An
-# explicitly selected model is never silently replaced after an API rejection —
-# that error surfaces through the existing API-error path so a configuration
-# mistake stays visible.
+# Phase MR-1 — historical Anthropic model routing compatibility.
 # ---------------------------------------------------------------------------
 
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
@@ -41,11 +29,7 @@ MODEL_SOURCE_DEFAULT = "DEFAULT"
 
 
 def resolve_claude_model(config: dict) -> tuple[str, str]:
-    """Return (model, source) for this runtime.
-
-    An empty or whitespace-only value at any level means "not supplied" and
-    falls through — an empty model string is never sent to Anthropic.
-    """
+    """Return historical compatibility (model, source) routing."""
     env_model = str(os.getenv("ANTHROPIC_MODEL") or "").strip()
     if env_model:
         return env_model, MODEL_SOURCE_ENVIRONMENT
@@ -68,7 +52,7 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """True for Anthropic 429 / rate-limit errors."""
+    """True for historical Anthropic 429 / rate-limit errors."""
     try:
         import anthropic
         if isinstance(exc, anthropic.RateLimitError):
@@ -80,7 +64,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 
 class _RateGovernor:
-    """Paces Claude calls to stay within TPM budget and minimum inter-call gap.
+    """Paces model calls to stay within TPM budget and minimum inter-call gap.
 
     Both _clock and _sleep are injectable for unit-test control.
     """
@@ -109,12 +93,10 @@ class _RateGovernor:
         now = self._clock()
         total_sleep = 0.0
 
-        # Reset token window after 60 seconds
         if self._window_start is None or now - self._window_start >= 60.0:
             self._window_start = now
             self._tokens_in_window = 0
 
-        # Enforce minimum gap between calls
         if self._last_call_at is not None:
             elapsed = now - self._last_call_at
             if elapsed < self._min_gap:
@@ -123,7 +105,6 @@ class _RateGovernor:
                 total_sleep += gap_sleep
                 now = self._clock()
 
-        # Enforce token budget — sleep until window resets if needed
         if self._tokens_in_window + estimated_tokens > self._max_tpm:
             window_age = now - self._window_start
             remaining = max(0.0, 60.0 - window_age)
@@ -136,8 +117,8 @@ class _RateGovernor:
 
         self._tokens_in_window += estimated_tokens
         self._last_call_at = self._clock()
-
         return total_sleep
+
 
 # ---------------------------------------------------------------------------
 # Schema constants
@@ -169,7 +150,6 @@ _ENUM_FIELDS: dict[str, set] = {
     "capital_action":     {"full_quality_allowed", "starter_only", "wait_no_capital", "no_trade"},
 }
 
-# Disabled indicators must never appear in prompt payloads
 _DISABLED_INDICATORS = {"rsi", "macd", "bollinger_bands", "stochastic"}
 
 _TIER_CHANNEL_MAP = {
@@ -199,20 +179,89 @@ def load_system_prompt(path: str = "prompts/market_wizard_system.md") -> str:
     return p.read_text()
 
 
+def _append_setup_family_context(lines: list[str], enriched: dict) -> None:
+    """Append compact normalized SFC evidence to the GPT-5.6 input payload.
+
+    Family evidence is deterministic context, not capital authority. The model
+    sees lifecycle/state/location/geometry so it can reason about VCP, SMA
+    cradle, gap-fill and break/retest candidates that the generic FVG/OB view
+    alone cannot express.
+    """
+    evidence = enriched.get("setup_family_evidence")
+    if not isinstance(evidence, dict):
+        return
+
+    primary = str(evidence.get("primary_family") or "NONE")
+    if primary == "NONE":
+        return
+
+    families = evidence.get("families")
+    families = families if isinstance(families, dict) else {}
+    primary_obj = families.get(primary)
+    primary_obj = primary_obj if isinstance(primary_obj, dict) else {}
+
+    lines.append(f"SETUP_FAMILY_PRIMARY: {primary}")
+    lines.append(
+        f"SETUP_FAMILY_STATE: {evidence.get('primary_state') or primary_obj.get('state') or 'UNKNOWN'}"
+    )
+    lines.append(
+        f"SETUP_FAMILY_SCORE: {int(evidence.get('primary_family_score') or primary_obj.get('family_score') or 0)}"
+    )
+    lines.append(f"SETUP_FAMILY_WATCH_READY: {bool(evidence.get('watch_ready') or primary_obj.get('watch_ready'))}")
+    lines.append(f"SETUP_FAMILY_ADMISSION_READY: {bool(evidence.get('admission_ready') or primary_obj.get('admission_ready'))}")
+    lines.append(
+        "SETUP_FAMILY_ENTRY_STRUCTURE_VALID: "
+        f"{bool(evidence.get('entry_structure_valid') or primary_obj.get('entry_structure_valid'))}"
+    )
+
+    invalidation = (
+        evidence.get("primary_invalidation_level")
+        if evidence.get("primary_invalidation_level") is not None
+        else primary_obj.get("invalidation_level")
+    )
+    target = (
+        evidence.get("primary_target_1")
+        if evidence.get("primary_target_1") is not None
+        else primary_obj.get("target_1")
+    )
+    rr = (
+        evidence.get("primary_rr_to_t1")
+        if evidence.get("primary_rr_to_t1") is not None
+        else primary_obj.get("rr_to_t1")
+    )
+    if invalidation is not None:
+        lines.append(f"SETUP_FAMILY_INVALIDATION: {invalidation}")
+    if target is not None:
+        lines.append(f"SETUP_FAMILY_TARGET_1: {target}")
+    if rr is not None:
+        lines.append(f"SETUP_FAMILY_RR_TO_T1: {rr}")
+
+    lines.append(f"SETUP_FAMILY_PATH_STATUS: {primary_obj.get('path_status', 'UNKNOWN')}")
+
+    blockers = primary_obj.get("blockers") or []
+    soft_caps = primary_obj.get("soft_caps") or []
+    if blockers:
+        lines.append("SETUP_FAMILY_BLOCKERS: " + ", ".join(str(x) for x in blockers))
+    if soft_caps:
+        lines.append("SETUP_FAMILY_SOFT_CAPS: " + ", ".join(str(x) for x in soft_caps))
+
+    metrics = primary_obj.get("metrics")
+    if isinstance(metrics, dict) and metrics:
+        lines.append(
+            "SETUP_FAMILY_METRICS: "
+            + json.dumps(metrics, sort_keys=True, separators=(",", ":"), default=str)
+        )
+
+
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------
 
 def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
-    """Build structured context string for Claude. No disabled indicators included."""
+    """Build structured context for the production GPT-5.6 analyst boundary."""
     ticker = enriched.get("ticker", "UNKNOWN")
     lines = [f"TICKER: {ticker}"]
 
-    # Price context.
-    # Phase MBT-2: when Daily bar truth is available, the current price is NOT
-    # labeled LATEST_CLOSE — a developing session price is not a close. Current
-    # price (execution/location truth) and last closed Daily close
-    # (confirmation truth) are sent as separate, explicitly named facts.
     daily_ctx = enriched.get("daily_bar_context")
     daily_ctx = daily_ctx if isinstance(daily_ctx, dict) else {}
     daily_status = str(daily_ctx.get("status") or "").upper().strip()
@@ -230,7 +279,6 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
         if close is not None:
             lines.append(f"LATEST_CLOSE: {close}")
 
-    # SMA levels — no disabled indicators
     sma20 = enriched.get("sma20")
     sma50 = enriched.get("sma50")
     sma200 = enriched.get("sma200")
@@ -249,12 +297,10 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
     if ext is not None:
         lines.append(f"PRICE_EXTENSION_FROM_SMA20_PCT: {ext:.2f}")
 
-    # ATR
     atr = enriched.get("atr")
     if atr is not None:
         lines.append(f"ATR: {atr:.4f}")
 
-    # Structure
     event = enriched.get("structure_event", "none")
     lines.append(f"STRUCTURE_EVENT: {event}")
 
@@ -262,7 +308,6 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
     if wick_only:
         lines.append("WICK_ONLY_BREAK: true")
 
-    # Zone
     fvg = enriched.get("fvg")
     if fvg:
         lines.append(
@@ -282,19 +327,15 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
     else:
         lines.append("OB: none")
 
-    # Retest and overhead
     retest = enriched.get("retest_status", "missing")
     lines.append(f"RETEST_STATUS: {retest}")
 
     overhead = enriched.get("overhead_status", "unknown")
     lines.append(f"OVERHEAD_STATUS: {overhead}")
 
-    # Volume
     vol_behavior = enriched.get("volume_behavior", "unknown")
     lines.append(f"VOLUME_BEHAVIOR: {vol_behavior}")
 
-    # Confirmation provenance for the three feature families a developing
-    # Daily bar could otherwise contaminate (Phase MBT-2).
     if daily_status:
         lines.append("DAILY_STRUCTURE_SOURCE: CLOSED_BARS")
         lines.append(
@@ -302,7 +343,6 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
         )
         lines.append("DAILY_VOLUME_SOURCE: LAST_COMPLETED_SESSION")
 
-    # Invalidation and targets
     invalidation = enriched.get("invalidation_level")
     if invalidation is not None:
         lines.append(f"ESTIMATED_INVALIDATION_LEVEL: {invalidation:.4f}")
@@ -318,11 +358,19 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
     if rr is not None:
         lines.append(f"ESTIMATED_RR: {rr:.2f}")
 
-    # Prefilter context
+    # SFC-2B deterministic family lifecycle context for GPT-5.6.
+    _append_setup_family_context(lines, enriched)
+
     if prefilter_result:
         score = prefilter_result.get("prefilter_score")
         if score is not None:
             lines.append(f"PREFILTER_SCORE: {score}")
+        admission_score = prefilter_result.get("admission_rank_score")
+        if admission_score is not None:
+            lines.append(f"ADMISSION_RANK_SCORE: {admission_score}")
+        admission_source = prefilter_result.get("admission_source")
+        if admission_source:
+            lines.append(f"ADMISSION_SOURCE: {admission_source}")
 
     return "\n".join(lines)
 
@@ -334,34 +382,18 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
 def parse_and_validate_json(
     response_text: str,
 ) -> tuple[dict | None, str | None, str | None]:
-    """Parse and validate a Claude JSON response.
+    """Parse and validate a strict model JSON response.
 
-    Claude must return pure JSON only — no markdown fences, no prose wrapper.
+    The model must return pure JSON only — no markdown fences, no prose wrapper.
     Any non-JSON wrapping is rejected rather than silently stripped.
-
-    Returns:
-        (signal_dict, error_type, error_message)
-        On success: (signal_dict, None, None)
-        On failure: (None, error_type, error_message)
-
-    error_type values:
-        markdown_wrapper  — response contains markdown code fences
-        non_json_wrapper  — response has prose before or after the JSON object
-        JSON_PARSE_ERROR  — malformed JSON syntax
-        JSON_SCHEMA_ERROR — missing required keys or wrong field types
-        JSON_ENUM_ERROR   — enum field contains disallowed value
     """
     stripped = response_text.strip()
 
-    # Reject markdown code fences
     if "```" in stripped:
         return None, "markdown_wrapper", "response contains markdown code fences — JSON only"
-
-    # Reject if response does not start with a JSON object
     if not stripped.startswith("{"):
         return None, "non_json_wrapper", "response does not begin with '{' — JSON only"
 
-    # Parse JSON; reject trailing prose after the closing brace
     try:
         decoder = json.JSONDecoder()
         data, end_idx = decoder.raw_decode(stripped)
@@ -374,32 +406,25 @@ def parse_and_validate_json(
     if not isinstance(data, dict):
         return None, "JSON_PARSE_ERROR", "top-level value is not an object"
 
-    # Required key check
     missing = _REQUIRED_KEYS - data.keys()
     if missing:
         return None, "JSON_SCHEMA_ERROR", f"missing keys: {sorted(missing)}"
 
-    # Enum validation
     for field, allowed in _ENUM_FIELDS.items():
         val = data.get(field)
         if val not in allowed:
             return None, "JSON_ENUM_ERROR", f"{field}={val!r} not in {sorted(allowed)}"
 
-    # risk_reward: must be number or null
     rr = data.get("risk_reward")
     if rr is not None and not isinstance(rr, (int, float)):
         log.warning("risk_reward is non-numeric (%r) — treating as null", rr)
         data["risk_reward"] = None
 
-    # targets: must be a list
     if not isinstance(data.get("targets"), list):
         return None, "JSON_SCHEMA_ERROR", "targets must be a list"
-
-    # missing_conditions: must be a list
     if not isinstance(data.get("missing_conditions"), list):
         return None, "JSON_SCHEMA_ERROR", "missing_conditions must be a list"
 
-    # score: clamp to int 0–100
     score = data.get("score")
     if not isinstance(score, (int, float)):
         data["score"] = 0
@@ -410,7 +435,7 @@ def parse_and_validate_json(
 
 
 # ---------------------------------------------------------------------------
-# Single Claude call
+# Historical single Claude call compatibility path
 # ---------------------------------------------------------------------------
 
 async def claude_call(
@@ -420,12 +445,9 @@ async def claude_call(
     semaphore: asyncio.Semaphore,
     config: dict,
 ) -> dict:
-    """Send one enriched ticker to Claude. Returns result dict with signal or error info."""
+    """Historical compatibility call. Production client is an OpenAI adapter."""
     ticker = enriched.get("ticker", "UNKNOWN")
     claude_cfg = config.get("claude", {})
-    # Every Claude path resolves the same runtime model — including the manual
-    # !analyze path, which calls claude_call directly and never passes through
-    # async_claude_scan.
     model, _model_source = resolve_claude_model(config)
     max_tokens = claude_cfg.get("max_tokens", 1200)
 
@@ -477,7 +499,7 @@ async def claude_call(
 
 
 # ---------------------------------------------------------------------------
-# Batch async scan
+# Historical batch compatibility path
 # ---------------------------------------------------------------------------
 
 async def async_claude_scan(
@@ -487,23 +509,7 @@ async def async_claude_scan(
     config: dict,
     _governor: "_RateGovernor | None" = None,
 ) -> list:
-    """Run Claude analysis on all candidates with rate governor and concurrency limit.
-
-    Candidates are processed sequentially by default (claude_concurrency=1) with a
-    minimum inter-call gap and a per-minute token budget enforced by _RateGovernor.
-    !analyze bypasses this function and calls claude_call directly, so it is never
-    paced by the scan governor.
-
-    Args:
-        candidates:  list of enriched dicts (already prefiltered)
-        system_prompt: loaded system prompt string
-        client:      anthropic AsyncAnthropic client
-        config:      doctrine_config dict
-        _governor:   injectable _RateGovernor for testing (created from config if None)
-
-    Returns:
-        list of result dicts, one per candidate, in input order
-    """
+    """Run historical scheduler-compatible analysis in deterministic order."""
     claude_cfg = config.get("claude", {})
     max_concurrent = int(
         claude_cfg.get("claude_concurrency", claude_cfg.get("max_concurrent_calls", 1))
@@ -517,8 +523,6 @@ async def async_claude_scan(
         max_tpm=tpm_budget,
     )
 
-    # Once per scan, not once per ticker. Model name only — never keys,
-    # tokens, environment contents or config dumps.
     selected_model, model_source = resolve_claude_model(config)
     log.info("CLAUDE_MODEL_SELECTED: model=%s source=%s", selected_model, model_source)
 

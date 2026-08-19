@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering SFC-2A: `main` at `99d98080dfa5452df00cf8794ef0741c1d7aa1d2` (Phase AI-1 — OpenAI GPT-5.6 production runtime, built on Phase SFC-1).
+Last merged production baseline entering SFC-2B: `main` at `744cd38f2fda060c1eb9b4f1bb344500ff78bee6` (Phase SFC-2A — setup-family admission arbitration contract, on top of OpenAI GPT-5.6 AI-1 runtime).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -16,7 +16,8 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - SNIPE gate audit, unified ladder, downgrade-only consistency seal, final-state reconciliation, and calibration are installed.
 - Final-tier dedup reconciliation is installed: cooldown/tier-improvement sees the final executable tier.
 - Autoscan and manual `!analyze` share the same post-tiering candidate-judgment organ.
-- Phase SFC-1 compiles normalized completed-Daily evidence for all four locked setup families without changing tier/capital/admission authority.
+- Phase SFC-1 compiles normalized completed-Daily evidence for all four locked setup families.
+- Phase SFC-2A defines the pure family-admission arbitration contract.
 - Scan-funnel telemetry is isolated from alert history and remains observational only.
 - Production ticker loader normalizes uppercase symbols, ignores blanks/comments, deduplicates, validates format, and never fetches market data.
 
@@ -42,14 +43,7 @@ Source: `config/tickers.txt`
 
 Validated baseline before the next requested expansion: **814 unique symbols**.
 
-The regression suite asserts:
-
-- exactly 814 valid symbols;
-- zero duplicates;
-- zero malformed symbols;
-- stable first/last boundaries;
-- DRAM present exactly once in alphabetical position;
-- IBM present exactly once in alphabetical position.
+The regression suite asserts exactly 814 valid symbols, zero duplicates, zero malformed symbols, stable first/last boundaries, DRAM exactly once in alphabetical position, and IBM exactly once in alphabetical position.
 
 Any universe expansion must update expected count/boundaries intentionally in the same reviewed change.
 
@@ -81,60 +75,79 @@ Research objective: identify entries with a realistic structural/volatility path
 3. `SMA_CRADLE_CONTINUATION`
 4. `GAP_FILL_REVERSAL`
 
-### SFC-1 — compiler status
+### SFC-1 — compiler
 
-SFC-1 provides a normalized deterministic evidence compiler for all four families from completed Daily evidence.
+SFC-1 provides normalized deterministic completed-Daily evidence for all four families. A family label is never capital authority.
 
-The compiler remains evidence-first. A family label is never capital authority.
+### SFC-2A — admission arbitration
 
-### SFC-2A — admission arbitration contract
+SFC-2A defines how strong family evidence may repair generic **model-admission** blind spots without bypassing common fatal gates.
 
-SFC-2A defines, as a pure side-effect-free module, how strong family evidence may repair **generic prefilter/model-admission blind spots** without bypassing common fatal gates.
+Never rescued:
 
-Key laws:
+- bad/empty/insufficient/stale data;
+- blocked overhead;
+- excessive extension;
+- failed retest;
+- hostile value alignment.
 
-- bad/empty/insufficient/stale data is never rescued;
-- blocked overhead is never rescued;
-- excessive extension is never rescued;
-- failed retest is never rescued;
-- hostile value alignment is never rescued;
-- generic no-structure/mid-range blockers may be superseded for model admission when a normalized family is admission-ready;
-- missing generic invalidation/target/R:R can be superseded only when the family compiler provides explicit valid equivalents;
-- `watch_ready` alone is not enough to open the family lane;
-- family rank influence never overwrites the legacy prefilter score and is bounded;
-- the family-admission object contains no tier, capital or Discord authority.
+Conditionally superseded for model admission only when explicit family evidence exists:
 
-SFC-2A itself does not yet change production candidate selection. SFC-2B is the controlled wiring phase after the SFC-2A contract is green.
+- generic no-clear-structure;
+- generic mid-range/no-edge;
+- missing generic invalidation estimate;
+- missing generic target path;
+- generic R:R estimate below floor when family-specific R:R independently passes the same floor.
+
+### SFC-2B — family-aware production wiring
+
+SFC-2B wires SFC-1/SFC-2A into the production scan path while preserving the capital firewall.
+
+Implemented contract:
+
+- `indicators.enrich()` compiles setup families from completed Daily bars only;
+- developing Daily contact can remain provisional runtime context but cannot become family confirmation;
+- legacy `prefilter_score` remains unchanged and auditable;
+- strong family evidence may create a bounded `admission_rank_score` for candidate selection;
+- `original_veto_flags` preserves the generic pre-arbitration ledger;
+- `rescued_veto_flags` records only explicitly superseded generic blind spots;
+- `veto_flags` remains the active downstream gate ledger after arbitration;
+- never-rescue blockers remain active in `veto_flags`;
+- `model_candidates` is the provider-neutral candidate alias while historical compatibility aliases remain;
+- GPT-5.6 receives normalized primary-family lifecycle/state/readiness/geometry/path/blocker/metric context;
+- downstream deterministic tiering still independently requires structure/retest/hold/invalidation/target/R:R and every existing capital gate before a STARTER or SNIPE can survive.
+
+This solves a critical integration trap: a family candidate may be worth GPT-5.6 analysis even when the generic scorer cannot express its structure, but a rescued generic blocker must not remain active and mechanically force WAIT before downstream execution proof is evaluated. The original generic evidence remains preserved for audit rather than deleted.
 
 ## Candidate-cap decision: 30 vs 40
 
 Current production cap remains **30 deep-analysis candidates per scan**.
 
-The operator proposed 40 and delegated the engineering decision. The preferred next ceiling is **40 if measured evidence proves it adds recall without damaging cadence/cost**.
+The operator proposed 40 and delegated the engineering decision. The preferred next ceiling is **40 only if measured evidence proves it adds recall without damaging cadence/cost**.
 
-A move from 30 to 40 is a 33.3% increase in maximum model calls. The scanner already records near-cut ranks 31-60 without paying for deep analysis, so the decision can be measured rather than guessed.
+A move from 30 to 40 is a 33.3% increase in maximum model calls. The scanner records near-cut ranks 31-60 without paying for deep analysis, so the decision can be measured rather than guessed.
 
 CAP-40 acceptance sequence:
 
 1. keep GPT-5.6 runtime green;
-2. complete SFC-2 family admission/readiness integration;
-3. replay/inspect ranks 31-40 for legitimate missed STARTER/SNIPE opportunities;
-4. verify worst-case scan duration remains comfortably inside the 15-minute cadence;
-5. verify API rate/cost budget is acceptable;
-6. raise to 40 only if incremental opportunity capture is real.
+2. complete and merge SFC-2 family-aware admission;
+3. replay/inspect family-aware ranks 31-40 for legitimate missed NEAR/STARTER/SNIPE opportunities;
+4. measure target/stop/time-barrier outcomes where labels are available;
+5. verify worst-case scan duration remains comfortably inside the 15-minute cadence;
+6. verify API rate/cost budget is acceptable;
+7. raise to 40 only if incremental opportunity capture is real.
 
 Do not use a larger model-call cap to compensate for weak candidate ranking.
 
 ## Next production sequence
 
-1. SFC-2A: green the pure family-admission arbitration contract.
-2. SFC-2B: wire normalized family evidence into prefilter/model admission and GPT-5.6 prompt context while preserving common gates and the 30-candidate cap.
-3. Cross-family contradiction resolver and tier contract tests.
-4. R4H-2: evidence-based decision on promoting real 4H from shadow to production authority.
-5. VELOCITY-1: five-session/+8% feasibility layer and three-barrier validation labels.
-6. CAP-40: measured 30-vs-40 capacity study and, if proven, controlled cap increase.
-7. Final requested universe expansion in its own reviewed PR.
-8. Chronological replay/out-of-sample validation and Railway observation.
+1. Merge SFC-2B only after the permanent production gate is green.
+2. Cross-family contradiction resolver and tier contract tests.
+3. R4H-2: evidence-based decision on promoting real 4H from shadow to production authority.
+4. VELOCITY-1: five-session/+8% feasibility layer and three-barrier validation labels.
+5. CAP-40: measured 30-vs-40 capacity study and, if proven, controlled cap increase.
+6. Final requested universe expansion in its own reviewed PR.
+7. Chronological replay/out-of-sample validation and Railway observation.
 
 ## Things that must NOT drift
 
