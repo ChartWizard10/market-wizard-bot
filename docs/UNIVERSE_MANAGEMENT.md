@@ -40,7 +40,7 @@ When the operator supplies the list:
 7. Update the full-universe regression count and boundary assertions if they changed.
 8. Add exact-presence regression assertions for strategically important new symbols when appropriate.
 9. Run compile + full production tests.
-10. Review diff to confirm no unrelated config, thresholds, candidate cap, cadence, scoring, tiering, or routing changed.
+10. Review diff to confirm no unrelated config, thresholds, candidate cap, cadence, scoring, tiering, model provider, or routing changed.
 11. Merge through a dedicated universe PR.
 12. Validate Railway/Discord runtime after deploy.
 
@@ -55,15 +55,15 @@ A universe update may change:
 
 A universe update must NOT implicitly change:
 
-- `prefilter.max_claude_candidates_per_scan`;
-- `prefilter.prefilter_min_score`;
+- deep-analysis candidate cap;
+- prefilter minimum score;
 - scoring weights;
 - tier score thresholds;
 - R:R floors;
 - risk-distance floors;
 - scan cadence;
 - market hours;
-- Claude model;
+- model provider/model selection;
 - Discord channels;
 - cooldown;
 - setup-family doctrine;
@@ -73,9 +73,11 @@ If the expanded universe later demonstrates capacity pressure, rate-limit pressu
 
 ## Capacity interpretation
 
-The prefilter evaluates the full loaded universe algorithmically, then admits only the configured top candidate set to Claude. Therefore a larger universe mainly increases Daily market-data/feature work and ranking competition; it does not automatically increase Claude calls beyond the configured cap.
+The prefilter evaluates the full loaded universe algorithmically, then admits only the configured top candidate set to the deep-analysis model. Therefore a larger universe mainly increases Daily market-data/feature work and ranking competition; it does not automatically increase model calls beyond the configured cap.
 
 That architecture is deliberate. It protects API cost/rate budget while requiring telemetry to reveal whether good setups are being cut off near the admission boundary.
+
+Current baseline cap is 30. Ranks 31-60 are already captured through near-cut telemetry. The preferred next ceiling is 40 only after the GPT-5.6 runtime migration, setup-family compiler, near-cut opportunity review, and scan-budget validation prove a net benefit.
 
 ## Failure handling
 
