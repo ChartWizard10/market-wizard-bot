@@ -39,7 +39,7 @@ Read these before changing strategy or universe:
 python main.py
 ```
 
-`main.py` loads `config/doctrine_config.yaml`, validates runtime environment, builds the Discord/Anthropic clients, loads `prompts/market_wizard_system.md`, registers operator commands, and starts the autoscan loop.
+`main.py` loads `config/doctrine_config.yaml`, validates runtime environment, builds runtime clients, loads `prompts/market_wizard_system.md`, registers operator commands, and starts the autoscan loop.
 
 ## Current high-level pipeline
 
@@ -48,7 +48,8 @@ config/tickers.txt
   -> Daily market data / bar truth
   -> structure-first indicators
   -> algorithmic prefilter + hard vetoes + ranking
-  -> top-30 Claude deep analysis
+  -> configured deep-analysis candidate set
+  -> model analysis
   -> deterministic base tiering
   -> shared post-tiering chart judgment
        trade location
@@ -67,6 +68,12 @@ config/tickers.txt
   -> alert state
   -> isolated scan telemetry
 ```
+
+## Model target and current mismatch
+
+Governing target: OpenAI GPT-5.6, with `gpt-5.6` / GPT-5.6 Sol as the flagship production model target.
+
+Current `main` entering P0 still contains the legacy Anthropic runtime. That mismatch is explicitly tracked in `docs/PRODUCTION_STATE.md` and must be repaired in AI-1 before documentation claims GPT-5.6 is deployed. Provider migration is not permission to change trading doctrine.
 
 ## External verdicts
 
@@ -90,14 +97,14 @@ The current production-state ledger records which of these are fully implemented
 
 ## Current fixed configuration
 
-From `config/doctrine_config.yaml`:
+From `config/doctrine_config.yaml` on current production main:
 
 - scan cadence: 15 minutes;
 - market window: 09:35–15:55 ET, weekdays;
 - Daily lookback: 18 months;
 - Daily minimum bars: 120;
 - prefilter minimum score: 55;
-- Claude candidate cap: 30 per scan;
+- deep-analysis candidate cap: 30 per scan;
 - SNIPE_IT score floor: 85;
 - STARTER score floor: 75;
 - NEAR_ENTRY score floor: 60;
@@ -107,6 +114,12 @@ From `config/doctrine_config.yaml`:
 - prohibited indicators: RSI, MACD, Bollinger Bands, Stochastic.
 
 These are strategy/runtime contracts. A ticker-universe update must not silently alter them.
+
+## Candidate-cap direction
+
+The preferred next ceiling is 40 only if measured evidence supports it.
+
+The scanner already records ranks 31-60 in near-cut telemetry without additional model calls. After GPT-5.6 migration and the setup-family compiler, ranks 31-40 will be evaluated for incremental actionable recall and scan-budget impact. A cap increase may not be used to hide weak candidate admission.
 
 ## Current universe
 
@@ -120,14 +133,7 @@ Universe changes follow [docs/UNIVERSE_MANAGEMENT.md](docs/UNIVERSE_MANAGEMENT.m
 
 ## Runtime environment
 
-Required:
-
-- `DISCORD_TOKEN`
-- `ANTHROPIC_KEY` for Claude-backed scans/analysis
-
-Optional model override:
-
-- `ANTHROPIC_MODEL`
+Current pre-AI-1 code still recognizes legacy Anthropic variables. The post-AI-1 target is `OPENAI_API_KEY` plus an `OPENAI_MODEL` runtime selector. Follow `docs/RUNBOOK.md`; do not modify Railway secrets ahead of the reviewed migration.
 
 Optional Discord channel overrides:
 
@@ -154,7 +160,7 @@ Manual `!analyze` bypasses universe admission/cooldown for inspection only; it u
 
 - Real 4H is currently shadow/evidence-only; the Phase-14F operational proxy remains production-authoritative until an explicit R4H-2 promotion is validated.
 - Higher-timeframe context is evidence-only under the current configuration.
-- Claude is a classifier/analyst, not sovereign capital authority.
+- GPT-5.6 is the intended analyst/classifier, not sovereign capital authority.
 - Telemetry is observational only.
 - WAIT never posts.
 - Score cannot rescue failed hard gates.
