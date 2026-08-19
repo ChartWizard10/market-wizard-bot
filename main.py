@@ -1,11 +1,10 @@
 """Market Wizard Bot — production entry point.
 
-Starts the Discord bot, registers commands, and launches the auto-scan loop.
-Secrets are read from environment variables only — never hardcoded.
+Starts Discord, registers commands, and launches the auto-scan loop.
+Secrets are read from environment variables only.
 
-Phase AI-1: production deep analysis runs through OpenAI GPT-5.6. The scheduler
-still exposes some historical Claude-named compatibility fields/functions; they
-are naming debt only and do not represent the production provider.
+Phase AI-1 production provider: OpenAI GPT-5.6. Historical Claude-named
+scheduler/telemetry symbols remain temporarily as compatibility naming only.
 """
 
 import asyncio
@@ -26,11 +25,7 @@ def load_config(path: str = "config/doctrine_config.yaml") -> dict:
 
 
 def validate_startup(config: dict) -> dict:
-    """Validate runtime environment without starting network clients.
-
-    DISCORD_TOKEN missing -> hard error.
-    OPENAI_API_KEY missing -> warning only; model-backed commands fail safely.
-    """
+    """Validate runtime environment without creating network clients."""
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -38,17 +33,18 @@ def validate_startup(config: dict) -> dict:
         errors.append("DISCORD_TOKEN is not set — bot cannot authenticate with Discord")
 
     if not os.environ.get("OPENAI_API_KEY"):
+        # The legacy name appears only to make the historical startup regression
+        # explicit: ANTHROPIC_KEY is NOT a substitute production credential.
         warnings.append(
-            "OPENAI_API_KEY is not set — !scan and !analyze will fail gracefully"
+            "OPENAI_API_KEY is not set — !scan and !analyze will fail gracefully; "
+            "legacy ANTHROPIC_KEY is not used for production authentication"
         )
 
     return {"ok": len(errors) == 0, "errors": errors, "warnings": warnings}
 
 
 def format_scan_summary(summary: dict) -> str:
-    """Format a scan summary dict into a short Discord message."""
     status = summary.get("status", "unknown")
-
     if status == "skipped":
         return f"Scan skipped: {summary.get('reason', 'unknown reason')}"
     if status == "aborted":
@@ -57,7 +53,6 @@ def format_scan_summary(summary: dict) -> str:
     tier = summary.get("final_tier_counts", {})
     top = summary.get("top_candidates", [])[:5]
     top_s = ", ".join(f"{c['ticker']}({c['score']})" for c in top) if top else "none"
-
     return (
         f"**Scan Summary** `{summary.get('scan_id', '?')}`\n"
         f"Tickers: {summary.get('total_tickers_input', 0)}"
@@ -76,21 +71,16 @@ def format_scan_summary(summary: dict) -> str:
 
 
 def build_bot(config: dict) -> tuple:
-    """Build Discord + OpenAI runtime clients and load the system prompt.
-
-    Returns (bot, model_client, system_prompt). `model_client` is a compatibility
-    adapter backed exclusively by AsyncOpenAI / Responses API.
-    """
+    """Build Discord plus the OpenAI-backed scheduler compatibility client."""
     openai_key = os.environ.get("OPENAI_API_KEY")
-
     model_client = None
     if openai_key:
         try:
             from openai import AsyncOpenAI
             from src.openai_scheduler_compat import OpenAISchedulerCompatClient
-
-            openai_client = AsyncOpenAI(api_key=openai_key)
-            model_client = OpenAISchedulerCompatClient(openai_client, config)
+            model_client = OpenAISchedulerCompatClient(
+                AsyncOpenAI(api_key=openai_key), config
+            )
         except Exception as exc:
             log.error("Could not create OpenAI GPT-5.6 client: %s", exc)
 
@@ -104,7 +94,6 @@ def build_bot(config: dict) -> tuple:
     intents = discord.Intents.default()
     intents.message_content = True
     bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
-
     return bot, model_client, system_prompt
 
 
@@ -114,15 +103,10 @@ def register_commands(
     model_client,
     system_prompt: str | None,
 ) -> dict:
-    """Register all Discord commands. Returns mutable shared command state."""
     from src import scheduler
     from src.discord_alerts import chunk_message
 
-    shared: dict = {
-        "last_scan_summary": {},
-        "scheduler_enabled": False,
-        "scan_task": None,
-    }
+    shared = {"last_scan_summary": {}, "scheduler_enabled": False, "scan_task": None}
 
     async def _auto_scan_loop() -> None:
         interval_minutes = config.get("scan", {}).get("interval_minutes", 15)
@@ -149,8 +133,10 @@ def register_commands(
         task = asyncio.create_task(_auto_scan_loop())
         shared["scan_task"] = task
         shared["scheduler_enabled"] = True
-        interval = config.get("scan", {}).get("interval_minutes", 15)
-        log.info("Auto-scan task started: interval=%dm", interval)
+        log.info(
+            "Auto-scan task started: interval=%dm",
+            config.get("scan", {}).get("interval_minutes", 15),
+        )
 
     @bot.command(name="help")
     async def help_cmd(ctx) -> None:
@@ -169,13 +155,10 @@ def register_commands(
     @bot.command(name="audit")
     async def audit_cmd(ctx, *, args: str = "") -> None:
         from src import audit_access
-
         user_id = getattr(getattr(ctx, "author", None), "id", None)
         channel_id = getattr(getattr(ctx, "channel", None), "id", None)
         try:
-            result = audit_access.run_audit(
-                config, args, user_id=user_id, channel_id=channel_id
-            )
+            result = audit_access.run_audit(config, args, user_id=user_id, channel_id=channel_id)
             for chunk in result.get("messages", []):
                 await ctx.send(chunk)
         except Exception as exc:
@@ -185,13 +168,10 @@ def register_commands(
     @bot.command(name="auditready")
     async def auditready_cmd(ctx, *, args: str = "") -> None:
         from src import audit_access
-
         user_id = getattr(getattr(ctx, "author", None), "id", None)
         channel_id = getattr(getattr(ctx, "channel", None), "id", None)
         try:
-            result = audit_access.run_auditready(
-                config, args, user_id=user_id, channel_id=channel_id
-            )
+            result = audit_access.run_auditready(config, args, user_id=user_id, channel_id=channel_id)
             for chunk in result.get("messages", []):
                 await ctx.send(chunk)
         except Exception as exc:
@@ -201,13 +181,10 @@ def register_commands(
     @bot.command(name="auditshy")
     async def auditshy_cmd(ctx, *, args: str = "") -> None:
         from src import audit_access
-
         user_id = getattr(getattr(ctx, "author", None), "id", None)
         channel_id = getattr(getattr(ctx, "channel", None), "id", None)
         try:
-            result = audit_access.run_auditshy(
-                config, args, user_id=user_id, channel_id=channel_id
-            )
+            result = audit_access.run_auditshy(config, args, user_id=user_id, channel_id=channel_id)
             for chunk in result.get("messages", []):
                 await ctx.send(chunk)
         except Exception as exc:
@@ -222,7 +199,6 @@ def register_commands(
                 " (OPENAI_API_KEY missing or system prompt not found)"
             )
             return
-
         await ctx.send("Starting manual scan…")
         try:
             summary = await scheduler.run_full_scan(
@@ -240,22 +216,18 @@ def register_commands(
         if not ticker:
             await ctx.send("Usage: `!analyze TICKER`  e.g. `!analyze AAPL`")
             return
-
         ticker = ticker.upper().strip()
-
         if model_client is None or system_prompt is None:
             await ctx.send(
                 "ERROR: GPT-5.6 not configured"
                 " (OPENAI_API_KEY missing or system prompt not found)"
             )
             return
-
         await ctx.send(f"Analyzing {ticker}…")
         try:
             result = await scheduler.run_analyze(
                 ticker, bot, config, system_prompt, model_client
             )
-
             status = result.get("status")
             if status == "skipped":
                 await ctx.send(f"{ticker}: skipped — previous scan still running")
@@ -265,13 +237,10 @@ def register_commands(
                 display_status = "model_error" if status == "claude_error" else status
                 await ctx.send(f"{ticker}: {display_status} — {detail}")
                 return
-
-            final_tier = result.get("final_tier", "WAIT")
-            alert_sent = result.get("alert_sent", False)
-            dedup_rsn = result.get("dedup_reason", "")
             await ctx.send(
-                f"**{ticker}** — {final_tier}\n"
-                f"Alert sent: {alert_sent}  |  Dedup: {dedup_rsn}\n"
+                f"**{ticker}** — {result.get('final_tier', 'WAIT')}\n"
+                f"Alert sent: {result.get('alert_sent', False)}  |  "
+                f"Dedup: {result.get('dedup_reason', '')}\n"
                 f"Scan ID: {result.get('scan_id', '')}"
             )
         except Exception as exc:
@@ -283,16 +252,10 @@ def register_commands(
         try:
             from src.market_data import load_tickers
             from src.model_client import resolve_model
-
             ticker_file = config.get("scan", {}).get("ticker_file", "config/tickers.txt")
-            tkr = load_tickers(ticker_file)
-            count = tkr["validation_summary"]["valid_ticker_count"]
-
+            count = load_tickers(ticker_file)["validation_summary"]["valid_ticker_count"]
             scan_cfg = config.get("scan", {})
-            state_file = config.get("state", {}).get("state_file", "data/alert_state.json")
-            in_hours = scheduler.is_market_hours(config)
             selected_model, model_source = resolve_model(config)
-
             msg = (
                 f"**Market Wizard Bot Status**\n"
                 f"Tickers loaded: {count}\n"
@@ -300,24 +263,20 @@ def register_commands(
                 f"Scheduler: {'enabled' if shared['scheduler_enabled'] else 'disabled'}\n"
                 f"Scan interval: {scan_cfg.get('interval_minutes', 15)}m\n"
                 f"Market hours only: {scan_cfg.get('market_hours_only', True)}"
-                f"  ({scan_cfg.get('market_open', '09:35')}–"
-                f"{scan_cfg.get('market_close', '15:55')} ET)\n"
-                f"In market hours now: {in_hours}\n"
-                f"State store: {state_file}\n"
+                f"  ({scan_cfg.get('market_open', '09:35')}–{scan_cfg.get('market_close', '15:55')} ET)\n"
+                f"In market hours now: {scheduler.is_market_hours(config)}\n"
+                f"State store: {config.get('state', {}).get('state_file', 'data/alert_state.json')}\n"
             )
-
             last = shared["last_scan_summary"]
             if last:
                 msg += (
-                    f"\n**Last Scan**\n"
-                    f"ID: {last.get('scan_id', '—')}\n"
+                    f"\n**Last Scan**\nID: {last.get('scan_id', '—')}\n"
                     f"Status: {last.get('status', '—')}\n"
                     f"Alerts sent: {last.get('alerts_sent', 0)}\n"
                     f"Duration: {last.get('duration_seconds', 0):.1f}s\n"
                 )
             else:
                 msg += "\nNo scan completed yet."
-
             await ctx.send(msg)
         except Exception as exc:
             log.error("!status error: %s", exc)
@@ -326,25 +285,22 @@ def register_commands(
     @bot.command(name="autoscan")
     async def autoscan_cmd(ctx, action: str = "") -> None:
         action = action.lower()
-
         if action == "start":
             task = shared.get("scan_task")
             if task and not task.done():
                 await ctx.send("Auto-scan already running.")
                 return
-            t = asyncio.create_task(_auto_scan_loop())
-            shared["scan_task"] = t
+            shared["scan_task"] = asyncio.create_task(_auto_scan_loop())
             shared["scheduler_enabled"] = True
-            interval = config.get("scan", {}).get("interval_minutes", 15)
-            await ctx.send(f"Auto-scan started (interval: {interval}m)")
-
+            await ctx.send(
+                f"Auto-scan started (interval: {config.get('scan', {}).get('interval_minutes', 15)}m)"
+            )
         elif action == "stop":
             task = shared.get("scan_task")
             if task and not task.done():
                 task.cancel()
             shared["scheduler_enabled"] = False
             await ctx.send("Auto-scan stopped.")
-
         else:
             await ctx.send("Usage: `!autoscan start` or `!autoscan stop`")
 
@@ -356,7 +312,6 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-
     try:
         config = load_config()
     except Exception as exc:
@@ -366,18 +321,15 @@ def main() -> None:
     startup = validate_startup(config)
     for warning in startup["warnings"]:
         log.warning(warning)
-
     if not startup["ok"]:
         for error in startup["errors"]:
             log.error("STARTUP_ERROR: %s", error)
         sys.exit(1)
 
-    discord_token = os.environ["DISCORD_TOKEN"]
     bot, model_client, system_prompt = build_bot(config)
     register_commands(bot, config, model_client, system_prompt)
-
     log.info("Starting Market Wizard Bot")
-    bot.run(discord_token)
+    bot.run(os.environ["DISCORD_TOKEN"])
 
 
 if __name__ == "__main__":
