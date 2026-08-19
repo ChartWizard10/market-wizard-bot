@@ -1,0 +1,53 @@
+name: SFC-2 Family-Aware Admission Build
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  build:
+    if: ${{ github.head_ref == 'phase-sfc2-family-aware-admission' && github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: phase-sfc2-family-aware-admission
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Apply SFC-2 integration
+        run: python tools/sfc2_patch.py
+
+      - name: Compile and run full tests
+        env:
+          PYTHONHASHSEED: "0"
+        run: |
+          python -m compileall -q src tests main.py
+          python -m pytest -q
+
+      - name: Commit production-only SFC-2 result
+        run: |
+          rm .github/workflows/sfc2-build.yml
+          rm tools/sfc2_patch.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "SFC-2 wire family evidence into admission and prompt"
+          git push origin HEAD:phase-sfc2-family-aware-admission
