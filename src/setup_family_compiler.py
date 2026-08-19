@@ -46,7 +46,7 @@ FAMILY_IDS = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Thresholds:
     vcp_lookback: int = 60
     vcp_min_prior_advance_pct: float = 8.0

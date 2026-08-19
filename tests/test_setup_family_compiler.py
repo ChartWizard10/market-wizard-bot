@@ -118,7 +118,7 @@ def test_random_sideways_chop_is_not_promoted_to_vcp():
 def _cradle_frame(close_above=True):
     closes = np.linspace(90.0, 140.0, 75)
     # Controlled repair lets the rising 20-day average catch price.
-    closes[-6:] = [139.0, 137.8, 136.8, 136.0, 136.6, 137.2 if close_above else 133.0]
+    closes[-6:] = [139.0, 137.8, 136.8, 136.0, 136.6, 137.2 if close_above else 125.0]
     volumes = np.r_[np.full(69, 1_200_000.0), np.full(6, 700_000.0)]
     df = _frame(closes, volumes)
     sma20 = df.close.rolling(20).mean()
