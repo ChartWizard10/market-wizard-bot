@@ -1,6 +1,6 @@
 # Production Architecture
 
-This document describes the current production control flow. It is descriptive of code authority, not a substitute for tests.
+This document describes the current production control flow and known alignment work. It is descriptive of code authority, not a substitute for tests.
 
 ## Runtime entry
 
@@ -8,12 +8,18 @@ This document describes the current production control flow. It is descriptive o
 
 - loads `config/doctrine_config.yaml`;
 - validates required runtime environment;
-- builds the Discord bot and Anthropic client;
+- builds the Discord bot and current model client;
 - loads `prompts/market_wizard_system.md`;
 - registers operator commands;
 - launches the 15-minute autoscan loop.
 
-## End-to-end scan pipeline
+### Provider-alignment warning
+
+Operator intent is OpenAI GPT-5.6. Current production `main` still instantiates `anthropic.AsyncAnthropic`, `requirements.txt` still installs `anthropic`, and the scanner still calls `src/claude_client.py`. This is a real production mismatch, not a naming preference.
+
+The next model-runtime phase must migrate the deep-analysis boundary to the OpenAI API / GPT-5.6 while preserving the existing JSON contract, deterministic tiering, setup doctrine, pacing controls, failure semantics, candidate order, Discord contract, and scan telemetry. Until that migration is merged and Railway is updated, current code is still Anthropic-backed even though GPT-5.6 is the governing target.
+
+## End-to-end scan pipeline — current main
 
 ```text
 config/tickers.txt
@@ -22,7 +28,7 @@ config/tickers.txt
   -> indicators.enrich
   -> prefilter.prefilter
        score + veto + rank + top-30 deep-analysis cap
-  -> claude_client.async_claude_scan
+  -> current model client (legacy claude_client on main; migration pending)
   -> tiering.validate
        deterministic base tier / routing / capital contract
   -> scheduler._complete_candidate_judgment
@@ -66,13 +72,22 @@ Owns structure-first Daily features: SMA/value, ATR, swings/liquidity, sweep, BO
 
 `src/prefilter.py`
 
-Owns broad-universe algorithmic score, pre-Claude vetoes, ranking, and candidate-cap admission. It is not the final trade grader.
+Owns broad-universe algorithmic score, deterministic pre-model vetoes, ranking, and candidate-cap admission. It is not the final trade grader.
 
-### Model boundary
+### Model boundary — target state
 
-`src/claude_client.py` + `prompts/market_wizard_system.md`
+The production target is a provider-neutral model boundary backed by OpenAI GPT-5.6.
 
-Own structured prompt payload, model routing, pacing/rate governance, strict JSON validation, and initial model classification. The model cannot bypass deterministic execution law.
+It must own:
+
+- structured prompt payload;
+- GPT-5.6 model routing;
+- pacing/rate governance;
+- Structured Outputs / strict JSON schema validation;
+- initial model classification;
+- explicit distinction between API/rate failures and market/setup rejection.
+
+The model can never bypass deterministic execution law.
 
 ### Deterministic base tier
 
@@ -142,9 +157,11 @@ Routes exclusively from final tier. WAIT never posts. Environment channel IDs ma
 
 Scan-funnel telemetry/decision traces only. Its file is isolated from alert history and it has zero strategy authority.
 
+The near-cut ledger already captures ranks 31-60 without paying for extra deep-analysis calls. That is the decision dataset for candidate-cap expansion.
+
 ## Current fixed production constants
 
-From `config/doctrine_config.yaml`:
+From `config/doctrine_config.yaml` on current main:
 
 - scan cadence: 15 minutes;
 - market window: 09:35–15:55 America/New_York, weekdays;
@@ -161,7 +178,22 @@ From `config/doctrine_config.yaml`:
 - state cooldown: 60 minutes;
 - disabled indicators: RSI, MACD, Bollinger Bands, Stochastic.
 
-A change to these constants is a strategy phase, not a universe-update side effect.
+A change to these constants is a strategy/capacity phase, not a universe-update side effect.
+
+## Candidate-cap decision: 30 vs 40
+
+40 is the preferred next ceiling if evidence supports it, but it is not being changed blindly during governance cleanup.
+
+Why:
+
+- 40 is only ten additional deep-analysis candidates, but it is a 33.3% increase from the current 30-call ceiling;
+- ranks 31-60 are already observed for free through telemetry, so the scanner can prove whether ranks 31-40 contain repeatable missed opportunities before paying the latency/cost;
+- the current legacy prefilter is not yet setup-family complete, so increasing the cap before repairing admission logic can simply send ten more poorly-ranked candidates to the model;
+- GPT-5.6 API capacity is materially higher than the legacy conservative Anthropic pacing configuration, so 40 is technically feasible once the provider migration and measured scan-budget test are complete.
+
+Decision sequence:
+
+`provider alignment -> setup-family compiler -> replay ranks 31-40 -> scan-budget test -> 40 if incremental recall is real`
 
 ## Known architecture gap entering the next doctrine-compiler phase
 
