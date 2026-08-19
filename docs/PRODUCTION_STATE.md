@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering CFR-2: `main` at `26e3a3ddf288e8559485c6bc31cb10c095401226` (Phase CFR-1 — pure cross-family confluence/contradiction resolver contract, on top of production-green SFC-2B family-aware admission wiring and OpenAI GPT-5.6 AI-1 runtime).
+Last merged production baseline entering R4H-2: `main` at `2c2bc8fdfaf82519e7488f4b78c97643ace5d7f2` (Phase CFR-2 — production cross-family resolver wiring, on top of SFC-2B family-aware GPT-5.6 admission and the existing deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -11,15 +11,16 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - Daily market-bar truth: completed-vs-developing evidence split is enforced.
 - 1H market-bar truth: closed/live evidence is explicitly resolved.
 - Real 4H aggregation: session-aligned evidence exists and reuses the existing 60m provider response.
-- Real 4H authority: SHADOW/EVIDENCE ONLY. Do not silently promote it.
+- Real 4H authority: **SHADOW_EVIDENCE_ONLY**. R4H-2 explicitly holds this boundary pending outcome-linked chronological validation.
 - Higher-timeframe monthly/weekly context exists and is evidence-only under current config.
 - SNIPE gate audit, unified ladder, downgrade-only consistency seal, final-state reconciliation, and calibration are installed.
 - Final-tier dedup reconciliation is installed: cooldown/tier-improvement sees the final executable tier.
 - Autoscan and manual `!analyze` share the same post-tiering candidate-judgment organ.
-- Phase SFC-1 compiles normalized completed-Daily evidence for all four locked setup families.
-- Phase SFC-2A defines the pure family-admission arbitration contract.
-- Phase SFC-2B wires family-aware model admission/ranking into production while preserving common gates and downstream tier authority.
-- Phase CFR-1 defines the pure cross-family resolution contract and tier non-interference tests.
+- SFC-1 compiles normalized completed-Daily evidence for all four locked setup families.
+- SFC-2A defines the pure family-admission arbitration contract.
+- SFC-2B wires family-aware model admission/ranking into production while preserving common gates and downstream tier authority.
+- CFR-1 defines the pure cross-family resolution contract and tier non-interference tests.
+- CFR-2 wires the cross-family resolver into the production family-evidence path and GPT-5.6 context without granting capital authority.
 - Scan-funnel telemetry is isolated from alert history and remains observational only.
 - Production ticker loader normalizes uppercase symbols, ignores blanks/comments, deduplicates, validates format, and never fetches market data.
 
@@ -116,14 +117,12 @@ Implemented contract:
 - `veto_flags` remains the active downstream gate ledger after arbitration;
 - never-rescue blockers remain active in `veto_flags`;
 - `model_candidates` is the provider-neutral candidate alias while historical compatibility aliases remain;
-- GPT-5.6 receives normalized primary-family lifecycle/state/readiness/geometry/path/blocker/metric context;
+- GPT-5.6 receives normalized family lifecycle/state/readiness/geometry/path/blocker/metric context;
 - downstream deterministic tiering still independently requires structure/retest/hold/invalidation/target/R:R and every existing capital gate before a STARTER or SNIPE can survive.
-
-This solves a critical integration trap: a family candidate may be worth GPT-5.6 analysis even when the generic scorer cannot express its structure, but a rescued generic blocker must not remain active and mechanically force WAIT before downstream execution proof is evaluated. The original generic evidence remains preserved for audit rather than deleted.
 
 ### CFR-1 — cross-family resolver contract
 
-CFR-1 is merged and production-green as a **pure contract**. It does not by itself alter the runtime family evidence path.
+CFR-1 is merged and production-green as a pure resolver contract.
 
 Resolver taxonomy:
 
@@ -146,42 +145,80 @@ Core laws:
 - reconciliation deep-copies the compiled summary and preserves raw per-family objects;
 - resolver metadata has no independent tier, capital, or Discord authority.
 
-Tier-contract regressions prove confluence cannot upgrade STARTER to SNIPE, local sibling failure metadata cannot independently downgrade a valid execution, resolver metadata alone cannot alter tier output, and active common vetoes remain sovereign.
-
 ### CFR-2 — production resolver wiring
 
-CFR-2 is the current branch phase.
+CFR-2 is merged and production-green.
 
-Target production evidence flow:
+Production evidence flow:
 
 `completed Daily evidence -> raw SFC-1 compiler -> CFR-1 resolver -> SFC-2B admission / GPT-5.6 context -> existing deterministic execution stack`
 
-CFR-2 implementation boundary:
+Implemented boundary:
 
 - `src/setup_family_runtime.py` is the package-level production facade;
 - raw `src.setup_family_compiler` remains unchanged for deterministic low-level tests;
-- package-level `from src import setup_family_compiler` resolves through the CFR-2 facade so `indicators.enrich()` receives reconciled evidence without changing Daily confirmation law;
+- `indicators.enrich()` receives reconciled family evidence without changing Daily confirmation law;
 - resolved primary selection is execution-proof-first rather than raw-score-first;
-- cross-family relationship/conflict context is projected into a namespaced `cross_family_resolution` object inside the deep-copied resolved primary metrics, which the existing GPT-5.6 prompt already serializes;
+- compact cross-family relationship/conflict context reaches GPT-5.6 through the existing resolved-primary metrics payload;
 - raw SFC-1 family objects are not mutated;
 - no new tier, score-stacking, routing, or capital authority is introduced.
 
-CFR-2 must merge only after the permanent Python 3.13 production gate proves all legacy regressions plus its production-wiring tests.
+CFR-2 merged after the permanent Python 3.13 gate completed with **2831 passed, 4 skipped**.
+
+## R4H-2 — real 4H authority decision
+
+### Verdict
+
+**HOLD SHADOW. Do not promote real 4H to production authority yet.**
+
+This is an evidence-based hold, not a rejection of the R4H-1 engine.
+
+What is already proven:
+
+- real 4H market bars are session-aligned and reuse the existing 60m response;
+- live-vs-closed confirmation law is explicit;
+- continuity holes, incomplete constituents, stale evidence and accepted failure are handled safely;
+- the operational engine expresses structure, liquidity, displacement, retest, hold, invalidation and target path;
+- scan-time telemetry persists compact real-4H state/location/readiness/freshness/continuity plus proxy agreement.
+
+What is not yet proven:
+
+- the current decision-trace contract has no forward outcome label attached to the 4H state;
+- it has no proxy-vs-real counterfactual outcome result;
+- the repository has no chronological out-of-sample artifact proving that real-4H authority improves precision without materially damaging opportunity recall;
+- several R4H-1 constants are explicitly documented in the engine as shadow/research thresholds rather than doctrine/config authority.
+
+Therefore proxy agreement cannot be used as a substitute for ground truth, and synthetic correctness tests cannot be treated as predictive validation.
+
+`src/four_hour_authority_audit.py` formalizes the R4H-2 evidence contract. Before real 4H can even become eligible for controlled promotion review, a separate validation artifact must explicitly establish:
+
+1. chronological out-of-sample validation;
+2. forward outcome linkage;
+3. proxy-vs-real counterfactual evaluation;
+4. sample size accepted under a predeclared plan;
+5. accepted regime coverage;
+6. precision improved or preserved;
+7. legitimate opportunity recall not materially damaged;
+8. full capital-integrity regressions green.
+
+The audit never auto-promotes. A fully green evidence package may only return `ELIGIBLE_FOR_CONTROLLED_PROMOTION`; an explicit reviewed handoff would still be required.
+
+The natural dependency is VELOCITY-1: its five-session/+8% three-barrier labels provide the forward-outcome layer needed to perform the later counterfactual 4H authority study.
 
 ## Candidate-cap decision: 30 vs 40
 
 Current production cap remains **30 deep-analysis candidates per scan**.
 
-The operator proposed 40 and delegated the engineering decision. The preferred next ceiling is **40 only if measured evidence proves it adds recall without damaging cadence/cost**.
+The preferred next ceiling is **40 only if measured evidence proves it adds recall without damaging cadence/cost**.
 
 A move from 30 to 40 is a 33.3% increase in maximum model calls. The scanner records near-cut ranks 31-60 without paying for deep analysis, so the decision can be measured rather than guessed.
 
 CAP-40 acceptance sequence:
 
 1. keep GPT-5.6 runtime green;
-2. complete and merge the family-aware stack through CFR-2;
-3. replay/inspect resolved family-aware ranks 31-40 for legitimate missed NEAR/STARTER/SNIPE opportunities;
-4. measure target/stop/time-barrier outcomes where labels are available;
+2. use the production family-aware/resolved ranking stack;
+3. replay/inspect ranks 31-40 for legitimate missed NEAR/STARTER/SNIPE opportunities;
+4. measure target/stop/time-barrier outcomes once labels are available;
 5. verify worst-case scan duration remains comfortably inside the 15-minute cadence;
 6. verify API rate/cost budget is acceptable;
 7. raise to 40 only if incremental opportunity capture is real.
@@ -190,9 +227,9 @@ Do not use a larger model-call cap to compensate for weak candidate ranking.
 
 ## Next production sequence
 
-1. CFR-2: complete and merge production cross-family resolver wiring.
-2. R4H-2: evidence-based decision on promoting real 4H from shadow to production authority.
-3. VELOCITY-1: five-session/+8% feasibility layer and three-barrier validation labels.
+1. Merge R4H-2 evidence decision with real 4H remaining shadow.
+2. VELOCITY-1: five-session/+8% feasibility layer and three-barrier validation labels.
+3. R4H authority revisit: use outcome-linked proxy-vs-real counterfactual validation before any controlled handoff.
 4. CAP-40: measured 30-vs-40 capacity study and, if proven, controlled cap increase.
 5. Final requested universe expansion in its own reviewed PR.
 6. Chronological replay/out-of-sample validation and Railway observation.
@@ -201,7 +238,7 @@ Do not use a larger model-call cap to compensate for weak candidate ranking.
 
 - scan cadence remains 15 minutes unless explicitly changed in a capacity phase;
 - Daily/Weekly/4H/1H jurisdiction remains intact;
-- real 4H remains shadow until R4H-2 is explicitly proven;
+- real 4H remains `SHADOW_EVIDENCE_ONLY` until forward outcome evidence explicitly clears a later authority handoff;
 - score cannot override failed execution gates;
 - WAIT never posts;
 - telemetry remains observational;
@@ -210,6 +247,7 @@ Do not use a larger model-call cap to compensate for weak candidate ranking.
 - no setup-family phase may casually change universe membership;
 - cross-family confluence may not stack family scores;
 - a resolver may not become a tier/capital/routing organ;
+- proxy agreement is not ground truth and cannot by itself justify 4H authority;
 - model-provider work may not silently change strategy thresholds, capital rules, routing, cooldown, or universe.
 
 ## Operational debt tracked but not blocking the next phase
