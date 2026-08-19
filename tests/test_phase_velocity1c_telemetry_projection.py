@@ -1,15 +1,17 @@
 """VELOCITY-1C — bounded research telemetry projection regressions."""
 
+from copy import deepcopy
 import json
 
+from src import scheduler
 from src.velocity_observation import (
     build_observation_envelope,
     compact_for_telemetry,
 )
 
 
-def _envelope():
-    features = {
+def _features():
+    return {
         "current_price": 100.0,
         "atr": 2.0,
         "overhead_level": 112.0,
@@ -24,7 +26,10 @@ def _envelope():
             },
         },
     }
-    judgment = {
+
+
+def _judgment():
+    return {
         "final_tier": "STARTER",
         "capital_action": "starter_reduced_size",
         "score": 77,
@@ -52,12 +57,15 @@ def _envelope():
             },
         },
     }
+
+
+def _envelope():
     return build_observation_envelope(
         "scan_1",
         "2026-08-19T14:00:00-04:00",
         "AAPL",
-        features,
-        judgment,
+        _features(),
+        _judgment(),
     )
 
 
@@ -112,3 +120,70 @@ def test_missing_geometry_remains_explicit_not_fabricated():
     assert compact["invalidation_level"] is None
     assert compact["capital_authorized_at_observation"] is False
     assert set(compact["missing"]) >= {"reference_price", "invalidation_level"}
+
+
+def test_scheduler_helper_adds_velocity_without_mutating_trading_inputs(monkeypatch):
+    features = _features()
+    judgment = _judgment()
+    features_before = deepcopy(features)
+    judgment_before = deepcopy(judgment)
+
+    monkeypatch.setattr(
+        scheduler.scan_telemetry,
+        "build_decision_trace",
+        lambda *args, **kwargs: {"trace_kind": "analyzed", "judgment": {"final_tier": "STARTER"}},
+    )
+
+    trace = scheduler._build_decision_trace_with_velocity(
+        "scan_3",
+        "2026-08-19T14:30:00-04:00",
+        "NVDA",
+        {"prefilter_score": 88},
+        3,
+        judgment,
+        {"should_alert": True},
+        {"ok": True, "sent": True, "channel_id": 1},
+        features,
+        base_final_tier="STARTER",
+        check_alert_evaluated_tier="STARTER",
+        check_alert_evaluated_capital_action="starter_reduced_size",
+    )
+
+    assert trace["trace_kind"] == "analyzed"
+    assert trace["velocity_observation"]["ready"] is True
+    assert trace["velocity_observation"]["reference_price"] == 100.0
+    assert features == features_before
+    assert judgment == judgment_before
+
+
+def test_scheduler_helper_velocity_failure_cannot_destroy_base_trace(monkeypatch):
+    sentinel = {"trace_kind": "analyzed", "judgment": {"final_tier": "SNIPE_IT"}}
+    monkeypatch.setattr(
+        scheduler.scan_telemetry,
+        "build_decision_trace",
+        lambda *args, **kwargs: deepcopy(sentinel),
+    )
+
+    def _fail(*args, **kwargs):
+        raise RuntimeError("telemetry research projection failed")
+
+    monkeypatch.setattr(
+        scheduler.velocity_observation,
+        "build_observation_envelope",
+        _fail,
+    )
+
+    trace = scheduler._build_decision_trace_with_velocity(
+        "scan_4",
+        "2026-08-19T14:45:00-04:00",
+        "AMD",
+        {},
+        4,
+        _judgment(),
+        {"should_alert": True},
+        {"ok": True, "sent": True, "channel_id": 1},
+        _features(),
+    )
+
+    assert trace == sentinel
+    assert "velocity_observation" not in trace
