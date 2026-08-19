@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from src.market_data import partition_daily_bars
+from src import setup_family_compiler
 
 log = logging.getLogger(__name__)
 
@@ -821,7 +822,7 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
     if len(df) >= 2:
         prev_close = round(float(df["close"].iloc[-2]), 4)
 
-    return {
+    enriched = {
         "ticker": ticker,
         "current_price": cur,
         "current_open": round(float(df["open"].iloc[-1]), 4),
@@ -886,3 +887,11 @@ def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
         # ATR
         "atr": atr,
     }
+
+    # Phase SFC-2: family evidence is compiled from COMPLETED Daily bars only.
+    # Current price is passed separately as location information. The compiler
+    # is evidence-only here and does not mutate the canonical feature fields.
+    enriched["setup_family_evidence"] = setup_family_compiler.compile_setup_families(
+        confirmed_df, cur, enriched, config
+    )
+    return enriched

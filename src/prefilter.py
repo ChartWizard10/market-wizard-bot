@@ -50,6 +50,40 @@ _HARD_BLOCK_VETOES = {
 }
 
 
+def _family_summary(enriched: dict) -> dict:
+    value = enriched.get("setup_family_evidence")
+    return value if isinstance(value, dict) else {}
+
+
+def _primary_family_evidence(enriched: dict) -> dict:
+    summary = _family_summary(enriched)
+    family_id = summary.get("primary_family")
+    families = summary.get("families")
+    if not family_id or family_id == "NONE" or not isinstance(families, dict):
+        return {}
+    value = families.get(family_id)
+    return value if isinstance(value, dict) else {}
+
+
+def _compact_family_evidence(enriched: dict) -> dict | None:
+    """Copy only the family fields downstream execution governance needs."""
+    summary = _family_summary(enriched)
+    if not summary or summary.get("primary_family") in (None, "NONE"):
+        return None
+    return {
+        "primary_family": summary.get("primary_family"),
+        "primary_state": summary.get("primary_state"),
+        "primary_family_score": summary.get("primary_family_score"),
+        "watch_ready": bool(summary.get("watch_ready")),
+        "admission_ready": bool(summary.get("admission_ready")),
+        "entry_structure_valid": bool(summary.get("entry_structure_valid")),
+        "primary_invalidation_level": summary.get("primary_invalidation_level"),
+        "primary_target_1": summary.get("primary_target_1"),
+        "primary_rr_to_t1": summary.get("primary_rr_to_t1"),
+        "primary_retest_state": _primary_family_evidence(enriched).get("retest_state"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Per-category scoring helpers
 # ---------------------------------------------------------------------------
@@ -78,6 +112,17 @@ def _score_structure_event(enriched: dict, weight: int) -> int:
         return round(weight * 0.40)          # modest only — not a bullish full signal
     if wick_only:
         return round(weight * 0.15)          # flagged noise, not rewarded
+
+    # SFC-2: a deterministic family lifecycle can establish meaningful
+    # structure/location before a classic BOS/MSS print. This maps that proof
+    # into the EXISTING structure bucket; no new score weight is created.
+    family = _family_summary(enriched)
+    if family.get("entry_structure_valid"):
+        return round(weight * 0.90)
+    if family.get("admission_ready"):
+        return round(weight * 0.70)
+    if family.get("watch_ready"):
+        return round(weight * 0.50)
     return 0                                 # none
 
 
@@ -91,7 +136,16 @@ def _score_zone_quality(enriched: dict, weight: int) -> int:
     elif fvg or ob:
         score = round(weight * 0.67)         # one present — decent
 
-    # Bonus: price is actively inside the zone
+    # SFC-2: VCP pivot location, rising-MA cradle value, and active gap-fill
+    # location are legitimate decision areas even when no FVG/OB is present.
+    if score == 0:
+        family = _primary_family_evidence(enriched)
+        if family.get("location_valid") and family.get("admission_ready"):
+            score = round(weight * 0.67)
+        elif family.get("location_valid") and family.get("watch_ready"):
+            score = round(weight * 0.45)
+
+    # Bonus: price is actively inside the classic zone
     in_zone = (fvg and fvg.get("price_in_fvg")) or (ob and ob.get("price_at_ob"))
     if in_zone and score > 0:
         bonus = round(weight * 0.20)
@@ -106,6 +160,17 @@ def _score_retest(enriched: dict, weight: int) -> int:
         return weight
     if status == "partial":
         return round(weight * 0.60)
+
+    family = _primary_family_evidence(enriched)
+    family_retest = str(family.get("retest_state") or "NONE").upper()
+    if family.get("admission_ready"):
+        if family_retest == "HELD":
+            return weight
+        if family_retest == "RECLAIMED":
+            return round(weight * 0.75)
+        if family_retest in {"PENDING", "TESTING", "FILLING", "NOT_STARTED"}:
+            return round(weight * 0.45)
+
     if status == "missing":
         return round(weight * 0.20)
     return 0                                 # failed
@@ -116,8 +181,28 @@ def _score_target_rr(enriched: dict, weight: int) -> int:
     rr = enriched.get("estimated_rr")
     targets = enriched.get("targets", [])
 
-    if overhead == "blocked" or not targets:
+    if overhead == "blocked":
         return 0
+
+    # SFC-2 family targets are admission evidence only. They let a valid family
+    # reach deep analysis when the classic liquidity-target builder has no
+    # target yet; downstream entry tiers still require the model/tiering target
+    # contract and clean path proof.
+    if not targets:
+        family = _primary_family_evidence(enriched)
+        family_target = family.get("target_1")
+        if not (family.get("admission_ready") and family_target is not None):
+            return 0
+        rr = family.get("rr_to_t1")
+        if overhead == "clear":
+            if rr is not None and rr >= 3.0:
+                return weight
+            if rr is not None:
+                return round(weight * 0.60)
+            return round(weight * 0.50)
+        if overhead == "moderate":
+            return round(weight * 0.40)
+        return round(weight * 0.30)
 
     rr_strong = rr is not None and rr >= 3.0
     rr_weak = rr is not None and rr < 3.0
@@ -210,10 +295,12 @@ def algo_score(enriched: dict, config: dict) -> tuple[int, dict]:
 # ---------------------------------------------------------------------------
 
 def apply_hard_vetoes(enriched: dict, config: dict) -> list[str]:
-    """Return list of active veto flags for this ticker.
+    """Return active broad-universe admission vetoes for this ticker.
 
-    A veto does not silently drop the ticker — it is recorded so
-    summary stats can explain why it was rejected.
+    Phase SFC-2 allows deterministic family evidence to satisfy *admission*
+    structure/location/invalidation/target requirements without granting any
+    downstream entry tier. Sovereign path, extension and alignment blockers
+    remain intact.
     """
     thresholds = config.get("prefilter", {}).get("thresholds", {})
     max_extension = thresholds.get("max_price_extension_from_sma20_pct", 8)
@@ -222,10 +309,9 @@ def apply_hard_vetoes(enriched: dict, config: dict) -> list[str]:
     vetoes: list[str] = []
     status = enriched.get("data_status", "ERROR")
 
-    # --- Data quality vetoes ---
     if status == "EMPTY":
         vetoes.append(VETO_DATA_EMPTY)
-        return vetoes                        # no features to check further
+        return vetoes
     if status == "ERROR":
         vetoes.append(VETO_DATA_ERROR)
         return vetoes
@@ -236,48 +322,55 @@ def apply_hard_vetoes(enriched: dict, config: dict) -> list[str]:
         vetoes.append(VETO_STALE_DATA)
         return vetoes
 
-    # --- Structure vetoes ---
+    family_summary = _family_summary(enriched)
+    family_primary = _primary_family_evidence(enriched)
+    family_admission = bool(family_summary.get("admission_ready"))
+    family_invalidation = family_summary.get("primary_invalidation_level")
+    family_target = family_summary.get("primary_target_1")
+
     has_structure = enriched.get("structure_event", "none") != "none"
     has_fvg = bool(enriched.get("fvg"))
     has_ob = bool(enriched.get("ob"))
     has_zone = has_fvg or has_ob
 
-    if not has_structure and not has_zone:
+    if not has_structure and not has_zone and not family_admission:
         vetoes.append(VETO_NO_CLEAR_STRUCTURE)
 
-    if enriched.get("invalidation_level") is None:
+    if enriched.get("invalidation_level") is None and not (
+        family_admission and family_invalidation is not None
+    ):
         vetoes.append(VETO_NO_INVALIDATION)
 
-    if not enriched.get("targets"):
+    if not enriched.get("targets") and not (
+        family_admission and family_target is not None
+    ):
         vetoes.append(VETO_NO_TARGET_PATH)
 
-    # --- Overhead ---
     if enriched.get("overhead_status") == "blocked":
         vetoes.append(VETO_OVERHEAD_BLOCKED)
 
-    # --- Price extension ---
     ext = enriched.get("price_extension_from_sma20_pct")
     if ext is not None and ext > max_extension:
         vetoes.append(VETO_PRICE_TOO_EXTENDED)
 
-    # --- Retest ---
     if enriched.get("retest_status") == "failed":
-        vetoes.append(VETO_RETEST_FAILED)
+        family_retest = str(family_primary.get("retest_state") or "NONE").upper()
+        if not family_admission or family_retest == "FAILED":
+            vetoes.append(VETO_RETEST_FAILED)
 
-    # --- Value alignment ---
     if enriched.get("sma_value_alignment") == "hostile":
         vetoes.append(VETO_HOSTILE_ALIGNMENT)
 
-    # --- R:R ---
+    # Family provisional R:R is not a hard-entry R:R contract. Only the
+    # canonical estimate can trigger the existing prefilter R:R veto.
     rr = enriched.get("estimated_rr")
     if rr is not None and rr < min_rr:
         vetoes.append(VETO_RR_BELOW_THRESHOLD)
 
-    # --- Mid-range / no edge ---
-    # Trigger when: no structure, no zone, score would be near zero
     if (
         not has_structure
         and not has_zone
+        and not family_admission
         and enriched.get("retest_status") in ("missing", "failed")
     ):
         if VETO_MID_RANGE_NO_EDGE not in vetoes:
@@ -349,6 +442,7 @@ def _build_key_features(enriched: dict) -> dict:
         "current_change_pct": change_pct,
         "current_bar_direction": bar_dir,
         "current_close_location_pct": close_loc,
+        "setup_family_evidence": _compact_family_evidence(enriched),
     }
 
 
