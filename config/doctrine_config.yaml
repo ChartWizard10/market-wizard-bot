@@ -56,6 +56,15 @@ prefilter:
   max_claude_candidates_per_scan: 30
   prefilter_min_score: 55
 
+  # Phase SFC-2A. Pure setup-family admission arbitration. This block does not
+  # change candidate behavior until SFC-2B wires the green contract into the
+  # prefilter. Family evidence may repair generic admission blind spots, never
+  # common fatal gates and never capital authority.
+  family_admission:
+    enabled: true
+    min_family_score: 65
+    max_family_rank_score: 95
+
   scoring_weights:
     trend_value_alignment: 15
     structure_event: 20
