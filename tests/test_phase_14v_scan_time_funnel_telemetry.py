@@ -961,12 +961,13 @@ def test_v1_m1_legacy_trace_preserves_pre_ladder_check_alert_basis(tmp_path):
 
 
 def test_v1_check_alert_runs_once_after_final_tier_mutation():
-    """Phase 14S.4B law: judge first, dedup final executable truth second."""
+    """Phase 14S.4B/14W2: judge fully, then dedup final executable truth."""
     src = Path("src/scheduler.py").read_text(encoding="utf-8")
+    organ = src[src.index("def _complete_candidate_judgment("):src.index("async def run_scan_pipeline")]
     scan = src[src.index("async def run_scan_pipeline"):src.index("async def run_full_scan")]
+    assert organ.index("apply_ladder_arbitration") < organ.index("seal_snipe_confirmed_consistency")
     assert scan.count("state_store.check_alert(") == 1
-    assert scan.index("apply_ladder_arbitration") < scan.index("state_store.check_alert(")
-    assert scan.index("seal_snipe_confirmed_consistency") < scan.index("state_store.check_alert(")
+    assert scan.index("_complete_candidate_judgment(") < scan.index("state_store.check_alert(")
     assert scan.index("state_store.check_alert(") < scan.index("discord_alerts.send_alert")
 
 
@@ -1904,10 +1905,11 @@ def test_v1c_19_20_21_json_exposes_window_and_evidence_without_secrets(tmp_path)
 
 def test_v1c_24_25_check_alert_final_tier_timing_and_cap_unchanged():
     src = Path("src/scheduler.py").read_text(encoding="utf-8")
+    organ = src[src.index("def _complete_candidate_judgment("):src.index("async def run_scan_pipeline")]
     scan = src[src.index("async def run_scan_pipeline"):src.index("async def run_full_scan")]
+    assert organ.index("apply_ladder_arbitration") < organ.index("seal_snipe_confirmed_consistency")
     assert scan.count("state_store.check_alert(") == 1
-    assert scan.index("apply_ladder_arbitration") < scan.index("state_store.check_alert(")
-    assert scan.index("seal_snipe_confirmed_consistency") < scan.index("state_store.check_alert(")
+    assert scan.index("_complete_candidate_judgment(") < scan.index("state_store.check_alert(")
     assert scan.index("state_store.check_alert(") < scan.index("discord_alerts.send_alert")
     import yaml
     cfg = yaml.safe_load(open("config/doctrine_config.yaml"))

@@ -308,7 +308,7 @@ def test_never_raises_on_garbage():
 def test_scheduler_attaches_before_snipe_audit():
     import inspect
     from src import scheduler
-    src = inspect.getsource(scheduler.run_scan_pipeline)
+    src = inspect.getsource(scheduler._complete_candidate_judgment)
     htf_pos = src.find('tiering_result["higher_timeframe_context"]')
     audit_pos = src.find('tiering_result["snipe_gate_audit"]')
     assert htf_pos != -1 and audit_pos != -1

@@ -129,6 +129,238 @@ def _abort_summary(scan_id: str, started_at: str, total_tickers: int, error: str
 
 
 # ---------------------------------------------------------------------------
+# Phase 14W2 — shared post-tiering candidate judgment
+# ---------------------------------------------------------------------------
+
+def _complete_candidate_judgment(
+    ticker: str,
+    tiering_result: dict,
+    enriched: dict,
+    market_result: dict,
+    config: dict,
+    previous_state: dict | None = None,
+) -> dict:
+    """Run the production post-tiering evidence/arbitration stack once.
+
+    Used by both autoscan and manual ``!analyze``. This organ does not own
+    admission, dedup/cooldown, Discord routing, state persistence, or scan-time
+    funnel telemetry; those remain caller responsibilities.
+    """
+    tiering_result = tiering_result if isinstance(tiering_result, dict) else {}
+    enriched = enriched if isinstance(enriched, dict) else {}
+    market_result = market_result if isinstance(market_result, dict) else {}
+    final_tier = tiering_result.get("final_tier", "WAIT")
+
+    # Step 6.5: Trajectory (informational — never affects tier, capital, or routing).
+    # Phase 14S.4B: trajectory needs prior ticker state, not an early dedup
+    # verdict. Dedup is intentionally deferred until every tier-mutating
+    # organ has finished so cooldown/tier-improvement truth is evaluated
+    # against the final executable tier.
+    try:
+        tiering_result["trajectory"] = trajectory_mod.compute(
+            tiering_result, previous_state
+        )
+    except Exception as exc:
+        log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
+        tiering_result["trajectory"] = {"label": "UNKNOWN", "text": ""}
+
+    # Step 6.55: Trade location realism (Phase 14C.1 — audit/display only;
+    # never affects tier, capital, routing, suppression, or dedup). Must run
+    # before calibration, which reads tiering_result["trade_location"].
+    try:
+        tiering_result["trade_location"] = trade_location.build_trade_location_context(
+            enriched, tiering_result
+        )
+    except Exception as exc:
+        log.warning("TRADE_LOCATION_ERROR: %s: %s", ticker, exc)
+        tiering_result["trade_location"] = None
+
+    # Step 6.56: Candle evidence quality (Phase 14C.3 — evidence/display only;
+    # never affects tier, capital, routing, suppression, dedup, or raw score).
+    # Must run after trade_location and before calibration, which reads
+    # tiering_result["candle_evidence"]["score_delta"].
+    try:
+        tiering_result["candle_evidence"] = candle_evidence.build_candle_evidence_context(
+            enriched, tiering_result
+        )
+    except Exception as exc:
+        log.warning("CANDLE_EVIDENCE_ERROR: %s: %s", ticker, exc)
+        tiering_result["candle_evidence"] = candle_evidence._unknown_context()
+
+    # Step 6.57: 1H entry-trigger evidence (Phase 14E.1 — evidence/display only;
+    # never affects tier, capital, routing, suppression, dedup, or raw score).
+    # Separately acquires 1H bars; degrades safely when unavailable. Must run
+    # before calibration, which may read a conservative 1H score-realism cap.
+    try:
+        one_hour_envelope = market_data_mod.fetch_one_hour_bars(ticker, config)
+    except Exception as exc:
+        log.warning("ONE_HOUR_FETCH_ERROR: %s: %s", ticker, exc)
+        one_hour_envelope = None
+    try:
+        tiering_result["one_hour_entry"] = one_hour_entry.build_one_hour_entry_context(
+            ticker,
+            tiering_result,
+            enriched_data=enriched,
+            one_hour_bars=one_hour_envelope,
+            config=config,
+        )
+    except Exception as exc:
+        log.warning("ONE_HOUR_ENTRY_ERROR: %s: %s", ticker, exc)
+        tiering_result["one_hour_entry"] = None
+
+    # Step 6.58: Multi-timeframe alignment evidence (Phase 14F — evidence/
+    # display/audit only; never affects tier, capital, routing, suppression,
+    # dedup, or raw score). Reads one_hour_entry/trade_location/final_signal;
+    # the builder catches its own errors but the scheduler still guards.
+    try:
+        tiering_result["timeframe_alignment"] = timeframe_alignment.build_timeframe_alignment_context(
+            ticker,
+            tiering_result,
+            enriched_data=enriched,
+            config=config,
+        )
+    except Exception as exc:
+        log.warning("TIMEFRAME_ALIGNMENT_ERROR: %s: %s", ticker, exc)
+        tiering_result["timeframe_alignment"] = timeframe_alignment.error_timeframe_alignment_object(str(exc))
+
+    # Step 6.583: REAL 4H operational evidence (Phase R4H-1 — SHADOW evidence
+    # only; never affects tier, capital, routing, suppression, dedup, or raw
+    # score). Aggregated from the SAME 60m provider response already fetched
+    # at Step 6.57 — no second network request. Runs after timeframe_alignment
+    # so the real-vs-proxy comparison can read the proxy state; the Phase-14F
+    # proxy remains production-authoritative until R4H-2.
+    try:
+        _four_hour_env = (one_hour_envelope or {}).get("four_hour")
+        tiering_result["four_hour_operational"] = (
+            four_hour_operational.build_four_hour_operational_context(
+                ticker,
+                tiering_result,
+                enriched_data=enriched,
+                four_hour_bars=_four_hour_env,
+                config=config,
+            )
+        )
+        log.info(four_hour_operational.render_four_hour_log_line(
+            ticker,
+            tiering_result["four_hour_operational"],
+            tiering_result["four_hour_operational"].get("proxy_comparison"),
+        ))
+    except Exception as exc:
+        log.warning("FOUR_HOUR_OPERATIONAL_ERROR: %s: %s", ticker, exc)
+        tiering_result["four_hour_operational"] = (
+            four_hour_operational.error_four_hour_object(str(exc))
+        )
+
+    # Step 6.585: Higher-timeframe structural context (Phase 14I — evidence/
+    # display/audit only; never affects tier, capital, routing, suppression,
+    # dedup, or raw score). Resamples the candidate's existing daily bars into
+    # weekly/monthly context (candidate-only — no extra fetch, no full-universe
+    # bloat). Attached before snipe_gate_audit so the audit can read it later.
+    try:
+        _mres = market_result or {}
+        _daily_bars = higher_timeframe_context.daily_bars_from_df(_mres.get("df"))
+        tiering_result["higher_timeframe_context"] = higher_timeframe_context.build_higher_timeframe_context(
+            ticker,
+            tiering_result,
+            enriched_data=enriched,
+            daily_bars=_daily_bars,
+            config=config,
+        )
+    except Exception as exc:
+        log.warning("HIGHER_TIMEFRAME_CONTEXT_ERROR: %s: %s", ticker, exc)
+        tiering_result["higher_timeframe_context"] = higher_timeframe_context.error_htf_object(str(exc))
+
+    # Step 6.59: SNIPE_IT gate audit (Phase 14H — diagnostic/audit only; never
+    # affects tier, capital, routing, suppression, dedup, or raw score).
+    # Reads tiering/one_hour_entry/timeframe_alignment/trade_location/
+    # candle_evidence to explain why a candidate did or did not qualify.
+    try:
+        tiering_result["snipe_gate_audit"] = snipe_gate_audit.build_snipe_gate_audit(
+            ticker,
+            tiering_result,
+            enriched_data=enriched,
+            config=config,
+        )
+    except Exception as exc:
+        log.warning("SNIPE_GATE_AUDIT_ERROR: %s: %s", ticker, exc)
+        tiering_result["snipe_gate_audit"] = snipe_gate_audit.error_snipe_gate_audit_object(str(exc))
+
+    # Step 6.592: Unified SNIPE ladder judgment + arbitration (Phase 14S).
+    # Runs AFTER all evidence organs + the gate audit (so it judges the full
+    # card) and BEFORE the seal (promotion happens here, upstream — the seal
+    # stays downgrade-only). Grades every candidate onto
+    # PASS/WATCH_C/STARTER_B/STARTER_A/SNIPER_A/SNIPER_A_PLUS and lets that
+    # grade govern final_tier/capital/routing via the existing tier
+    # machinery. Promotion is whitelisted (NEAR_ENTRY->STARTER,
+    # STARTER->SNIPE_IT, one rung, never from WAIT). Guarded so a ladder
+    # fault can never break a scan.
+    try:
+        tiering_result = snipe_ladder_judgment.apply_ladder_arbitration(
+            tiering_result, config
+        )
+        _ladder = tiering_result.get("snipe_ladder") or {}
+        if _ladder:
+            final_tier = tiering_result.get("final_tier", final_tier)
+            log.info(
+                "SNIPE_LADDER: %s %s (%s) -> final_tier=%s",
+                ticker, _ladder.get("internal_ladder_tier"),
+                _ladder.get("proof_state"), tiering_result.get("final_tier"),
+            )
+    except Exception as exc:
+        log.warning("SNIPE_LADDER_ERROR: %s: %s", ticker, exc)
+    # Step 6.595: SNIPE_CONFIRMED consistency seal (Phase 14M — TRUTH SEAL).
+    # Runs AFTER snipe_gate_audit so it can read the authoritative blocker
+    # evidence, and BEFORE rendering/routing/recording so a corrected tier
+    # cascades into wording (contract guard), channel routing, capital, dedup,
+    # and the persisted snapshot. It only ever DOWNGRADES a false SNIPE (a
+    # SNIPE_IT/full_quality_allowed/#snipe output whose own evidence still
+    # carries an active blocker); it never promotes and never deletes
+    # evidence. Guarded so a seal fault can never break a scan.
+    try:
+        tiering_result = snipe_confirmed_seal.seal_snipe_confirmed_consistency(
+            tiering_result, config
+        )
+        _seal = tiering_result.get("snipe_confirmed_seal") or {}
+        if _seal.get("applied"):
+            final_tier = tiering_result.get("final_tier", final_tier)
+            log.warning(
+                "SNIPE_CONFIRMED_SEAL: %s %s→%s blockers=%s",
+                ticker, _seal.get("original_tier"), _seal.get("corrected_tier"),
+                "; ".join(_seal.get("blockers") or []),
+            )
+    except Exception as exc:
+        log.warning("SNIPE_CONFIRMED_SEAL_ERROR: %s: %s", ticker, exc)
+
+    # Step 6.596: FINAL SNIPE audit-truth reconciliation (Phase 14S.5).
+    # The gate audit was built at Step 6.59 — BEFORE the ladder could promote
+    # STARTER -> SNIPE_IT (6.592) and before the seal (6.595). A legitimate
+    # SNIPER_A could therefore finish SNIPE_IT while the stored audit still
+    # described the older tier. This repairs the audit's DESCRIPTION of the
+    # final state only (current_final_tier/current_capital_action, and — when
+    # the seal did not downgrade — audit_label/promotion_state plus a
+    # grade-aware diagnostic naming SNIPER_A vs SNIPER_A_PLUS). It runs AFTER
+    # the seal, so it can never influence the seal decision, and it never
+    # touches tier, capital, routing, score, or any blocker evidence. When the
+    # seal DID downgrade, its SNIPE_CONFIRMATION_BLOCKED verdict is preserved.
+    try:
+        snipe_gate_audit.reconcile_final_snipe_audit_state(tiering_result)
+    except Exception as exc:
+        log.warning("SNIPE_AUDIT_RECONCILE_ERROR: %s: %s", ticker, exc)
+
+    # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
+    # capital_action, discord_channel, safe_for_alert, suppression, or dedup)
+    try:
+        tiering_result["calibration"] = score_calibration.calibrate_score(
+            tiering_result, config
+        )
+    except Exception as exc:
+        log.warning("CALIBRATION_ERROR: %s: %s", ticker, exc)
+        tiering_result["calibration"] = None
+
+    return tiering_result
+
+
+# ---------------------------------------------------------------------------
 # Core pipeline (used by both scheduled and manual scans)
 # ---------------------------------------------------------------------------
 
@@ -388,210 +620,26 @@ async def run_scan_pipeline(
         _tlm_base_tier = final_tier
         _tlm_base_tiers[final_tier] = _tlm_base_tiers.get(final_tier, 0) + 1
 
-        # Step 6.5: Trajectory (informational — never affects tier, capital, or routing).
-        # Phase 14S.4B: trajectory needs prior ticker state, not an early dedup
-        # verdict. Dedup is intentionally deferred until every tier-mutating
-        # organ has finished so cooldown/tier-improvement truth is evaluated
-        # against the final executable tier.
-        try:
-            _ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
-            _previous_state = _ticker_states.get(ticker) if isinstance(_ticker_states, dict) else None
-            tiering_result["trajectory"] = trajectory_mod.compute(
-                tiering_result, _previous_state
-            )
-        except Exception as exc:
-            log.warning("TRAJECTORY_ERROR: %s: %s", ticker, exc)
-            tiering_result["trajectory"] = {"label": "UNKNOWN", "text": ""}
+        # Step 6.5–6.6: shared production chart judgment (Phase 14W2).
+        # Autoscan and !analyze must consume the same post-tiering organ.
+        _ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
+        _previous_state = _ticker_states.get(ticker) if isinstance(_ticker_states, dict) else None
+        tiering_result = _complete_candidate_judgment(
+            ticker,
+            tiering_result,
+            enriched_map.get(ticker, {}),
+            market_results.get(ticker) or {},
+            config,
+            _previous_state,
+        )
+        final_tier = tiering_result.get("final_tier", final_tier)
 
-        # Step 6.55: Trade location realism (Phase 14C.1 — audit/display only;
-        # never affects tier, capital, routing, suppression, or dedup). Must run
-        # before calibration, which reads tiering_result["trade_location"].
-        try:
-            tiering_result["trade_location"] = trade_location.build_trade_location_context(
-                enriched_map.get(ticker, {}), tiering_result
-            )
-        except Exception as exc:
-            log.warning("TRADE_LOCATION_ERROR: %s: %s", ticker, exc)
-            tiering_result["trade_location"] = None
-
-        # Step 6.56: Candle evidence quality (Phase 14C.3 — evidence/display only;
-        # never affects tier, capital, routing, suppression, dedup, or raw score).
-        # Must run after trade_location and before calibration, which reads
-        # tiering_result["candle_evidence"]["score_delta"].
-        try:
-            tiering_result["candle_evidence"] = candle_evidence.build_candle_evidence_context(
-                enriched_map.get(ticker, {}), tiering_result
-            )
-        except Exception as exc:
-            log.warning("CANDLE_EVIDENCE_ERROR: %s: %s", ticker, exc)
-            tiering_result["candle_evidence"] = candle_evidence._unknown_context()
-
-        # Step 6.57: 1H entry-trigger evidence (Phase 14E.1 — evidence/display only;
-        # never affects tier, capital, routing, suppression, dedup, or raw score).
-        # Separately acquires 1H bars; degrades safely when unavailable. Must run
-        # before calibration, which may read a conservative 1H score-realism cap.
-        try:
-            one_hour_envelope = market_data_mod.fetch_one_hour_bars(ticker, config)
-        except Exception as exc:
-            log.warning("ONE_HOUR_FETCH_ERROR: %s: %s", ticker, exc)
-            one_hour_envelope = None
-        try:
-            tiering_result["one_hour_entry"] = one_hour_entry.build_one_hour_entry_context(
-                ticker,
-                tiering_result,
-                enriched_data=enriched_map.get(ticker, {}),
-                one_hour_bars=one_hour_envelope,
-                config=config,
-            )
-        except Exception as exc:
-            log.warning("ONE_HOUR_ENTRY_ERROR: %s: %s", ticker, exc)
-            tiering_result["one_hour_entry"] = None
-
-        # Step 6.58: Multi-timeframe alignment evidence (Phase 14F — evidence/
-        # display/audit only; never affects tier, capital, routing, suppression,
-        # dedup, or raw score). Reads one_hour_entry/trade_location/final_signal;
-        # the builder catches its own errors but the scheduler still guards.
-        try:
-            tiering_result["timeframe_alignment"] = timeframe_alignment.build_timeframe_alignment_context(
-                ticker,
-                tiering_result,
-                enriched_data=enriched_map.get(ticker, {}),
-                config=config,
-            )
-        except Exception as exc:
-            log.warning("TIMEFRAME_ALIGNMENT_ERROR: %s: %s", ticker, exc)
-            tiering_result["timeframe_alignment"] = timeframe_alignment.error_timeframe_alignment_object(str(exc))
-
-        # Step 6.583: REAL 4H operational evidence (Phase R4H-1 — SHADOW evidence
-        # only; never affects tier, capital, routing, suppression, dedup, or raw
-        # score). Aggregated from the SAME 60m provider response already fetched
-        # at Step 6.57 — no second network request. Runs after timeframe_alignment
-        # so the real-vs-proxy comparison can read the proxy state; the Phase-14F
-        # proxy remains production-authoritative until R4H-2.
-        try:
-            _four_hour_env = (one_hour_envelope or {}).get("four_hour")
-            tiering_result["four_hour_operational"] = (
-                four_hour_operational.build_four_hour_operational_context(
-                    ticker,
-                    tiering_result,
-                    enriched_data=enriched_map.get(ticker, {}),
-                    four_hour_bars=_four_hour_env,
-                    config=config,
-                )
-            )
-            log.info(four_hour_operational.render_four_hour_log_line(
-                ticker,
-                tiering_result["four_hour_operational"],
-                tiering_result["four_hour_operational"].get("proxy_comparison"),
-            ))
-        except Exception as exc:
-            log.warning("FOUR_HOUR_OPERATIONAL_ERROR: %s: %s", ticker, exc)
-            tiering_result["four_hour_operational"] = (
-                four_hour_operational.error_four_hour_object(str(exc))
-            )
-
-        # Step 6.585: Higher-timeframe structural context (Phase 14I — evidence/
-        # display/audit only; never affects tier, capital, routing, suppression,
-        # dedup, or raw score). Resamples the candidate's existing daily bars into
-        # weekly/monthly context (candidate-only — no extra fetch, no full-universe
-        # bloat). Attached before snipe_gate_audit so the audit can read it later.
-        try:
-            _mres = market_results.get(ticker) or {}
-            _daily_bars = higher_timeframe_context.daily_bars_from_df(_mres.get("df"))
-            tiering_result["higher_timeframe_context"] = higher_timeframe_context.build_higher_timeframe_context(
-                ticker,
-                tiering_result,
-                enriched_data=enriched_map.get(ticker, {}),
-                daily_bars=_daily_bars,
-                config=config,
-            )
-        except Exception as exc:
-            log.warning("HIGHER_TIMEFRAME_CONTEXT_ERROR: %s: %s", ticker, exc)
-            tiering_result["higher_timeframe_context"] = higher_timeframe_context.error_htf_object(str(exc))
-
-        # Step 6.59: SNIPE_IT gate audit (Phase 14H — diagnostic/audit only; never
-        # affects tier, capital, routing, suppression, dedup, or raw score).
-        # Reads tiering/one_hour_entry/timeframe_alignment/trade_location/
-        # candle_evidence to explain why a candidate did or did not qualify.
-        try:
-            tiering_result["snipe_gate_audit"] = snipe_gate_audit.build_snipe_gate_audit(
-                ticker,
-                tiering_result,
-                enriched_data=enriched_map.get(ticker, {}),
-                config=config,
-            )
-        except Exception as exc:
-            log.warning("SNIPE_GATE_AUDIT_ERROR: %s: %s", ticker, exc)
-            tiering_result["snipe_gate_audit"] = snipe_gate_audit.error_snipe_gate_audit_object(str(exc))
-
-        # Step 6.592: Unified SNIPE ladder judgment + arbitration (Phase 14S).
-        # Runs AFTER all evidence organs + the gate audit (so it judges the full
-        # card) and BEFORE the seal (promotion happens here, upstream — the seal
-        # stays downgrade-only). Grades every candidate onto
-        # PASS/WATCH_C/STARTER_B/STARTER_A/SNIPER_A/SNIPER_A_PLUS and lets that
-        # grade govern final_tier/capital/routing via the existing tier
-        # machinery. Promotion is whitelisted (NEAR_ENTRY->STARTER,
-        # STARTER->SNIPE_IT, one rung, never from WAIT). Guarded so a ladder
-        # fault can never break a scan.
-        try:
-            tiering_result = snipe_ladder_judgment.apply_ladder_arbitration(
-                tiering_result, config
-            )
-            _ladder = tiering_result.get("snipe_ladder") or {}
-            if _ladder:
-                final_tier = tiering_result.get("final_tier", final_tier)
-                log.info(
-                    "SNIPE_LADDER: %s %s (%s) -> final_tier=%s",
-                    ticker, _ladder.get("internal_ladder_tier"),
-                    _ladder.get("proof_state"), tiering_result.get("final_tier"),
-                )
-        except Exception as exc:
-            log.warning("SNIPE_LADDER_ERROR: %s: %s", ticker, exc)
         try:
             _tlm_basket = (tiering_result.get("snipe_ladder") or {}).get("internal_ladder_tier")
             if _tlm_basket:
                 _tlm_baskets[_tlm_basket] = _tlm_baskets.get(_tlm_basket, 0) + 1
         except Exception:
             pass
-
-        # Step 6.595: SNIPE_CONFIRMED consistency seal (Phase 14M — TRUTH SEAL).
-        # Runs AFTER snipe_gate_audit so it can read the authoritative blocker
-        # evidence, and BEFORE rendering/routing/recording so a corrected tier
-        # cascades into wording (contract guard), channel routing, capital, dedup,
-        # and the persisted snapshot. It only ever DOWNGRADES a false SNIPE (a
-        # SNIPE_IT/full_quality_allowed/#snipe output whose own evidence still
-        # carries an active blocker); it never promotes and never deletes
-        # evidence. Guarded so a seal fault can never break a scan.
-        try:
-            tiering_result = snipe_confirmed_seal.seal_snipe_confirmed_consistency(
-                tiering_result, config
-            )
-            _seal = tiering_result.get("snipe_confirmed_seal") or {}
-            if _seal.get("applied"):
-                final_tier = tiering_result.get("final_tier", final_tier)
-                log.warning(
-                    "SNIPE_CONFIRMED_SEAL: %s %s→%s blockers=%s",
-                    ticker, _seal.get("original_tier"), _seal.get("corrected_tier"),
-                    "; ".join(_seal.get("blockers") or []),
-                )
-        except Exception as exc:
-            log.warning("SNIPE_CONFIRMED_SEAL_ERROR: %s: %s", ticker, exc)
-
-        # Step 6.596: FINAL SNIPE audit-truth reconciliation (Phase 14S.5).
-        # The gate audit was built at Step 6.59 — BEFORE the ladder could promote
-        # STARTER -> SNIPE_IT (6.592) and before the seal (6.595). A legitimate
-        # SNIPER_A could therefore finish SNIPE_IT while the stored audit still
-        # described the older tier. This repairs the audit's DESCRIPTION of the
-        # final state only (current_final_tier/current_capital_action, and — when
-        # the seal did not downgrade — audit_label/promotion_state plus a
-        # grade-aware diagnostic naming SNIPER_A vs SNIPER_A_PLUS). It runs AFTER
-        # the seal, so it can never influence the seal decision, and it never
-        # touches tier, capital, routing, score, or any blocker evidence. When the
-        # seal DID downgrade, its SNIPE_CONFIRMATION_BLOCKED verdict is preserved.
-        try:
-            snipe_gate_audit.reconcile_final_snipe_audit_state(tiering_result)
-        except Exception as exc:
-            log.warning("SNIPE_AUDIT_RECONCILE_ERROR: %s: %s", ticker, exc)
 
         # Phase 14V.1 (B1): the FINAL served tier — after 1H, HTF, gate,
         # ladder arbitration, the 14S.7C capital floor, and the seal. Counted
@@ -603,16 +651,6 @@ async def run_scan_pipeline(
                 _tlm_analysis["judged"] += 1
         except Exception:
             pass
-
-        # Step 6.6: Score calibration (audit-layer only — never mutates score, tier,
-        # capital_action, discord_channel, safe_for_alert, suppression, or dedup)
-        try:
-            tiering_result["calibration"] = score_calibration.calibrate_score(
-                tiering_result, config
-            )
-        except Exception as exc:
-            log.warning("CALIBRATION_ERROR: %s: %s", ticker, exc)
-            tiering_result["calibration"] = None
 
         # Step 6.7: FINAL-tier truth + dedup reconciliation (Phase 14S.4B).
         # This runs downstream from every tier-mutating organ. A preliminary
@@ -845,8 +883,9 @@ async def run_analyze(
 ) -> dict:
     """Single-ticker analysis with manual_override=True.
 
-    Bypasses prefilter score floor and dedup cooldown.
-    Still enforces: tiering hard gates, JSON validation, safe_for_alert, WAIT suppression.
+    Bypasses universe prefilter admission and dedup cooldown only.
+    Still enforces: tiering hard gates, JSON validation, the complete post-tiering
+    evidence/arbitration stack, safe_for_alert, and WAIT suppression.
     """
     lock = _lock if _lock is not None else _SCAN_LOCK
 
@@ -916,10 +955,23 @@ async def run_analyze(
 
         # Tiering (cannot be bypassed)
         tiering_result = tiering.validate(cr["signal"], pf_res, config)
-        final_tier     = tiering_result.get("final_tier", "WAIT")
 
-        # State + dedup — manual_override=True bypasses cooldown
+        # Phase 14W2: manual inspection bypasses admission/cooldown only.
+        # Chart judgment is identical to autoscan from this point forward.
         state = state_store.load(config)
+        _ticker_states = state.get("tickers", {}) if isinstance(state, dict) else {}
+        _previous_state = _ticker_states.get(ticker) if isinstance(_ticker_states, dict) else None
+        tiering_result = _complete_candidate_judgment(
+            ticker,
+            tiering_result,
+            enriched,
+            mres,
+            config,
+            _previous_state,
+        )
+        final_tier = tiering_result.get("final_tier", "WAIT")
+
+        # State + dedup — manual_override=True bypasses cooldown only.
         dedup_decision = state_store.check_alert(
             tiering_result, state, config, manual_override=True
         )
