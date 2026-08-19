@@ -66,12 +66,15 @@ higher_timeframe_context:
 # operator user ID or admin channel ID is configured (conservative gating).
 audit_access:
   enabled: true
-  allowed_user_ids: []      # Discord user IDs permitted to run !audit
-  allowed_channel_ids:      # Discord channel IDs where !audit is permitted
+  allowed_user_ids: []
+  allowed_channel_ids:
     - 1518684614598590495
   max_rows: 3
 
 prefilter:
+  # Historical key name is retained during AI-1 so a provider migration cannot
+  # also become a capacity/schema migration. It means DEEP-ANALYSIS candidates.
+  # CAP-40 is a separate measured phase; production remains 30 for now.
   max_claude_candidates_per_scan: 30
   prefilter_min_score: 55
 
@@ -98,7 +101,7 @@ tiers:
   snipe_it:
     min_score: 85
     min_rr: 3.0
-    min_risk_distance_pct: 0.35        # < 0.35% stop = fragile/fake-asymmetry → blocks SNIPE_IT
+    min_risk_distance_pct: 0.35
     requires_retest: true
     requires_hold: true
     requires_invalidation: true
@@ -121,26 +124,35 @@ discord:
   near_entry_channel_id: 1497532274470551693
   scan_log_channel_id: null
 
+# AI-1 — canonical production deep-analysis model configuration.
+# OPENAI_MODEL may override `name` at Railway runtime. GPT-5.6 is the analyst;
+# deterministic tiering, ladder, seal and capital contracts remain sovereign.
+model:
+  provider: "openai"
+  name: "gpt-5.6"
+  max_output_tokens: 1200
+  reasoning_effort: "medium"
+  concurrency: 1
+  min_seconds_between_calls: 1
+  max_input_tokens_per_minute_budget: 250000
+
+# Historical scheduler compatibility configuration. The hardened scheduler still
+# reads these pacing keys while AI-1 changes provider without combining that
+# migration with a telemetry/schema rewrite. The actual provider is OpenAI.
+# A later provider-neutral nomenclature phase may remove this block.
 claude:
-  model: "claude-sonnet-4-6"
+  model: "gpt-5.6"
   max_tokens: 1200
-  max_concurrent_calls: 8          # legacy — use claude_concurrency for pacing
+  max_concurrent_calls: 1
   claude_concurrency: 1
-  claude_min_seconds_between_calls: 4
-  claude_max_input_tokens_per_minute_budget: 25000
+  claude_min_seconds_between_calls: 1
+  claude_max_input_tokens_per_minute_budget: 250000
 
 # Phase 14V — scan-time funnel telemetry retention. OBSERVABILITY ONLY:
 # nothing in this block influences tiering, capital, routing, suppression,
 # candidate admission, or cadence. Telemetry lives in its own file
 # (.state/scan_telemetry.json) so a malformed telemetry write can never
 # corrupt alert_history.json.
-#   ~26 scans per 6.5h session at 15-minute cadence.
-#   300 summaries ~= 11.5 trading sessions.
-#   9000 traces: the 16000 default was withdrawn after the adversarial review
-#   measured the documented mix at 25.37 MB on disk, above the 25 MB bound.
-#   With compact serialization, 9000 holds every mix — including an
-#   all-admitted worst case — under bound. Measured horizon is reported in the
-#   PR, not asserted here.
 telemetry:
   max_scan_summaries: 300
   max_decision_traces: 9000
