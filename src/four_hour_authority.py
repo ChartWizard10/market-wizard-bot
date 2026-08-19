@@ -20,6 +20,10 @@ Trust law:
     capital, not at a fabricated market-failure verdict;
   - a trusted HOSTILE/MID_RANGE real 4H location may block execution because
     that is chart evidence, not a data-quality failure;
+  - a trusted REPAIRING location may support reduced-size STARTER capital but
+    cannot authorize full SNIPE size;
+  - a trusted EXTENDED location is not a new-entry neighborhood and therefore
+    cannot authorize fresh capital;
   - the legacy Phase-14F proxy is retained as a comparison/rollback diagnostic,
     but it cannot overrule trusted real 4H evidence while authority is enabled.
 
@@ -44,6 +48,7 @@ DISABLED = "DISABLED"
 _DEGRADED_LATEST = {"INCOMPLETE", "AMBIGUOUS", "MISSING"}
 _TRUSTED_FRESHNESS = {"CLOSED", "LIVE"}
 _TRUSTED_STATUS = {"ENABLED"}
+_CAP_REAL_4H_UNTRUSTED = 59
 
 
 def _s(value) -> str:
@@ -56,13 +61,16 @@ def _d(obj, key) -> dict:
 
 
 def authority_enabled(config) -> bool:
-    """Runtime rollback switch. Default is ON once R4H-2 is deployed."""
+    """Runtime rollback switch.
+
+    R4H-2 is explicit opt-in so isolated legacy/unit configs preserve Phase-14F
+    proxy behavior. Production doctrine_config explicitly sets the flag True.
+    """
     try:
         cfg = (config or {}).get("timeframe_alignment") or {}
-        return cfg.get("real_4h_authority_enabled", True) is not False
+        return cfg.get("real_4h_authority_enabled") is True
     except Exception:
-        # Unknown config state must not silently disable the production authority.
-        return True
+        return False
 
 
 def _proxy_state(proxy_layer) -> str:
@@ -94,9 +102,6 @@ def _trust_reasons(real_obj) -> tuple[bool, list[str]]:
     if latest in _DEGRADED_LATEST:
         reasons.append(f"latest expected 4H bucket={latest}")
 
-    # The R4H-1 builder requires a contiguous minimum before status ENABLED,
-    # but repeat the invariant here so authority never depends on that internal
-    # implementation detail remaining unchanged.
     try:
         segment = int(bc.get("structural_segment_bars") or 0)
     except (TypeError, ValueError):
@@ -108,13 +113,12 @@ def _trust_reasons(real_obj) -> tuple[bool, list[str]]:
 
 
 def _map_real_state(real_obj) -> tuple[str, bool, list[str]]:
-    """Map trusted R4H evidence into the existing Phase-14F operational enum.
+    """Map trusted R4H evidence into the existing operational-location enum.
 
-    Returns ``(state, blocks_trigger, evidence)``. Favorable LOCATION_VALID is
-    deliberately stricter than merely being geographically DEFENDABLE: the real
-    4H retest and hold must themselves be confirmed by closed evidence. A
-    defendable but still-forming base maps to LOCATION_REPAIRING, preserving the
-    user's STARTER-vs-full-size distinction instead of forcing binary perfection.
+    Favorable LOCATION_VALID is deliberately stricter than merely being
+    geographically DEFENDABLE: real 4H retest and hold must themselves be
+    confirmed by closed evidence. A defendable but still-forming base maps to
+    LOCATION_REPAIRING, preserving STARTER-vs-full-size distinction.
     """
     real = real_obj if isinstance(real_obj, dict) else {}
     location = _s(real.get("operational_location"))
@@ -133,8 +137,6 @@ def _map_real_state(real_obj) -> tuple[str, bool, list[str]]:
     if failure == "ACCEPTED_FAILURE" or structural == "FAILURE" or location == "HOSTILE":
         return "LOCATION_HOSTILE", True, evidence
 
-    # MID_RANGE is not bearish structure, but it is execution-hostile because
-    # there is no edge. That keeps the semantic distinction in the evidence text.
     if location == "MID_RANGE":
         evidence.append("real 4H mid-range has no operational edge")
         return "LOCATION_HOSTILE", True, evidence
@@ -203,8 +205,6 @@ def build_operational_authority(real_obj, proxy_layer=None, config=None) -> dict
 
         state, blocks_trigger, evidence = _map_real_state(real_obj)
         if state == "UNKNOWN":
-            # Technically fresh data with an unclassifiable location is still not
-            # proof for capital. Unknown evidence is not permission.
             return {
                 "authority_version": AUTHORITY_VERSION,
                 "authority_mode": AUTHORITY_MODE,
@@ -281,6 +281,123 @@ def operational_layer(authority_obj) -> dict:
     }
 
 
+def reconcile_timeframe_alignment(tfa_obj, tiering_result, authority_obj, config=None) -> dict:
+    """Replace Phase-14F proxy operation with R4H-2 real operation and re-grade.
+
+    The legacy timeframe-alignment builder is deliberately left intact as the
+    rollback calculator. This reconciler runs immediately after real-4H truth is
+    attached and recomputes every downstream alignment field using the real 4H
+    operational layer. No stale proxy score/label/conflict survives.
+    """
+    try:
+        if not authority_enabled(config):
+            return deepcopy(tfa_obj) if isinstance(tfa_obj, dict) else tfa_obj
+
+        from src import timeframe_alignment as tfa
+
+        obj = deepcopy(tfa_obj) if isinstance(tfa_obj, dict) else tfa.default_timeframe_alignment_object()
+        if obj.get("enabled") is False or str(obj.get("status") or "").upper() == "DISABLED":
+            return obj
+
+        authority = authority_obj if isinstance(authority_obj, dict) else {}
+        proxy = deepcopy(obj.get("operational_timeframe") or {})
+        operational = operational_layer(authority)
+
+        obj["operational_proxy_timeframe"] = proxy
+        obj["operational_timeframe"] = operational
+        obj["operational_authority"] = {
+            "authority_version": authority.get("authority_version"),
+            "authority_mode": authority.get("authority_mode"),
+            "authority_status": authority.get("authority_status"),
+            "authority_usable": authority.get("authority_usable") is True,
+            "blocks_capital": authority.get("blocks_capital") is True,
+            "proxy_state": authority.get("proxy_state"),
+            "real_state": authority.get("real_state"),
+        }
+
+        weekly = obj.get("campaign_timeframe") or tfa._blank_layer("1W", "CAMPAIGN_CONTEXT")
+        daily = obj.get("swing_timeframe") or tfa._blank_layer("1D", "SWING_PERMISSION")
+        trigger = obj.get("trigger_timeframe") or tfa._blank_layer("1H", "TRIGGER_PROOF")
+        layers = {"1W": weekly, "1D": daily, "4H": operational, "1H": trigger}
+
+        result = tiering_result if isinstance(tiering_result, dict) else {}
+        signal = result.get("final_signal") or {}
+        signal = signal if isinstance(signal, dict) else {}
+        one_hour = result.get("one_hour_entry") or {}
+        one_hour = one_hour if isinstance(one_hour, dict) else {}
+        final_tier = _s(result.get("final_tier"))
+        capital_action = str(result.get("capital_action") or "").lower().strip()
+
+        missing = [
+            str(x) for x in (obj.get("missing_context") or [])
+            if "4h operational" not in str(x).lower()
+        ]
+        if operational.get("authority_usable") is not True:
+            failures = list(authority.get("trust_failures") or [])
+            detail = "; ".join(str(x) for x in failures[:3])
+            msg = "real 4H operational authority unavailable"
+            if detail:
+                msg += f": {detail}"
+            missing.append(msg)
+        elif operational.get("state") == "UNKNOWN":
+            missing.append("real 4H operational location unavailable")
+        obj["missing_context"] = missing
+
+        conflicts = tfa._detect_conflicts(
+            layers, final_tier, capital_action, signal, one_hour
+        )
+        if operational.get("blocks_capital") and capital_action in {"starter_only", "full_quality_allowed"}:
+            conflicts.append({
+                "layer": "4H",
+                "reason": "real 4H authority untrusted while capital action implies entry",
+            })
+        obj["conflicts"] = conflicts
+
+        obj["status"] = "DEGRADED" if missing else "ENABLED"
+        classifiable = sum(1 for layer in layers.values() if layer.get("state") != "UNKNOWN")
+        label = tfa.classify_alignment_label(layers, conflicts, classifiable)
+        obj["alignment_label"] = label
+
+        raw_score = tfa.score_alignment(layers)
+        invalidation_clear = tfa._has_clear_invalidation(signal, one_hour)
+        caps, cap_reasons = tfa._collect_alignment_caps(
+            layers, label, conflicts, invalidation_clear
+        )
+        if operational.get("blocks_capital"):
+            caps["REAL_4H_AUTHORITY_UNTRUSTED"] = _CAP_REAL_4H_UNTRUSTED
+            cap_reasons.append(
+                "REAL_4H_AUTHORITY_UNTRUSTED: real 4H evidence is not trusted "
+                f"for capital authority (cap {_CAP_REAL_4H_UNTRUSTED})"
+            )
+
+        capped = tfa.apply_alignment_caps(raw_score, caps)
+        obj["alignment_score"] = capped
+        obj["alignment_grade"] = tfa.grade_from_score(capped)
+        obj["hard_caps_applied"] = list(caps.keys())
+        obj["downgrade_reasons"] = list(cap_reasons)
+        obj["scanner_sentence"] = tfa.build_scanner_sentence(label)
+        return obj
+    except Exception as exc:  # pragma: no cover - fail closed evidence object
+        try:
+            from src import timeframe_alignment as tfa
+            obj = tfa.degraded_timeframe_alignment_object(
+                f"R4H-2 alignment reconciliation error: {type(exc).__name__}"
+            )
+            obj["hard_caps_applied"] = ["REAL_4H_AUTHORITY_UNTRUSTED"]
+            return obj
+        except Exception:
+            return {
+                "enabled": True,
+                "status": "ERROR",
+                "alignment_label": "INSUFFICIENT_CONTEXT",
+                "alignment_score": 0,
+                "alignment_grade": "UNKNOWN",
+                "operational_timeframe": operational_layer({}),
+                "hard_caps_applied": ["REAL_4H_AUTHORITY_UNTRUSTED"],
+                "downgrade_reasons": ["R4H-2 alignment reconciliation failed"],
+            }
+
+
 def _capital_standing(result) -> bool:
     if not isinstance(result, dict):
         return False
@@ -289,32 +406,36 @@ def _capital_standing(result) -> bool:
     ) in {"starter_only", "full_quality_allowed"}
 
 
-def _land_near_entry(result, reason: str) -> None:
-    """Canonical no-capital landing. Direct writes are deliberate fail-closed safety."""
+def _apply_tier_landing(result, target_tier: str, reason: str) -> None:
+    """Apply canonical existing tier maps for a downward-only safety landing."""
     from src import tiering
 
-    channel = tiering.CHANNEL_MAP.get("NEAR_ENTRY", "none")
-    capital = tiering.CAPITAL_MAP.get("NEAR_ENTRY", "wait_no_capital")
-    result["final_tier"] = "NEAR_ENTRY"
+    target = _s(target_tier)
+    if target not in {"STARTER", "NEAR_ENTRY"}:
+        target = "NEAR_ENTRY"
+    channel = tiering.CHANNEL_MAP.get(target, "none")
+    capital = tiering.CAPITAL_MAP.get(target, "wait_no_capital")
+    result["final_tier"] = target
     result["final_discord_channel"] = channel
     result["capital_action"] = capital
-    result["safe_for_alert"] = True
+    result["safe_for_alert"] = target != "WAIT"
 
     signal = result.get("final_signal")
     if isinstance(signal, dict):
-        signal["tier"] = "NEAR_ENTRY"
+        signal["tier"] = target
         signal["discord_channel"] = channel
         signal["capital_action"] = capital
         try:
             signal["sanitized_reason"] = tiering._sanitize_reason_for_tier(
-                signal.get("reason"), "NEAR_ENTRY"
+                signal.get("reason"), target
             )
             signal["sanitized_next_action"] = tiering._sanitize_reason_for_tier(
-                signal.get("next_action"), "NEAR_ENTRY"
+                signal.get("next_action"), target
             )
-            signal["near_entry_blocker_note"] = tiering._build_near_entry_blocker_note(
-                signal, signal.get("scan_price")
-            )
+            if target == "NEAR_ENTRY":
+                signal["near_entry_blocker_note"] = tiering._build_near_entry_blocker_note(
+                    signal, signal.get("scan_price")
+                )
         except Exception:
             pass
 
@@ -325,45 +446,76 @@ def _land_near_entry(result, reason: str) -> None:
     result["downgrades"] = notes
 
 
-def enforce_operational_capital_floor(tiering_result, config=None):
-    """Fail closed when real 4H authority is required but untrusted.
+def _capital_floor_landing(tiering_result, authority) -> tuple[str | None, str | None]:
+    """Return downward landing tier + reason, or (None, None) when capital may stand."""
+    if not _capital_standing(tiering_result):
+        return None, None
 
-    This is path-independent: if STARTER/SNIPE capital is standing after ladder
-    arbitration and the real 4H authority cannot prove itself usable, capital is
-    withdrawn to NEAR_ENTRY. It never promotes. When the rollback switch is OFF,
-    the legacy proxy remains authoritative and this barrier is intentionally inert.
+    if authority.get("authority_usable") is not True or authority.get("capital_floor_cleared") is not True:
+        failures = list(authority.get("trust_failures") or [])
+        reason = "; ".join(str(x) for x in failures[:4]) or "real 4H authority not proven"
+        return "NEAR_ENTRY", reason
+
+    state = _s(authority.get("state"))
+    final_tier = _s(tiering_result.get("final_tier"))
+
+    if state == "LOCATION_VALID":
+        return None, None
+
+    if state == "LOCATION_REPAIRING":
+        if final_tier == "SNIPE_IT" or str(tiering_result.get("capital_action") or "") == "full_quality_allowed":
+            return "STARTER", "real 4H location is repairing; reduced-size capital only"
+        return None, None
+
+    if state == "LOCATION_EXTENDED":
+        return "NEAR_ENTRY", "real 4H location is extended; no fresh chase capital"
+
+    if state == "LOCATION_HOSTILE":
+        return "NEAR_ENTRY", "real 4H location is hostile/no-edge for new long capital"
+
+    return "NEAR_ENTRY", f"real 4H operational state {state or 'UNKNOWN'} is not capital-authorized"
+
+
+def enforce_operational_capital_floor(tiering_result, config=None):
+    """Path-independent R4H-2 capital safety after ladder arbitration.
+
+    - untrusted/unknown/extended/hostile real 4H -> NEAR_ENTRY / no capital;
+    - repairing real 4H -> STARTER maximum;
+    - valid real 4H -> this floor does not change the tier.
+
+    The function can only maintain or reduce capital. Rollback mode is inert.
     """
     try:
         if not isinstance(tiering_result, dict):
             return tiering_result
         if not authority_enabled(config):
             return tiering_result
-        auth = tiering_result.get("four_hour_authority")
-        auth = auth if isinstance(auth, dict) else {}
-        cleared = auth.get("capital_floor_cleared") is True and auth.get("authority_usable") is True
-        if _capital_standing(tiering_result) and not cleared:
-            failures = list(auth.get("trust_failures") or [])
-            reason = "; ".join(str(x) for x in failures[:4]) or "real 4H authority not proven"
-            _land_near_entry(tiering_result, reason)
-            auth["capital_floor_enforced"] = True
-            auth["capital_floor_reason"] = reason
+
+        authority = tiering_result.get("four_hour_authority")
+        authority = authority if isinstance(authority, dict) else {}
+        target, reason = _capital_floor_landing(tiering_result, authority)
+        if target:
+            _apply_tier_landing(tiering_result, target, reason or "real 4H capital floor")
+            authority["capital_floor_enforced"] = True
+            authority["capital_floor_reason"] = reason
+            authority["capital_floor_landing"] = target
         else:
-            auth["capital_floor_enforced"] = False
-            auth["capital_floor_reason"] = None
-        tiering_result["four_hour_authority"] = auth
-    except Exception as exc:  # pragma: no cover - emergency barrier
-        # A fault in the capital-safety evaluator must never leave capital standing.
+            authority["capital_floor_enforced"] = False
+            authority["capital_floor_reason"] = None
+            authority["capital_floor_landing"] = None
+        tiering_result["four_hour_authority"] = authority
+        return tiering_result
+    except Exception as exc:  # pragma: no cover - emergency fail-closed barrier
         if isinstance(tiering_result, dict) and _capital_standing(tiering_result):
             try:
-                _land_near_entry(
+                _apply_tier_landing(
                     tiering_result,
+                    "NEAR_ENTRY",
                     f"R4H-2 authority enforcement fault: {type(exc).__name__}",
                 )
             except Exception:
-                # Last resort: primitive direct no-capital state.
                 tiering_result["final_tier"] = "NEAR_ENTRY"
                 tiering_result["capital_action"] = "wait_no_capital"
                 tiering_result["final_discord_channel"] = "#near-entry-watch"
                 tiering_result["safe_for_alert"] = True
         return tiering_result
-    return tiering_result
