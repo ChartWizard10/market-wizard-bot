@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering CAP-40C: `main` at `d6fa8f372b880db835b7d2d8dfa4de05996332f6` (Phase CAP-40B — boundary telemetry and offline future-Daily outcome linkage, on top of CAP-40A, R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
+Last merged production baseline entering CAP-40D: `main` at `1ad68d46822328a8532fab8463f0f3c26a635233` (Phase CAP-40C — predeclared independent boundary study, on top of CAP-40B/CAP-40A, R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -18,7 +18,7 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - SFC-1/SFC-2A/SFC-2B and CFR-1/CFR-2 are production-green.
 - VELOCITY-1A/1B/1C/1D are production-green research infrastructure.
 - R4H-3A/3B/3C are production-green research infrastructure.
-- CAP-40A/CAP-40B are production-green research infrastructure.
+- CAP-40A/CAP-40B/CAP-40C are production-green research infrastructure.
 - Scan telemetry remains observational and isolated from alert history.
 - Production ticker loader normalizes/deduplicates/validates symbols without fetching market data.
 
@@ -39,6 +39,8 @@ Source: `config/tickers.txt`
 - deep-analysis candidate cap: **30**
 
 Any universe or candidate-cap change must occur in its own reviewed phase with updated regression contracts.
+
+**Forward-study freeze:** the 814-symbol universe and cap 30 must remain unchanged through the committed CAP-40C observation window ending 2026-09-30 unless that study is explicitly invalidated and restarted under a new predeclared plan. A mid-window universe/cap change would alter the rank-boundary sampling frame.
 
 ## Current alert contract
 
@@ -92,7 +94,7 @@ Predeclared chronological location-layer outcome study. `TARGET_FIRST`, `INVALID
 
 Merge CI: **2925 passed, 4 skipped**.
 
-### R4H-3C — merged / forward study accruing
+### R4H-3C — merged / forward plan committed
 
 Independent sampling law: `FIRST_OBSERVATION_PER_TICKER_SESSION`.
 
@@ -116,6 +118,8 @@ Predeclared minimums:
 - chart-condition coverage: TRENDING 40, COMPRESSION 15, REPAIR 25, TRANSITION 15, FAILURE 5.
 
 Point-effect and Wilson-bound requirements remain exactly as committed in the R4H-3C plan. Even a full pass is research-only and requires a separate narrow-authority handoff branch.
+
+**Retention dependency discovered after CAP-40C:** the bounded Phase-14V 9,000-trace ring cannot preserve a multi-week R4H-3C cohort at the current scan throughput. The forward study must therefore use CAP-40D durable research-archive evidence for full-window evaluation; the ring buffer alone is insufficient.
 
 Merge CI: **2938 passed, 4 skipped**.
 
@@ -155,7 +159,7 @@ A shadow `TARGET_FIRST` is evidence of an excluded pre-model structural opportun
 
 Merge CI: **2966 passed, 4 skipped**.
 
-### CAP-40C — current branch phase
+### CAP-40C — merged / forward plan committed
 
 CAP-40C locks the boundary-study design before outcomes are reviewed for a capacity decision.
 
@@ -194,24 +198,49 @@ Predeclared shadow-opportunity requirements:
 
 A passing CAP-40C report yields only `PAID_EXPERIMENT_REVIEW_READY`. It cannot change the production cap. A separately reviewed paid 30-vs-40 experiment must still measure downstream GPT-5.6 decision quality, scan duration, provider behavior, API usage/cost, precision, recall and alert quality.
 
+Merge CI: **2982 passed, 4 skipped**.
+
+### CAP-40D — current branch phase / retention integrity
+
+The post-CAP-40C retention audit found that Phase-14V's 9,000-trace ring cannot preserve the full 2026-08-20 through 2026-09-30 CAP-40C/R4H-3C cohorts. At roughly 60 traces per normal scan and the current 15-minute cadence, the ring represents only about 150 full scans — roughly six trading sessions — before rollover.
+
+CAP-40D adds a separate research-only archive under `.state/research_archive/`:
+
+- date-partitioned `YYYY-MM-DD.jsonl`;
+- one compact append batch per completed universe scan;
+- whitelisted `velocity_observation`, `four_hour_real`, and CAP-40 boundary evidence only;
+- 120-day retention;
+- 10 MiB per-day safety ceiling;
+- no model call, no market-data fetch, no alert-state mutation;
+- no tier, capital, routing, suppression, candidate-cap, cadence, universe, setup-family or real-4H authority.
+
+The archive is attempted independently from normal Phase-14V persistence, so a Phase-14V write failure does not prevent the archive attempt and an archive failure never changes the market result.
+
+Offline VELOCITY and CAP-40 dataset builders may read either a saved Phase-14V ledger or the CAP-40D archive directory. The existing VELOCITY/CAP-40/R4H consumers continue to operate on a reconstructed ledger-shaped `decision_traces` object.
+
+**Operational requirement:** GitHub code cannot prove Railway filesystem durability. Production must preserve `.state/research_archive/` across restart/redeploy (normally by persistent volume or equivalent durable storage) before the committed forward studies are treated as safely accruing.
+
+Design: `docs/CAP40D_FORWARD_RESEARCH_ARCHIVE.md`.
+
 ## Next production sequence
 
-1. CAP-40C: complete and merge the predeclared independent boundary-study engine, committed plan, uncertainty gates and local report generator.
-2. Allow CAP-40 telemetry/outcomes to accrue through 2026-09-30 and mature through the committed final-review floor. Do not stop early because interim results look favorable.
-3. Run CAP-40C only after the observation window/outcome horizon matures. If it fails, keep the cap at 30. If it passes, open a separate reviewed paid 30-vs-40 experiment design; do not change production directly.
-4. In parallel, continue accruing the R4H-3C forward study through its committed window. Any R4H authority change remains a separate reviewed handoff.
-5. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint.
-6. Railway production observation remains part of final operational validation; no direct Railway connector is available in the current chat environment.
+1. CAP-40D: finish CI, merge the forward research archive, deploy it, and verify Railway preserves `.state/research_archive/` across restart/redeploy without touching alert history.
+2. Only after durable archive validation, treat the CAP-40C and R4H-3C forward cohorts as safely accruing through 2026-09-30. Do not stop early because interim results look favorable.
+3. After the last observation cohort's five-session labels can mature and the CAP-40C review floor is reached, build the CAP-40B dataset from the archive and run CAP-40C. If it fails, keep the cap at 30. If it passes, open a separate reviewed paid 30-vs-40 experiment design; do not change production directly.
+4. Run the R4H-3C independent forward report only after its committed window and label horizon mature. Any R4H authority change remains a separate reviewed handoff.
+5. Keep the production universe at 814 through the CAP-40C observation window. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint and after doing so will not contaminate the committed boundary study.
+6. Railway production observation remains part of final operational validation; repository state alone is not proof of runtime-volume durability.
 
 ## Things that must NOT drift
 
 - scan cadence remains 15 minutes unless explicitly changed in a reviewed capacity experiment;
 - production deep-analysis cap remains 30 until a later reviewed capacity decision explicitly changes it;
+- production universe remains 814 through the CAP-40C observation window unless the study is explicitly invalidated/restarted;
 - Daily/Weekly/4H/1H jurisdiction remains intact;
 - real 4H remains `SHADOW_EVIDENCE_ONLY` until later reviewed evidence clears a narrowly scoped handoff;
 - score cannot override failed execution gates;
 - WAIT never posts;
-- telemetry remains observational;
+- telemetry/research archive remain observational;
 - VELOCITY/R4H/CAP research evidence cannot promote, downgrade, route, suppress, size or forecast a trade;
 - no disabled indicator may be reintroduced;
 - no family organ may treat a level touch as an entry;

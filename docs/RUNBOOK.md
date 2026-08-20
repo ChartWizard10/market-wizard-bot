@@ -90,6 +90,8 @@ A cap increase must satisfy:
 3. API rate/cost budget is acceptable;
 4. no candidate-cap increase is being used to compensate for weak prefilter logic.
 
+The production cap stays at 30 through the committed CAP-40C observation window unless that study is explicitly invalidated and restarted under a new predeclared plan.
+
 ## Operator commands
 
 Verified command surface in `main.py`:
@@ -113,7 +115,61 @@ Alert state file under current config:
 
 Scan telemetry file is maintained separately by the telemetry module. It must remain isolated from alert history.
 
+Phase-14V telemetry is intentionally bounded at 300 scan summaries and 9,000 decision traces. That bound protects runtime storage and must not be enlarged casually to solve a research-retention problem.
+
 Never treat telemetry-write failure as permission to modify market judgment.
+
+## CAP-40D forward research archive
+
+CAP-40C and R4H-3C require multi-week forward cohorts. The 9,000-trace Phase-14V ring cannot retain the full committed 2026-08-20 through 2026-09-30 observation window at current scan throughput, so CAP-40D adds a separate research archive.
+
+Configured archive:
+
+`.state/research_archive/`
+
+Contract:
+
+- enabled in `config/doctrine_config.yaml` under `research_archive`;
+- one compact JSONL batch per completed universe scan;
+- partitioned by America/New_York session date as `YYYY-MM-DD.jsonl`;
+- 120-day retention;
+- 10 MiB safety ceiling per daily partition;
+- whitelist-only research fields (`velocity_observation`, `four_hour_real`, CAP-40 boundary block and minimal identity/rank fields);
+- no Discord payloads, dedup keys, model prose, secrets, bar arrays, or alert-state snapshots;
+- no market-data or model call;
+- no tier, capital, routing, suppression, candidate-cap, cadence, universe, setup-family, or real-4H authority.
+
+The scheduler attempts CAP-40D persistence in a separate failure domain after Phase-14V persistence. A Phase-14V write failure does not prevent the archive attempt. An archive failure cannot change the scan result.
+
+Manual `!analyze` is not part of the committed forward universe cohort and does not write CAP-40D scan batches.
+
+### Railway durability validation — mandatory
+
+GitHub code cannot prove whether Railway preserves a filesystem path across restart/redeploy. Before CAP-40C/R4H-3C evidence is treated as safely accruing, verify in Railway that `.state/research_archive/` resides on durable persistent storage (normally the same persistent volume family used for state, or an equivalent durable volume).
+
+Operational validation sequence:
+
+1. deploy the CAP-40D green production commit;
+2. during/after a completed universe scan, confirm a current-date `.state/research_archive/YYYY-MM-DD.jsonl` exists and is non-empty;
+3. record its byte size and a recent `scan_id` from the file;
+4. restart/redeploy the Railway service without deleting persistent storage;
+5. confirm the same partition still exists with at least the prior byte size and prior `scan_id` still present;
+6. allow another completed universe scan and confirm the same day partition appends another batch line rather than replacing prior lines;
+7. confirm `.state/alert_history.json` and normal scan telemetry remain intact;
+8. if any persistence check fails, classify the forward study as **NOT SAFELY ACCRUING** until storage is corrected. Do not reconstruct lost evidence from later prices.
+
+Repository merge alone is not proof of this operational requirement.
+
+### Offline forward-study inputs
+
+The VELOCITY and CAP-40 dataset builders accept either:
+
+- `--telemetry <saved Phase-14V ledger>` for bounded/recent research; or
+- `--archive-dir <CAP-40D directory>` for the full forward window.
+
+Optional `--start-date` / `--end-date` filters limit archive partitions deterministically.
+
+For the committed full-window CAP-40C/R4H-3C studies, use the durable CAP-40D archive once Phase-14V ring retention would otherwise roll off earlier observations.
 
 ## Pre-deploy checklist
 
@@ -127,8 +183,10 @@ Before merging a strategy/runtime change:
 6. PR diff is reviewed for unrelated strategy drift;
 7. config changes are intentional and named;
 8. no secret is committed;
-9. real-4H authority has not changed unless the PR is explicitly R4H-2;
-10. candidate cap/universe/cadence/routing remain unchanged unless explicitly in scope.
+9. real-4H authority has not changed unless the PR is explicitly an authority handoff;
+10. candidate cap/universe/cadence/routing remain unchanged unless explicitly in scope;
+11. for CAP-40D changes, Phase-14V trace limits remain unchanged and archive failure remains isolated from judgment/state;
+12. for any forward-study change, verify the predeclared sampling frame/window was not silently altered.
 
 ## AI-1 Railway cutover
 
@@ -149,9 +207,13 @@ After the AI-1 PR is green and merged:
 
 AI-1 sends Responses API requests with `store=False`. Do not remove that setting casually; changing model-response retention is an explicit data-control change.
 
+CAP-40D retention concerns only locally generated compact research evidence. It does not change OpenAI response retention or store model response bodies.
+
 ## Rollback rule
 
 Rollback by returning GitHub/Railway to the last known-green production commit. Do not attempt an emergency strategy rewrite directly in runtime configuration unless that configuration was designed as an explicit runtime control.
+
+If CAP-40D must be rolled back, the production scanner may continue operating on the prior green commit, but the committed multi-week forward studies must be marked unsafe/incomplete for any interval whose research archive was not durably captured. Do not backfill missing scan-time evidence from hindsight.
 
 ## Incident classification
 
@@ -162,8 +224,9 @@ Keep these distinct:
 - JUDGMENT: deterministic gate/logic failure;
 - DELIVERY: Discord routing/send failure;
 - STATE: alert-history read/write failure;
-- TELEMETRY: observational ledger failure;
+- TELEMETRY: bounded Phase-14V observational-ledger failure;
+- RESEARCH_ARCHIVE: CAP-40D append/retention/durability failure;
 - CONFIG: missing/invalid environment or YAML;
 - CAPACITY: scan duration/rate budget/candidate-cut pressure.
 
-A DATA or MODEL failure is not a bearish/WAIT market verdict. An observability failure is not a trading failure.
+A DATA or MODEL failure is not a bearish/WAIT market verdict. A telemetry/research-archive failure is not a trading failure, but a research-archive failure can invalidate forward-study completeness if evidence is lost.

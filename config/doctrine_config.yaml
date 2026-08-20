@@ -138,6 +138,15 @@ telemetry:
   max_scan_summaries: 300
   max_decision_traces: 9000
 
+# CAP-40D forward-study persistence. This archive is research-only and stores
+# compact already-built scan evidence so CAP-40C/R4H-3C cohorts survive the
+# bounded Phase-14V ring. It has no tier/capital/routing/candidate-cap authority.
+research_archive:
+  enabled: true
+  directory: ".state/research_archive"
+  retention_days: 120
+  max_daily_file_bytes: 10485760
+
 state:
   cooldown_minutes: 60
   max_memory_entries: 500
