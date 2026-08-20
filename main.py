@@ -150,6 +150,7 @@ def register_commands(
             "`!audit <scan_id|TICKER> [json]` — Read-only alert_history evidence (operator-gated)\n"
             "`!auditready [rows] [json]` — Radar: recent rows ready for SNIPE review but not promoted (operator-gated)\n"
             "`!auditshy [rows] [json]` — Funnel: where SNIPE/STARTER opportunity is capped or blocked (operator-gated)\n"
+            "`!archivestatus` — Read-only CAP-40D archive health/persistence anchor (operator-gated)\n"
         )
 
     @bot.command(name="audit")
@@ -190,6 +191,28 @@ def register_commands(
         except Exception as exc:
             log.error("!auditshy error: %s", exc)
             await ctx.send(f"Auditshy error: {type(exc).__name__}")
+
+    @bot.command(name="archivestatus")
+    async def archivestatus_cmd(ctx) -> None:
+        """Operator-gated, read-only CAP-40D runtime archive probe."""
+        from src import audit_access
+        from src import research_archive_health
+
+        user_id = getattr(getattr(ctx, "author", None), "id", None)
+        channel_id = getattr(getattr(ctx, "channel", None), "id", None)
+        try:
+            auth = audit_access.is_authorized(
+                config, user_id=user_id, channel_id=channel_id
+            )
+            if not auth.get("allowed"):
+                await ctx.send("Archive status access denied.")
+                return
+            result = research_archive_health.snapshot(config)
+            for chunk in chunk_message(research_archive_health.render(result)):
+                await ctx.send(chunk)
+        except Exception as exc:
+            log.error("!archivestatus error: %s", exc)
+            await ctx.send(f"Archive status error: {type(exc).__name__}")
 
     @bot.command(name="scan")
     async def scan_cmd(ctx) -> None:

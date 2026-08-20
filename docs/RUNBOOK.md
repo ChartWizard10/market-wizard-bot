@@ -103,9 +103,10 @@ Verified command surface in `main.py`:
 - `!audit <scan_id|TICKER> [json]`;
 - `!auditready [rows] [json]`;
 - `!auditshy [rows] [json]`;
+- `!archivestatus` — CAP-40D research-archive health and pre/post-restart persistence anchors;
 - `!help`.
 
-Audit commands remain operator-gated by configuration.
+Audit commands and `!archivestatus` remain operator-gated by the same `audit_access` configuration.
 
 ## State and telemetry
 
@@ -143,22 +144,38 @@ The scheduler attempts CAP-40D persistence in a separate failure domain after Ph
 
 Manual `!analyze` is not part of the committed forward universe cohort and does not write CAP-40D scan batches.
 
+## CAP-40E archive health probe
+
+`!archivestatus` is a read-only, operator-gated health probe over the configured CAP-40D directory. It accepts no arbitrary filesystem path and performs no archive write.
+
+It reports:
+
+- health state (`READY`, `DEGRADED`, `EMPTY`, `MISSING_DIRECTORY`, `PATH_COLLISION`, `DISABLED`);
+- partition count/range and byte counts;
+- current ET session date and whether a matching partition exists;
+- oldest and latest retained scan-id anchors;
+- latest scan timestamp/trace count;
+- malformed latest-tail line count and read-error class when applicable.
+
+The command always states that **one snapshot does not prove durability**. Durability requires a pre-restart anchor to remain present after Railway restart/redeploy.
+
 ### Railway durability validation — mandatory
 
 GitHub code cannot prove whether Railway preserves a filesystem path across restart/redeploy. Before CAP-40C/R4H-3C evidence is treated as safely accruing, verify in Railway that `.state/research_archive/` resides on durable persistent storage (normally the same persistent volume family used for state, or an equivalent durable volume).
 
-Operational validation sequence:
+Operational validation sequence using CAP-40E:
 
-1. deploy the CAP-40D green production commit;
-2. during/after a completed universe scan, confirm a current-date `.state/research_archive/YYYY-MM-DD.jsonl` exists and is non-empty;
-3. record its byte size and a recent `scan_id` from the file;
+1. deploy the green CAP-40D + CAP-40E production commits;
+2. after a completed universe scan, run `!archivestatus` in an authorized operator channel;
+3. record the oldest/latest scan-id anchors and total/latest-partition byte counts;
 4. restart/redeploy the Railway service without deleting persistent storage;
-5. confirm the same partition still exists with at least the prior byte size and prior `scan_id` still present;
-6. allow another completed universe scan and confirm the same day partition appends another batch line rather than replacing prior lines;
-7. confirm `.state/alert_history.json` and normal scan telemetry remain intact;
-8. if any persistence check fails, classify the forward study as **NOT SAFELY ACCRUING** until storage is corrected. Do not reconstruct lost evidence from later prices.
+5. run `!archivestatus` again and confirm the prior anchor is still present and bytes did not reset;
+6. allow another completed universe scan;
+7. run `!archivestatus` again and confirm the latest anchor/bytes advance rather than replacing prior history;
+8. confirm `.state/alert_history.json`, normal Phase-14V telemetry, alerts and scanner behavior remain intact;
+9. if any persistence check fails, classify the forward study as **NOT SAFELY ACCRUING** until storage is corrected. Do not reconstruct lost evidence from later prices.
 
-Repository merge alone is not proof of this operational requirement.
+Repository merge alone and a single `!archivestatus` snapshot are not proof of this operational requirement.
 
 ### Offline forward-study inputs
 
@@ -186,7 +203,8 @@ Before merging a strategy/runtime change:
 9. real-4H authority has not changed unless the PR is explicitly an authority handoff;
 10. candidate cap/universe/cadence/routing remain unchanged unless explicitly in scope;
 11. for CAP-40D changes, Phase-14V trace limits remain unchanged and archive failure remains isolated from judgment/state;
-12. for any forward-study change, verify the predeclared sampling frame/window was not silently altered.
+12. for CAP-40E changes, the probe remains read-only/operator-gated and cannot certify durability from a single snapshot;
+13. for any forward-study change, verify the predeclared sampling frame/window was not silently altered.
 
 ## AI-1 Railway cutover
 
@@ -209,11 +227,15 @@ AI-1 sends Responses API requests with `store=False`. Do not remove that setting
 
 CAP-40D retention concerns only locally generated compact research evidence. It does not change OpenAI response retention or store model response bodies.
 
+CAP-40E reads only bounded metadata/anchors from that local archive and adds no new stored research payload.
+
 ## Rollback rule
 
 Rollback by returning GitHub/Railway to the last known-green production commit. Do not attempt an emergency strategy rewrite directly in runtime configuration unless that configuration was designed as an explicit runtime control.
 
 If CAP-40D must be rolled back, the production scanner may continue operating on the prior green commit, but the committed multi-week forward studies must be marked unsafe/incomplete for any interval whose research archive was not durably captured. Do not backfill missing scan-time evidence from hindsight.
+
+CAP-40E can be rolled back independently because it is a read-only operator surface; removing the probe does not alter the CAP-40D archive writer or trading logic.
 
 ## Incident classification
 
@@ -226,7 +248,8 @@ Keep these distinct:
 - STATE: alert-history read/write failure;
 - TELEMETRY: bounded Phase-14V observational-ledger failure;
 - RESEARCH_ARCHIVE: CAP-40D append/retention/durability failure;
+- ARCHIVE_PROBE: CAP-40E read-only status/anchor failure;
 - CONFIG: missing/invalid environment or YAML;
 - CAPACITY: scan duration/rate budget/candidate-cut pressure.
 
-A DATA or MODEL failure is not a bearish/WAIT market verdict. A telemetry/research-archive failure is not a trading failure, but a research-archive failure can invalidate forward-study completeness if evidence is lost.
+A DATA or MODEL failure is not a bearish/WAIT market verdict. A telemetry/research-archive/probe failure is not a trading failure, but a research-archive failure can invalidate forward-study completeness if evidence is lost.
