@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering CAP-40D: `main` at `1ad68d46822328a8532fab8463f0f3c26a635233` (Phase CAP-40C — predeclared independent boundary study, on top of CAP-40B/CAP-40A, R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
+Last merged production baseline entering CAP-40E: `main` at `4194bcc3f3b71599ef6bc7266e09f5c28a7d5af2` (Phase CAP-40D — durable forward research archive, on top of CAP-40C/CAP-40B/CAP-40A, R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -18,8 +18,9 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - SFC-1/SFC-2A/SFC-2B and CFR-1/CFR-2 are production-green.
 - VELOCITY-1A/1B/1C/1D are production-green research infrastructure.
 - R4H-3A/3B/3C are production-green research infrastructure.
-- CAP-40A/CAP-40B/CAP-40C are production-green research infrastructure.
+- CAP-40A/CAP-40B/CAP-40C/CAP-40D are production-green research infrastructure.
 - Scan telemetry remains observational and isolated from alert history.
+- CAP-40D forward research archive is isolated from trading state/authority; Railway durability still requires operational validation.
 - Production ticker loader normalizes/deduplicates/validates symbols without fetching market data.
 
 ## Production model provider
@@ -200,7 +201,7 @@ A passing CAP-40C report yields only `PAID_EXPERIMENT_REVIEW_READY`. It cannot c
 
 Merge CI: **2982 passed, 4 skipped**.
 
-### CAP-40D — current branch phase / retention integrity
+### CAP-40D — merged / operational durability not yet proven
 
 The post-CAP-40C retention audit found that Phase-14V's 9,000-trace ring cannot preserve the full 2026-08-20 through 2026-09-30 CAP-40C/R4H-3C cohorts. At roughly 60 traces per normal scan and the current 15-minute cadence, the ring represents only about 150 full scans — roughly six trading sessions — before rollover.
 
@@ -216,20 +217,48 @@ CAP-40D adds a separate research-only archive under `.state/research_archive/`:
 
 The archive is attempted independently from normal Phase-14V persistence, so a Phase-14V write failure does not prevent the archive attempt and an archive failure never changes the market result.
 
-Offline VELOCITY and CAP-40 dataset builders may read either a saved Phase-14V ledger or the CAP-40D archive directory. The existing VELOCITY/CAP-40/R4H consumers continue to operate on a reconstructed ledger-shaped `decision_traces` object.
+Offline VELOCITY and CAP-40 dataset builders may read either a saved Phase-14V ledger or the CAP-40D archive directory. Existing VELOCITY/CAP-40/R4H consumers continue to operate on a reconstructed ledger-shaped `decision_traces` object.
 
-**Operational requirement:** GitHub code cannot prove Railway filesystem durability. Production must preserve `.state/research_archive/` across restart/redeploy (normally by persistent volume or equivalent durable storage) before the committed forward studies are treated as safely accruing.
+**Operational requirement remains open:** GitHub code cannot prove Railway filesystem durability. Production must preserve `.state/research_archive/` across restart/redeploy before the committed forward studies are treated as safely accruing.
 
 Design: `docs/CAP40D_FORWARD_RESEARCH_ARCHIVE.md`.
 
+Merge CI: **3011 passed, 4 skipped**.
+
+### CAP-40E — current branch phase / archive operational health probe
+
+CAP-40E adds an operator-gated, read-only Discord command:
+
+`!archivestatus`
+
+Purpose: make CAP-40D deployment/persistence validation possible without shell access.
+
+The probe reports only bounded archive health metadata and persistence anchors:
+
+- health state;
+- partition count/range and byte totals;
+- current ET session and current-partition presence;
+- oldest and latest retained scan IDs;
+- latest scan timestamp/trace count;
+- malformed trailing-line count/read-error class.
+
+It reuses `audit_access.is_authorized()` and accepts no arbitrary path. It performs no write, market-data fetch, GPT-5.6 call, tier/capital/routing/suppression action, or candidate-cap/universe/cadence change.
+
+A single `!archivestatus` result explicitly reports `durability_proven = false`; cross-restart persistence requires comparison of a pre-restart anchor with a post-restart snapshot.
+
+Design: `docs/CAP40E_ARCHIVE_HEALTH_PROBE.md`.
+
 ## Next production sequence
 
-1. CAP-40D: finish CI, merge the forward research archive, deploy it, and verify Railway preserves `.state/research_archive/` across restart/redeploy without touching alert history.
-2. Only after durable archive validation, treat the CAP-40C and R4H-3C forward cohorts as safely accruing through 2026-09-30. Do not stop early because interim results look favorable.
-3. After the last observation cohort's five-session labels can mature and the CAP-40C review floor is reached, build the CAP-40B dataset from the archive and run CAP-40C. If it fails, keep the cap at 30. If it passes, open a separate reviewed paid 30-vs-40 experiment design; do not change production directly.
-4. Run the R4H-3C independent forward report only after its committed window and label horizon mature. Any R4H authority change remains a separate reviewed handoff.
-5. Keep the production universe at 814 through the CAP-40C observation window. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint and after doing so will not contaminate the committed boundary study.
-6. Railway production observation remains part of final operational validation; repository state alone is not proof of runtime-volume durability.
+1. CAP-40E: finish CI and merge the read-only archive health probe.
+2. Deploy the CAP-40D + CAP-40E production baseline to Railway.
+3. After a completed universe scan, run `!archivestatus` in the authorized operator channel and record oldest/latest scan anchors plus byte counts.
+4. Restart/redeploy Railway without deleting persistent storage, rerun `!archivestatus`, and verify the prior anchor/bytes survived.
+5. Allow another completed universe scan and verify the archive advances by append rather than reset/replacement. Confirm alert history, normal telemetry, alerts and scanner behavior remain intact.
+6. Only after durable archive validation, treat the CAP-40C and R4H-3C forward cohorts as safely accruing through 2026-09-30. Do not stop early because interim results look favorable.
+7. After the last CAP-40C observation cohort's five-session labels can mature and the 2026-10-08 review floor is reached, build the CAP-40B dataset from the archive and run CAP-40C. If it fails, keep cap 30. If it passes, open a separate reviewed paid 30-vs-40 experiment design; do not change production directly.
+8. Run R4H-3C only after its committed window and label horizon mature. Any real-4H authority change remains a separate reviewed handoff.
+9. Keep the production universe at 814 through the CAP-40C observation window. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint and after doing so will not contaminate the committed boundary study.
 
 ## Things that must NOT drift
 
@@ -240,7 +269,7 @@ Design: `docs/CAP40D_FORWARD_RESEARCH_ARCHIVE.md`.
 - real 4H remains `SHADOW_EVIDENCE_ONLY` until later reviewed evidence clears a narrowly scoped handoff;
 - score cannot override failed execution gates;
 - WAIT never posts;
-- telemetry/research archive remain observational;
+- telemetry/research archive/health probe remain observational;
 - VELOCITY/R4H/CAP research evidence cannot promote, downgrade, route, suppress, size or forecast a trade;
 - no disabled indicator may be reintroduced;
 - no family organ may treat a level touch as an entry;
