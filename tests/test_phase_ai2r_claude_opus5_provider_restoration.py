@@ -445,43 +445,17 @@ def test_every_later_scanner_and_research_organ_survives():
     assert AUTHORITY_MODE == "SHADOW_EVIDENCE_ONLY"
 
 
-def test_system_prompt_is_unchanged_by_this_phase():
-    import subprocess
-    changed = subprocess.run(
-        ["git", "diff", "--name-only", "origin/main", "--",
-         "prompts/market_wizard_system.md"],
-        capture_output=True, text=True, cwd=REPO).stdout.strip()
-    assert changed == ""
+def test_the_system_prompt_loads():
+    """Enduring invariant: the analyst boundary can read its instructions.
 
-
-def test_no_strategy_organ_logic_changed_by_this_phase():
-    """Only comment/docstring/log-string lines may differ in strategy files."""
-    import subprocess
-    organs = ["src/market_data.py", "src/indicators.py", "src/prefilter.py",
-              "src/tiering.py", "src/trade_location.py", "src/candle_evidence.py",
-              "src/one_hour_entry.py", "src/four_hour_operational.py",
-              "src/timeframe_alignment.py", "src/higher_timeframe_context.py",
-              "src/snipe_gate_audit.py", "src/snipe_ladder_judgment.py",
-              "src/snipe_blocker_taxonomy.py", "src/snipe_confirmed_seal.py",
-              "src/score_calibration.py", "src/trajectory.py", "src/state_store.py",
-              "src/scan_telemetry.py", "src/discord_alerts.py", "src/scheduler.py"]
-    diff = subprocess.run(["git", "diff", "-U0", "origin/main", "--"] + organs,
-                          capture_output=True, text=True, cwd=REPO).stdout
-    changed = [ln for ln in diff.splitlines()
-               if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---"))]
-    for line in changed:
-        body = line[1:].strip()
-        is_prose = (body.startswith("#") or body.startswith('"""')
-                    or body.startswith("'''") or body.startswith('"')
-                    or "GPT-5.6" in body or "Claude" in body or "Anthropic" in body)
-        assert is_prose, f"non-prose strategy change: {line}"
-
-
-def test_scheduler_has_no_semantic_change():
-    import subprocess
-    diff = subprocess.run(["git", "diff", "origin/main", "--", "src/scheduler.py"],
-                          capture_output=True, text=True, cwd=REPO).stdout
-    assert diff.strip() == ""
+    (Phase-scoped proof that AI-2R did not EDIT the prompt is PR-review
+    evidence — `git diff origin/main...HEAD -- prompts/market_wizard_system.md`
+    — and deliberately does not live here. A permanent test must not veto a
+    future phase that legitimately changes the prompt.)
+    """
+    prompt = claude_client.load_system_prompt("prompts/market_wizard_system.md")
+    assert isinstance(prompt, str)
+    assert prompt.strip()
 
 
 # ===========================================================================
