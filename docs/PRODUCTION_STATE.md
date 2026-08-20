@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering R4H-3C: `main` at `65abdcd762db94fe0323b7d262a850d54641cb32` (Phase R4H-3B — predeclared chronological 4H outcome study, on top of R4H-3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
+Last merged production baseline entering CAP-40A: `main` at `218014670def126f5c5ee972cee1508ca1cb2878` (Phase R4H-3C — forward independence, chart-native coverage and uncertainty design, on top of R4H-3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -17,7 +17,7 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - Autoscan and manual `!analyze` share the same post-tiering judgment organ.
 - SFC-1/SFC-2A/SFC-2B and CFR-1/CFR-2 are production-green.
 - VELOCITY-1A/1B/1C/1D are production-green research infrastructure.
-- R4H-3A/3B are production-green research infrastructure.
+- R4H-3A/3B/3C are production-green research infrastructure.
 - Scan telemetry remains observational and isolated from alert history.
 - Production ticker loader normalizes/deduplicates/validates symbols without fetching market data.
 
@@ -138,7 +138,7 @@ Full-tier reconstruction and full 4H replacement remain unsupported.
 
 Merge CI: **2925 passed, 4 skipped**.
 
-### R4H-3C — current branch phase
+### R4H-3C — merged / forward study accruing
 
 R4H-3C locks the **forward** research design before the evaluation window begins.
 
@@ -204,6 +204,8 @@ Point-effect requirements:
 
 Even a fully passing R4H-3C report is research-only and can only justify opening a separately reviewed narrow-authority handoff branch. It cannot change runtime authority itself.
 
+Merge CI: **2938 passed, 4 skipped**.
+
 ## VELOCITY-1 — five-session / +8% research stack
 
 - VELOCITY-1A: pure feasibility + three-barrier contract. CI: **2853 passed, 4 skipped**.
@@ -217,27 +219,44 @@ Current production cap remains **30 deep-analysis candidates per scan**.
 
 The next candidate ceiling is 40 only if measured evidence proves incremental opportunity recall without unacceptable cadence/cost impact. A move from 30 to 40 is a 33.3% increase in maximum model calls.
 
-Near-cut telemetry records ranks 31-60, but full VELOCITY observations currently apply to analyzed candidates. CAP-40 therefore needs its own measured design/replay rather than assuming ranks 31-40 are beneficial.
+Phase 14V already records a free near-cut shadow population beyond the cap, but those rows are pre-model evidence only. They cannot be treated as reconstructed STARTER/SNIPE decisions.
+
+### CAP-40A — current branch phase
+
+CAP-40A creates a comparable **pre-model boundary observation** without adding any GPT-5.6 calls.
+
+Canonical bands at the current cap:
+
+- `BASELINE_EDGE` = ranks 21–30;
+- `SHADOW_INCREMENT` = ranks 31–40.
+
+The observation carries stable scan/ticker identity, rank/admission evidence, structural invalidation when already available, setup-family evidence, and VELOCITY feasibility. Missing geometry remains missing.
+
+CAP-40A grants zero model, candidate-cap, tier, capital, routing or forecast authority. Production stays at 30.
+
+The phase is documented in `docs/CAP40A_BOUNDARY_OBSERVATION.md`.
 
 ## Next production sequence
 
-1. R4H-3C: complete and merge forward independence/coverage/uncertainty design with zero live authority.
-2. Allow the declared R4H forward window to accrue from 2026-08-20 through 2026-09-30 and then allow the final cohort's five-session outcome horizon to mature.
-3. Run the independent R4H-3C report only after the planned window matures. Do not use favorable interim evidence to stop early.
-4. If sample, condition coverage, point effects and Wilson bounds all pass, open a **separate narrow authority-handoff review**; otherwise remain shadow and continue evidence collection under a new reviewed plan if needed.
-5. While the R4H forward window accrues, CAP-40 may proceed as a separate measured capacity/replay phase because it does not require premature 4H authority.
-6. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint.
-7. Railway production observation remains part of final operational validation; no direct Railway connector is available in the current chat environment.
+1. CAP-40A: complete and merge the pure boundary-observation contract with zero extra model calls and zero cap change.
+2. CAP-40B: wire bounded ranks 21–40 boundary observations into isolated research telemetry and future Daily outcome linkage; still no cap change and no extra GPT-5.6 calls.
+3. Use the resulting chronological boundary evidence to decide whether paying for a controlled 30-vs-40 deep-analysis capacity experiment is justified.
+4. Any later live cap experiment must measure incremental legitimate opportunity recall, full scan duration, provider rate limits/API usage and alert quality before production promotion.
+5. In parallel, allow the R4H-3C forward window to accrue through 2026-09-30 and allow the final cohort's five-session outcome horizon to mature. Do not stop early on favorable interim estimates.
+6. Run the independent R4H-3C report only after the planned window matures. Any authority change requires a separate reviewed handoff branch.
+7. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint.
+8. Railway production observation remains part of final operational validation; no direct Railway connector is available in the current chat environment.
 
 ## Things that must NOT drift
 
 - scan cadence remains 15 minutes unless explicitly changed in a capacity phase;
+- production deep-analysis cap remains 30 until a later reviewed capacity phase explicitly changes it;
 - Daily/Weekly/4H/1H jurisdiction remains intact;
 - real 4H remains `SHADOW_EVIDENCE_ONLY` until later reviewed evidence clears a narrowly scoped handoff;
 - score cannot override failed execution gates;
 - WAIT never posts;
 - telemetry remains observational;
-- VELOCITY/R4H research evidence cannot promote, downgrade, route, suppress, size, or forecast a trade;
+- VELOCITY/R4H/CAP research evidence cannot promote, downgrade, route, suppress, size or forecast a trade;
 - no disabled indicator may be reintroduced;
 - no family organ may treat a level touch as an entry;
 - setup-family work may not casually change universe membership;
