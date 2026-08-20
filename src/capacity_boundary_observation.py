@@ -31,6 +31,9 @@ DEFAULT_CURRENT_CAP = 30
 DEFAULT_INCREMENT = 10
 DEFAULT_BASELINE_WIDTH = 10
 
+_COMPACT_TEXT = 160
+_COMPACT_LIST = 8
+
 
 def _num(value: Any) -> float | None:
     if value is None or isinstance(value, bool):
@@ -46,6 +49,11 @@ def _num(value: Any) -> float | None:
 
 def _text(value: Any) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _compact_text(value: Any) -> str | None:
+    text = _text(value)
+    return text[:_COMPACT_TEXT] if text else None
 
 
 def _dict(value: Any) -> dict:
@@ -221,4 +229,71 @@ def build_boundary_observation(
         "retest_status": _text(key_features.get("retest_status")),
         "overhead_status": _text(key_features.get("overhead_status")),
         "estimated_rr": _num(key_features.get("estimated_rr")),
+    }
+
+
+def compact_for_telemetry(observation: dict | None) -> dict | None:
+    """Return the bounded, whitelisted CAP-40 observation stored in 14V traces.
+
+    The projection is additive and carries no post-model tier or capital field.
+    It is deliberately small enough to attach to existing traces rather than
+    creating extra trace rows that would reduce telemetry retention.
+    """
+    if not isinstance(observation, dict):
+        return None
+
+    missing = observation.get("missing")
+    if isinstance(missing, (list, tuple)):
+        compact_missing = [
+            text
+            for item in list(missing)[:_COMPACT_LIST]
+            if (text := _compact_text(item))
+        ]
+    else:
+        compact_missing = []
+
+    return {
+        "version": _compact_text(observation.get("version")) or VERSION,
+        "research_only": True,
+        "observational_only": True,
+        "model_authority": False,
+        "candidate_cap_authority": False,
+        "tier_authority": False,
+        "capital_authority": False,
+        "routing_authority": False,
+        "forecast_authority": False,
+        "scan_id": _compact_text(observation.get("scan_id")),
+        "ticker": _compact_text(observation.get("ticker")),
+        "observed_at": _compact_text(observation.get("observed_at")),
+        "rank": _num(observation.get("rank")),
+        "current_cap": _num(observation.get("current_cap")),
+        "proposed_cap": _num(observation.get("proposed_cap")),
+        "band": _compact_text(observation.get("band")),
+        "ready": observation.get("ready") is True,
+        "missing": compact_missing,
+        "reference_price": _num(observation.get("reference_price")),
+        "reference_source": _compact_text(observation.get("reference_source")),
+        "invalidation_level": _num(observation.get("invalidation_level")),
+        "invalidation_source": _compact_text(observation.get("invalidation_source")),
+        "target_return_pct": _num(observation.get("target_return_pct")),
+        "horizon_sessions": _num(observation.get("horizon_sessions")),
+        "feasibility_status": _compact_text(observation.get("feasibility_status")),
+        "known_path_room_pct": _num(observation.get("known_path_room_pct")),
+        "atr_pct": _num(observation.get("atr_pct")),
+        "required_move_atr": _num(observation.get("required_move_atr")),
+        "prefilter_score": _num(observation.get("prefilter_score")),
+        "admission_rank_score": _num(observation.get("admission_rank_score")),
+        "admission_source": _compact_text(observation.get("admission_source")),
+        "primary_family": _compact_text(observation.get("primary_family")),
+        "family_state": _compact_text(observation.get("family_state")),
+        "family_score": _num(observation.get("family_score")),
+        "family_watch_ready": observation.get("family_watch_ready") is True,
+        "family_admission_ready": observation.get("family_admission_ready") is True,
+        "family_entry_structure_valid": (
+            observation.get("family_entry_structure_valid") is True
+        ),
+        "family_rr_to_t1": _num(observation.get("family_rr_to_t1")),
+        "retest_status": _compact_text(observation.get("retest_status")),
+        "overhead_status": _compact_text(observation.get("overhead_status")),
+        "estimated_rr": _num(observation.get("estimated_rr")),
     }
