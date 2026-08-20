@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from src import candle_evidence
 from src import capacity_boundary_observation
 from src import discord_alerts
+from src import forward_research_archive
 from src import four_hour_operational
 from src import higher_timeframe_context
 from src import indicators
@@ -730,6 +731,26 @@ async def run_scan_pipeline(
         )
     except Exception as exc:
         log.warning("TELEMETRY_WRITE_ERROR: %s", exc)
+
+    # CAP-40D is intentionally a separate failure domain from Phase-14V. The
+    # archive receives only already-built research traces and cannot mutate
+    # judgment, routing, suppression, state, cadence, or candidate admission.
+    try:
+        archive_result = await asyncio.to_thread(
+            forward_research_archive.append_scan_batch,
+            config,
+            scan_id,
+            started_at,
+            _tlm_traces,
+        )
+        if not archive_result.get("ok", False):
+            log.warning(
+                "RESEARCH_ARCHIVE_DEGRADED: scan_id=%s reason=%s",
+                scan_id,
+                archive_result.get("reason"),
+            )
+    except Exception as exc:
+        log.warning("RESEARCH_ARCHIVE_ERROR: %s", exc)
 
     ended_at = datetime.utcnow().isoformat()
     duration_seconds = (datetime.utcnow() - start_ts).total_seconds()
