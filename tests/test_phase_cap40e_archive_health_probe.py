@@ -234,7 +234,8 @@ def test_render_is_compact_and_explicit_that_durability_is_not_proven(tmp_path):
 
 
 def test_health_module_has_no_network_model_discord_or_write_calls():
-    tree = ast.parse(Path("src/research_archive_health.py").read_text(encoding="utf-8"))
+    source = Path("src/research_archive_health.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
     imports = set()
     calls = set()
     for node in ast.walk(tree):
@@ -263,12 +264,16 @@ def test_health_module_has_no_network_model_discord_or_write_calls():
     ):
         assert not any(module.startswith(prefix) for module in imports)
 
+    # `datetime.replace(tzinfo=...)` is a legitimate read-only time conversion,
+    # so generic attribute-name banning of "replace" would be a false positive.
+    # Ban actual filesystem/network/trading writes and os.replace specifically.
+    assert "os.replace(" not in source
     for forbidden in (
         "write_text",
         "write_bytes",
         "mkdir",
         "unlink",
-        "replace",
+        "rename",
         "append_scan_batch",
         "batch_download",
         "fetch_ticker",
