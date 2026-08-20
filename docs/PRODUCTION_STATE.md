@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering CAP-40B: `main` at `be53daace33cc4a5132a966df68f3b6cb9543518` (Phase CAP-40A — pure pre-model candidate-cap boundary observation contract, on top of R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
+Last merged production baseline entering CAP-40C: `main` at `d6fa8f372b880db835b7d2d8dfa4de05996332f6` (Phase CAP-40B — boundary telemetry and offline future-Daily outcome linkage, on top of CAP-40A, R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -18,7 +18,7 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - SFC-1/SFC-2A/SFC-2B and CFR-1/CFR-2 are production-green.
 - VELOCITY-1A/1B/1C/1D are production-green research infrastructure.
 - R4H-3A/3B/3C are production-green research infrastructure.
-- CAP-40A is production-green research infrastructure.
+- CAP-40A/CAP-40B are production-green research infrastructure.
 - Scan telemetry remains observational and isolated from alert history.
 - Production ticker loader normalizes/deduplicates/validates symbols without fetching market data.
 
@@ -72,138 +72,50 @@ Family evidence may improve model admission/ranking only within reviewed SFC rul
 
 ## R4H — real 4H authority program
 
-### R4H-1 — real 4H evidence engine
-
-Real 4H evidence represents closed/live truth, continuity gaps, stale evidence, structural state, liquidity, displacement, retest, hold, invalidation and target path from actual session-aligned candles.
-
-R4H-1 remains shadow evidence. Its research constants are not production doctrine by themselves.
-
-### R4H-2 — authority decision
+### R4H-2 authority decision
 
 **Verdict: HOLD SHADOW.**
 
-Before any real-4H authority handoff, a reviewed evidence package must establish:
+Before any real-4H authority handoff, a reviewed evidence package must establish chronological out-of-sample validation, forward outcome linkage, proxy-vs-real counterfactual evaluation, sample size accepted under a predeclared plan, accepted chart-condition coverage, precision preserved/improved, legitimate recall not materially damaged, and full capital-integrity CI.
 
-1. chronological out-of-sample validation;
-2. forward outcome linkage;
-3. proxy-vs-real counterfactual evaluation;
-4. sample size accepted under a predeclared plan;
-5. accepted market-condition coverage;
-6. precision improved or preserved;
-7. legitimate opportunity recall not materially damaged;
-8. full capital-integrity regressions green.
-
-R4H-2 never auto-promotes. A green evidence package can only make a later controlled handoff eligible for review.
+R4H-2 never auto-promotes. A green evidence package only makes a later controlled handoff eligible for review.
 
 ### R4H-3A — merged
 
-R4H-3A defines the pure location-layer counterfactual between the production proxy and real 4H shadow evidence.
-
-Common effects:
-
-- `SUPPORTIVE`
-- `REPAIRING`
-- `NO_EDGE`
-- `EXTENDED`
-- `HARD_BLOCK`
-- `UNAVAILABLE`
-
-Comparison classes:
-
-- `SAME_LOCATION_EFFECT`
-- `REAL_ADDS_HARD_BLOCK`
-- `REAL_REMOVES_PROXY_HARD_BLOCK`
-- `NON_FATAL_LOCATION_DIFFERENCE`
-- `COMPARISON_UNAVAILABLE`
-
-It joins comparisons to VELOCITY-1D rows by `(scan_id, ticker)` but explicitly cannot reconstruct a final STARTER/SNIPE verdict from the compact trace.
+Pure 4H location-layer counterfactual between the production proxy and real-4H shadow evidence. It compares `SUPPORTIVE`, `REPAIRING`, `NO_EDGE`, `EXTENDED`, `HARD_BLOCK`, and `UNAVAILABLE`, joins by `(scan_id, ticker)`, and explicitly cannot reconstruct a final STARTER/SNIPE verdict from compact telemetry.
 
 Merge CI: **2911 passed, 4 skipped**.
 
 ### R4H-3B — merged
 
-R4H-3B scores the location-layer counterfactual under an explicit predeclared chronological study plan.
-
-Outcome law:
-
-- `TARGET_FIRST`, `INVALIDATION_FIRST`, `TIME_BARRIER` are evaluable terminal outcomes;
-- `AMBIGUOUS_SAME_SESSION` is ambiguous;
-- `INCOMPLETE_HORIZON` is censored;
-- `INVALID_DATA` is invalid.
-
-For `REAL_ADDS_HARD_BLOCK`, invalidation/time outcomes are objective-failure protection evidence and target outcomes are target opportunity cost. For `REAL_REMOVES_PROXY_HARD_BLOCK`, target outcomes are recovery evidence and invalidation/time outcomes are objective-failure exposure.
-
-R4H-3B also reports non-fatal real states separately, applies sample/completeness thresholds, and requires separately auditable condition coverage before a narrow handoff review can be marked ready.
-
-Full-tier reconstruction and full 4H replacement remain unsupported.
+Predeclared chronological location-layer outcome study. `TARGET_FIRST`, `INVALIDATION_FIRST`, and `TIME_BARRIER` are evaluable; same-session ambiguity, incomplete horizon, and invalid data stay non-evaluable. Full-tier reconstruction and full 4H replacement remain unsupported.
 
 Merge CI: **2925 passed, 4 skipped**.
 
 ### R4H-3C — merged / forward study accruing
 
-R4H-3C locks the **forward** research design before the evaluation window begins.
+Independent sampling law: `FIRST_OBSERVATION_PER_TICKER_SESSION`.
 
-Independent sampling law:
+Committed plan: `research/plans/r4h3_forward_oos_v1.json`.
 
-`FIRST_OBSERVATION_PER_TICKER_SESSION`
-
-Repeated 15-minute observations from the same ticker/session are not counted as independent evidence. The earliest valid observation survives, chosen from chronology/identity only and without reading the future outcome label.
-
-Timestamp law:
-
-- `observed_at` must be offset-aware;
-- UTC is used for absolute ordering;
-- ticker/session identity uses the calendar date encoded in the original timestamp offset, preventing UTC rollover from reassigning a session.
-
-Chart-native condition coverage uses persisted real-4H structural state only:
-
-- `TRENDING` = `EXPANSION` or `CONTINUATION`
-- `COMPRESSION`
-- `REPAIR`
-- `TRANSITION`
-- `FAILURE`
-- `UNKNOWN`
-
-Uncertainty law:
-
-- point estimates are not enough;
-- intervention proportions receive predeclared two-sided Wilson confidence intervals;
-- narrow handoff review readiness requires both the point-effect rules and confidence-bound rules to pass.
-
-Committed forward plan: `research/plans/r4h3_forward_oos_v1.json`.
-
-Declared evaluation window:
+Declared window:
 
 - start: **2026-08-20**
 - end: **2026-09-30**
 - confidence level: **95%**
-- no early stop because interim estimates look favorable
-- final evaluation only after the end-date cohort has enough future completed sessions to mature its five-session VELOCITY label
+- no favorable early stop
+- final review only after the last cohort's five-session outcome horizon can mature.
 
-Predeclared v1 minimums:
+Predeclared minimums:
 
 - 150 evaluable independent observations overall;
 - 40 `REAL_ADDS_HARD_BLOCK` evaluable observations;
 - 30 `REAL_REMOVES_PROXY_HARD_BLOCK` evaluable observations;
 - <=15% ambiguous/censored;
 - <=10% unavailable comparison;
-- condition coverage: TRENDING 40, COMPRESSION 15, REPAIR 25, TRANSITION 15, FAILURE 5.
+- chart-condition coverage: TRENDING 40, COMPRESSION 15, REPAIR 25, TRANSITION 15, FAILURE 5.
 
-Point-effect requirements:
-
-- real-adds-block protection >=70%;
-- real-adds-block target cost <=30%;
-- real-removes-block target recovery >=60%;
-- real-removes-block objective-failure exposure <=40%.
-
-95% Wilson-bound requirements:
-
-- real-adds protection lower bound >=60%;
-- real-adds target-cost upper bound <=40%;
-- real-removes recovery lower bound >=50%;
-- real-removes failure-exposure upper bound <=50%.
-
-Even a fully passing R4H-3C report is research-only and can only justify opening a separately reviewed narrow-authority handoff branch. It cannot change runtime authority itself.
+Point-effect and Wilson-bound requirements remain exactly as committed in the R4H-3C plan. Even a full pass is research-only and requires a separate narrow-authority handoff branch.
 
 Merge CI: **2938 passed, 4 skipped**.
 
@@ -216,68 +128,85 @@ Merge CI: **2938 passed, 4 skipped**.
 
 ## Candidate-cap decision: 30 vs 40
 
-Current production cap remains **30 deep-analysis candidates per scan**.
-
-The next candidate ceiling is 40 only if measured evidence proves incremental opportunity recall without unacceptable cadence/cost impact. A move from 30 to 40 is a 33.3% increase in maximum model calls.
-
-Phase 14V already records a free near-cut shadow population beyond the cap, but those rows are pre-model evidence only. They cannot be treated as reconstructed STARTER/SNIPE decisions.
+Current production cap remains **30 deep-analysis candidates per scan**. Moving to 40 would increase the maximum GPT-5.6 call count by 33.3%, so the change must earn its cost with measured opportunity recall and operational evidence.
 
 ### CAP-40A — merged
 
-CAP-40A defines the comparable pre-model boundary observation without adding any GPT-5.6 calls.
-
-Canonical bands at the current cap:
+Pure pre-model boundary observation for:
 
 - `BASELINE_EDGE` = ranks 21–30;
 - `SHADOW_INCREMENT` = ranks 31–40.
 
-The observation carries stable scan/ticker/time identity, rank/admission evidence, structural invalidation when already available, setup-family evidence and VELOCITY feasibility. Missing geometry remains missing.
-
-CAP-40A grants zero model, candidate-cap, tier, capital, routing or forecast authority. Production stays at 30.
+The observation carries stable scan/ticker/time identity, rank/admission evidence, structural invalidation when already available, setup-family evidence and VELOCITY feasibility. Missing geometry remains missing. No extra GPT-5.6 calls and no cap change.
 
 Merge CI: **2954 passed, 4 skipped**.
 
-### CAP-40B — current branch phase
+### CAP-40B — merged
 
-CAP-40B wires the CAP-40A observation into the existing isolated Phase-14V trace stream and future Daily outcome research.
+CAP-40B attaches the pre-model boundary block to existing Phase-14V traces without increasing normal-path trace count:
 
-Retention law:
+- ranks 31–40 reuse existing `near_cut` traces;
+- ranks 21–30 reuse their analyzed/analysis-failure/rate-limit/tiering-failure trace;
+- ranks 41–60 remain ordinary near-cut telemetry.
 
-- no twenty-row-per-scan trace expansion;
-- ranks 31–40 attach their boundary block to existing `near_cut` traces;
-- ranks 21–30 attach to existing analyzed/analysis-failure/rate-limit/tiering-failure traces;
-- ranks 41–60 keep normal near-cut telemetry but receive no CAP-40 boundary block;
-- Phase-14V schema remains `14V.2` because the field is additive/optional.
+`capacity_boundary_dataset.py` reuses VELOCITY-1D chronology to produce future target/invalidation/time outcomes by boundary band. Shadow candidates never receive a reconstructed model tier; `counterfactual_model_tier_supported = false` remains explicit.
 
-Comparable evidence law:
+A shadow `TARGET_FIRST` is evidence of an excluded pre-model structural opportunity candidate, not proof of a missed STARTER/SNIPE alert.
 
-- CAP-40 block is built before GPT-5.6 analysis;
-- post-model final tier/capital is excluded from the boundary observation;
-- shadow ranks are never assigned a reconstructed model tier.
+Merge CI: **2966 passed, 4 skipped**.
 
-Offline linkage:
+### CAP-40C — current branch phase
 
-`capacity_boundary_dataset.py` reuses VELOCITY-1D chronology and three-barrier outcomes. It reports target/invalidation/time outcomes by boundary band while keeping `counterfactual_model_tier_supported = false`.
+CAP-40C locks the boundary-study design before outcomes are reviewed for a capacity decision.
 
-A shadow `TARGET_FIRST` means the cutoff excluded a structurally valid pre-model opportunity candidate. It does **not** prove that the candidate would have earned STARTER or SNIPE after model analysis.
+Canonical plan: `research/plans/cap40_boundary_oos_v1.json`.
 
-CAP-40B is documented in `docs/CAP40B_TELEMETRY_OUTCOME_LINKAGE.md`.
+Declared observation window:
+
+- start: **2026-08-20**
+- end: **2026-09-30**
+- final review not before: **2026-10-08**
+- confidence level: **95%**
+- no favorable early stop.
+
+Independent sampling law:
+
+`FIRST_OBSERVATION_PER_TICKER_SESSION`
+
+Current naive autoscan timestamps are treated as UTC and converted to `America/New_York` before the session date is assigned. Offset-aware timestamps follow the same absolute-time path. If a ticker moves between rank bands during a session, only its earliest observation survives; outcome labels never influence selection.
+
+Predeclared sample requirements:
+
+- >=200 evaluable independent observations overall;
+- >=90 evaluable baseline-edge observations;
+- >=90 evaluable shadow-increment observations;
+- <=15% ambiguous/censored;
+- <=10% invalid;
+- <=20% unknown setup family in the evaluable shadow cohort.
+
+Predeclared shadow-opportunity requirements:
+
+- >=30 shadow `TARGET_FIRST` observations;
+- shadow target rate >=35%;
+- 95% Wilson lower bound for shadow target rate >=25%;
+- conservative lower bound for `(shadow target rate - baseline target rate)` >= -20 percentage points;
+- >=60% of evaluable shadow observations classified VELOCITY `SUPPORTED` or `PARTIAL_SUPPORT`.
+
+A passing CAP-40C report yields only `PAID_EXPERIMENT_REVIEW_READY`. It cannot change the production cap. A separately reviewed paid 30-vs-40 experiment must still measure downstream GPT-5.6 decision quality, scan duration, provider behavior, API usage/cost, precision, recall and alert quality.
 
 ## Next production sequence
 
-1. CAP-40B: complete and merge bounded telemetry wiring + offline outcome linkage with zero extra GPT-5.6 calls and no cap change.
-2. CAP-40C: predeclare the boundary evidence report/acceptance rules, including independent sample treatment and uncertainty around baseline-edge versus shadow-increment outcome differences.
-3. Use the mature CAP-40 boundary evidence to decide whether paying for a controlled 30-vs-40 deep-analysis experiment is justified.
-4. Any later live cap experiment must separately measure incremental legitimate opportunity recall, downstream GPT-5.6 decision quality, full scan duration, provider limits/API usage, precision and alert quality before production promotion.
-5. In parallel, allow the R4H-3C forward window to accrue through 2026-09-30 and allow the final cohort's five-session outcome horizon to mature. Do not stop early on favorable interim estimates.
-6. Run the independent R4H-3C report only after the planned window matures. Any authority change requires a separate reviewed handoff branch.
-7. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint.
-8. Railway production observation remains part of final operational validation; no direct Railway connector is available in the current chat environment.
+1. CAP-40C: complete and merge the predeclared independent boundary-study engine, committed plan, uncertainty gates and local report generator.
+2. Allow CAP-40 telemetry/outcomes to accrue through 2026-09-30 and mature through the committed final-review floor. Do not stop early because interim results look favorable.
+3. Run CAP-40C only after the observation window/outcome horizon matures. If it fails, keep the cap at 30. If it passes, open a separate reviewed paid 30-vs-40 experiment design; do not change production directly.
+4. In parallel, continue accruing the R4H-3C forward study through its committed window. Any R4H authority change remains a separate reviewed handoff.
+5. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint.
+6. Railway production observation remains part of final operational validation; no direct Railway connector is available in the current chat environment.
 
 ## Things that must NOT drift
 
-- scan cadence remains 15 minutes unless explicitly changed in a capacity phase;
-- production deep-analysis cap remains 30 until a later reviewed capacity phase explicitly changes it;
+- scan cadence remains 15 minutes unless explicitly changed in a reviewed capacity experiment;
+- production deep-analysis cap remains 30 until a later reviewed capacity decision explicitly changes it;
 - Daily/Weekly/4H/1H jurisdiction remains intact;
 - real 4H remains `SHADOW_EVIDENCE_ONLY` until later reviewed evidence clears a narrowly scoped handoff;
 - score cannot override failed execution gates;
