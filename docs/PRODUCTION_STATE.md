@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering CAP-40D: `main` at `1ad68d46822328a8532fab8463f0f3c26a635233` (Phase CAP-40C — predeclared independent boundary study, on top of CAP-40B/CAP-40A, R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
+Last merged production baseline: `main` at `4194bcc3f3b71599ef6bc7266e09f5c28a7d5af2` (Phase CAP-40D — durable forward research archive, on top of CAP-40C/CAP-40B/CAP-40A, R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -18,8 +18,9 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - SFC-1/SFC-2A/SFC-2B and CFR-1/CFR-2 are production-green.
 - VELOCITY-1A/1B/1C/1D are production-green research infrastructure.
 - R4H-3A/3B/3C are production-green research infrastructure.
-- CAP-40A/CAP-40B/CAP-40C are production-green research infrastructure.
+- CAP-40A/CAP-40B/CAP-40C/CAP-40D are production-green research infrastructure.
 - Scan telemetry remains observational and isolated from alert history.
+- CAP-40D research archive remains observational and isolated from alert history, tiering, capital, routing and model admission.
 - Production ticker loader normalizes/deduplicates/validates symbols without fetching market data.
 
 ## Production model provider
@@ -119,7 +120,7 @@ Predeclared minimums:
 
 Point-effect and Wilson-bound requirements remain exactly as committed in the R4H-3C plan. Even a full pass is research-only and requires a separate narrow-authority handoff branch.
 
-**Retention dependency discovered after CAP-40C:** the bounded Phase-14V 9,000-trace ring cannot preserve a multi-week R4H-3C cohort at the current scan throughput. The forward study must therefore use CAP-40D durable research-archive evidence for full-window evaluation; the ring buffer alone is insufficient.
+**Retention dependency:** the bounded Phase-14V 9,000-trace ring cannot preserve a multi-week R4H-3C cohort at the current scan throughput. Full-window evaluation therefore depends on the merged CAP-40D durable research archive; the ring buffer alone is insufficient.
 
 Merge CI: **2938 passed, 4 skipped**.
 
@@ -200,7 +201,7 @@ A passing CAP-40C report yields only `PAID_EXPERIMENT_REVIEW_READY`. It cannot c
 
 Merge CI: **2982 passed, 4 skipped**.
 
-### CAP-40D — current branch phase / retention integrity
+### CAP-40D — merged / retention integrity
 
 The post-CAP-40C retention audit found that Phase-14V's 9,000-trace ring cannot preserve the full 2026-08-20 through 2026-09-30 CAP-40C/R4H-3C cohorts. At roughly 60 traces per normal scan and the current 15-minute cadence, the ring represents only about 150 full scans — roughly six trading sessions — before rollover.
 
@@ -222,14 +223,27 @@ Offline VELOCITY and CAP-40 dataset builders may read either a saved Phase-14V l
 
 Design: `docs/CAP40D_FORWARD_RESEARCH_ARCHIVE.md`.
 
+Merge PR: **#104**.
+
+Merge commit: `4194bcc3f3b71599ef6bc7266e09f5c28a7d5af2`.
+
+Merge CI: **3011 passed, 4 skipped**.
+
+## Immediate production checkpoint
+
+The code-side CAP-40D work is complete and merged. The next gate is operational, not strategic: prove that Railway preserves `.state/research_archive/` across a controlled restart/redeploy. Until that is verified, do not claim that the committed CAP-40C or R4H-3C cohorts are safely accruing for the full window.
+
+No scanner judgment change is authorized at this checkpoint. The universe remains 814, cadence remains 15 minutes, deep-analysis cap remains 30, setup-family logic remains unchanged, and real 4H remains shadow-only.
+
 ## Next production sequence
 
-1. CAP-40D: finish CI, merge the forward research archive, deploy it, and verify Railway preserves `.state/research_archive/` across restart/redeploy without touching alert history.
-2. Only after durable archive validation, treat the CAP-40C and R4H-3C forward cohorts as safely accruing through 2026-09-30. Do not stop early because interim results look favorable.
-3. After the last observation cohort's five-session labels can mature and the CAP-40C review floor is reached, build the CAP-40B dataset from the archive and run CAP-40C. If it fails, keep the cap at 30. If it passes, open a separate reviewed paid 30-vs-40 experiment design; do not change production directly.
-4. Run the R4H-3C independent forward report only after its committed window and label horizon mature. Any R4H authority change remains a separate reviewed handoff.
-5. Keep the production universe at 814 through the CAP-40C observation window. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint and after doing so will not contaminate the committed boundary study.
-6. Railway production observation remains part of final operational validation; repository state alone is not proof of runtime-volume durability.
+1. Deploy merged CAP-40D to Railway and verify `.state/research_archive/` is written during completed scans.
+2. Perform a controlled Railway restart/redeploy and verify the existing archive partitions survive byte-for-byte and new scans append to the same durable archive.
+3. Confirm alert history remains separate and unchanged by the research archive path.
+4. Only after durable archive validation, treat the CAP-40C and R4H-3C forward cohorts as safely accruing through 2026-09-30. Do not stop early because interim results look favorable.
+5. After the last observation cohort's five-session labels can mature and the CAP-40C review floor is reached, build the CAP-40B dataset from the archive and run CAP-40C. If it fails, keep the cap at 30. If it passes, open a separate reviewed paid 30-vs-40 experiment design; do not change production directly.
+6. Run the R4H-3C independent forward report only after its committed window and label horizon mature. Any R4H authority change remains a separate reviewed handoff.
+7. Keep the production universe at 814 through the CAP-40C observation window. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint and after doing so will not contaminate the committed boundary study.
 
 ## Things that must NOT drift
 
