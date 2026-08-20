@@ -245,9 +245,10 @@ def _project_mapping(value: Any, keys: tuple[str, ...], list_keys=()) -> dict | 
         if key in list_keys:
             out[key] = _list(value.get(key))
         else:
-            projected = _scalar(value.get(key))
-            if projected is not None or value.get(key) is None:
-                out[key] = projected
+            # A present but non-JSON-safe/non-finite value becomes explicit
+            # unknown (None) rather than disappearing. This preserves the fact
+            # that the source field was observed while remaining JSON-safe.
+            out[key] = _scalar(value.get(key))
     return out or None
 
 
