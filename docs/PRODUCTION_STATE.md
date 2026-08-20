@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline entering CAP-40A: `main` at `218014670def126f5c5ee972cee1508ca1cb2878` (Phase R4H-3C — forward independence, chart-native coverage and uncertainty design, on top of R4H-3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
+Last merged production baseline entering CAP-40B: `main` at `be53daace33cc4a5132a966df68f3b6cb9543518` (Phase CAP-40A — pure pre-model candidate-cap boundary observation contract, on top of R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -18,6 +18,7 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 - SFC-1/SFC-2A/SFC-2B and CFR-1/CFR-2 are production-green.
 - VELOCITY-1A/1B/1C/1D are production-green research infrastructure.
 - R4H-3A/3B/3C are production-green research infrastructure.
+- CAP-40A is production-green research infrastructure.
 - Scan telemetry remains observational and isolated from alert history.
 - Production ticker loader normalizes/deduplicates/validates symbols without fetching market data.
 
@@ -221,27 +222,53 @@ The next candidate ceiling is 40 only if measured evidence proves incremental op
 
 Phase 14V already records a free near-cut shadow population beyond the cap, but those rows are pre-model evidence only. They cannot be treated as reconstructed STARTER/SNIPE decisions.
 
-### CAP-40A — current branch phase
+### CAP-40A — merged
 
-CAP-40A creates a comparable **pre-model boundary observation** without adding any GPT-5.6 calls.
+CAP-40A defines the comparable pre-model boundary observation without adding any GPT-5.6 calls.
 
 Canonical bands at the current cap:
 
 - `BASELINE_EDGE` = ranks 21–30;
 - `SHADOW_INCREMENT` = ranks 31–40.
 
-The observation carries stable scan/ticker identity, rank/admission evidence, structural invalidation when already available, setup-family evidence, and VELOCITY feasibility. Missing geometry remains missing.
+The observation carries stable scan/ticker/time identity, rank/admission evidence, structural invalidation when already available, setup-family evidence and VELOCITY feasibility. Missing geometry remains missing.
 
 CAP-40A grants zero model, candidate-cap, tier, capital, routing or forecast authority. Production stays at 30.
 
-The phase is documented in `docs/CAP40A_BOUNDARY_OBSERVATION.md`.
+Merge CI: **2954 passed, 4 skipped**.
+
+### CAP-40B — current branch phase
+
+CAP-40B wires the CAP-40A observation into the existing isolated Phase-14V trace stream and future Daily outcome research.
+
+Retention law:
+
+- no twenty-row-per-scan trace expansion;
+- ranks 31–40 attach their boundary block to existing `near_cut` traces;
+- ranks 21–30 attach to existing analyzed/analysis-failure/rate-limit/tiering-failure traces;
+- ranks 41–60 keep normal near-cut telemetry but receive no CAP-40 boundary block;
+- Phase-14V schema remains `14V.2` because the field is additive/optional.
+
+Comparable evidence law:
+
+- CAP-40 block is built before GPT-5.6 analysis;
+- post-model final tier/capital is excluded from the boundary observation;
+- shadow ranks are never assigned a reconstructed model tier.
+
+Offline linkage:
+
+`capacity_boundary_dataset.py` reuses VELOCITY-1D chronology and three-barrier outcomes. It reports target/invalidation/time outcomes by boundary band while keeping `counterfactual_model_tier_supported = false`.
+
+A shadow `TARGET_FIRST` means the cutoff excluded a structurally valid pre-model opportunity candidate. It does **not** prove that the candidate would have earned STARTER or SNIPE after model analysis.
+
+CAP-40B is documented in `docs/CAP40B_TELEMETRY_OUTCOME_LINKAGE.md`.
 
 ## Next production sequence
 
-1. CAP-40A: complete and merge the pure boundary-observation contract with zero extra model calls and zero cap change.
-2. CAP-40B: wire bounded ranks 21–40 boundary observations into isolated research telemetry and future Daily outcome linkage; still no cap change and no extra GPT-5.6 calls.
-3. Use the resulting chronological boundary evidence to decide whether paying for a controlled 30-vs-40 deep-analysis capacity experiment is justified.
-4. Any later live cap experiment must measure incremental legitimate opportunity recall, full scan duration, provider rate limits/API usage and alert quality before production promotion.
+1. CAP-40B: complete and merge bounded telemetry wiring + offline outcome linkage with zero extra GPT-5.6 calls and no cap change.
+2. CAP-40C: predeclare the boundary evidence report/acceptance rules, including independent sample treatment and uncertainty around baseline-edge versus shadow-increment outcome differences.
+3. Use the mature CAP-40 boundary evidence to decide whether paying for a controlled 30-vs-40 deep-analysis experiment is justified.
+4. Any later live cap experiment must separately measure incremental legitimate opportunity recall, downstream GPT-5.6 decision quality, full scan duration, provider limits/API usage, precision and alert quality before production promotion.
 5. In parallel, allow the R4H-3C forward window to accrue through 2026-09-30 and allow the final cohort's five-session outcome horizon to mature. Do not stop early on favorable interim estimates.
 6. Run the independent R4H-3C report only after the planned window matures. Any authority change requires a separate reviewed handoff branch.
 7. Final requested universe expansion remains its own reviewed PR after the pre-universe checkpoint.
