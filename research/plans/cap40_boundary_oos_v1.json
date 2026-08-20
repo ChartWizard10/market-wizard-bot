@@ -1,0 +1,30 @@
+{
+  "name": "cap40-boundary-oos",
+  "version": "1",
+  "declared_before_observation_review": true,
+  "no_favorable_early_stop": true,
+  "sampling_unit": "FIRST_OBSERVATION_PER_TICKER_SESSION",
+  "session_timezone": "America/New_York",
+  "evaluation_start_date": "2026-08-20",
+  "evaluation_end_date": "2026-09-30",
+  "final_review_not_before_date": "2026-10-08",
+  "confidence_level": 0.95,
+  "min_evaluable_total": 200,
+  "min_baseline_evaluable": 90,
+  "min_shadow_evaluable": 90,
+  "max_ambiguous_or_censored_pct": 15,
+  "max_invalid_pct": 10,
+  "max_shadow_unknown_family_pct": 20,
+  "min_shadow_target_first_count": 30,
+  "min_shadow_target_rate_pct": 35,
+  "min_shadow_target_lcb_pct": 25,
+  "min_shadow_minus_baseline_target_diff_lcb_pct": -20,
+  "min_shadow_feasibility_supported_or_partial_pct": 60,
+  "scope": "CAP_30_VS_40_BOUNDARY_RESEARCH_ONLY",
+  "authority": "NONE",
+  "notes": [
+    "A passing study can only justify review of a separately controlled paid 30-vs-40 deep-analysis experiment.",
+    "It cannot reconstruct GPT-5.6 tiers for shadow candidates and cannot change the production cap.",
+    "Final review waits until after the end-date cohort has enough time for five completed future sessions to mature."
+  ]
+}
