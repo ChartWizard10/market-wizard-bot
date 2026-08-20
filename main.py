@@ -3,8 +3,9 @@
 Starts Discord, registers commands, and launches the auto-scan loop.
 Secrets are read from environment variables only.
 
-Phase AI-1 production provider: OpenAI GPT-5.6. Historical Claude-named
-scheduler/telemetry symbols remain temporarily as compatibility naming only.
+Production deep-analysis provider: Anthropic Claude (Opus 5). The scheduler
+and telemetry Claude-named symbols are accurate — there is no adapter and no
+secondary provider.
 """
 
 import asyncio
@@ -24,6 +25,29 @@ def load_config(path: str = "config/doctrine_config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
+CREDENTIAL_SOURCE_MISSING = "MISSING"
+
+
+def resolve_anthropic_api_key() -> tuple[str | None, str]:
+    """Return (key, source) for the Anthropic credential.
+
+        1. ANTHROPIC_API_KEY — the standard explicit name
+        2. ANTHROPIC_KEY     — compatibility alias for the historical Railway
+                               secret, so restoring the provider does not force
+                               an unnecessary secret rotation
+
+    Blank or whitespace-only values count as absent. No other provider's
+    credential is a model credential here — Anthropic is the sole provider and
+    there is no cross-provider fallback. The key itself is never logged or
+    returned in any diagnostic; only its source name is.
+    """
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_KEY"):
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            return value, name
+    return None, CREDENTIAL_SOURCE_MISSING
+
+
 def validate_startup(config: dict) -> dict:
     """Validate runtime environment without creating network clients."""
     errors: list[str] = []
@@ -32,12 +56,11 @@ def validate_startup(config: dict) -> dict:
     if not os.environ.get("DISCORD_TOKEN"):
         errors.append("DISCORD_TOKEN is not set — bot cannot authenticate with Discord")
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        # The legacy name appears only to make the historical startup regression
-        # explicit: ANTHROPIC_KEY is NOT a substitute production credential.
+    key, _source = resolve_anthropic_api_key()
+    if not key:
         warnings.append(
-            "OPENAI_API_KEY is not set — !scan and !analyze will fail gracefully; "
-            "legacy ANTHROPIC_KEY is not used for production authentication"
+            "Anthropic API key is not set (ANTHROPIC_API_KEY, or ANTHROPIC_KEY) — "
+            "!scan and !analyze model analysis will fail gracefully"
         )
 
     return {"ok": len(errors) == 0, "errors": errors, "warnings": warnings}
@@ -58,7 +81,7 @@ def format_scan_summary(summary: dict) -> str:
         f"Tickers: {summary.get('total_tickers_input', 0)}"
         f" | Data failures: {summary.get('total_data_failures', 0)}\n"
         f"Prefilter passed: {summary.get('total_prefilter_passed', 0)}"
-        f" | GPT-5.6 candidates: {summary.get('total_claude_candidates', 0)}\n"
+        f" | Claude candidates: {summary.get('total_claude_candidates', 0)}\n"
         f"Tiers — SNIPE: {tier.get('SNIPE_IT', 0)}"
         f"  STARTER: {tier.get('STARTER', 0)}"
         f"  NEAR: {tier.get('NEAR_ENTRY', 0)}"
@@ -71,22 +94,31 @@ def format_scan_summary(summary: dict) -> str:
 
 
 def build_bot(config: dict) -> tuple:
-    """Build Discord plus the OpenAI-backed scheduler compatibility client."""
-    openai_key = os.environ.get("OPENAI_API_KEY")
+    """Build Discord plus the native Anthropic client.
+
+    The scheduler calls `client.messages.create(...)` through
+    `src.claude_client`, which is exactly the Anthropic Messages contract — so
+    the real client is passed straight through with no adapter in between.
+    """
+    anthropic_key, credential_source = resolve_anthropic_api_key()
     model_client = None
-    if openai_key:
+    if anthropic_key:
         try:
-            from openai import AsyncOpenAI
-            from src.openai_scheduler_compat import OpenAISchedulerCompatClient
-            model_client = OpenAISchedulerCompatClient(
-                AsyncOpenAI(api_key=openai_key), config
+            from anthropic import AsyncAnthropic
+            model_client = AsyncAnthropic(api_key=anthropic_key)
+            from src.claude_client import resolve_claude_model
+            selected_model, model_source = resolve_claude_model(config)
+            log.info(
+                "CLAUDE_RUNTIME_READY: provider=anthropic credential_source=%s "
+                "model=%s model_source=%s",
+                credential_source, selected_model, model_source,
             )
         except Exception as exc:
-            log.error("Could not create OpenAI GPT-5.6 client: %s", exc)
+            log.error("Could not create Anthropic client: %s", exc)
 
     system_prompt = None
     try:
-        from src.model_client import load_system_prompt
+        from src.claude_client import load_system_prompt
         system_prompt = load_system_prompt("prompts/market_wizard_system.md")
     except Exception as exc:
         log.error("Could not load system prompt: %s", exc)
@@ -218,8 +250,8 @@ def register_commands(
     async def scan_cmd(ctx) -> None:
         if model_client is None or system_prompt is None:
             await ctx.send(
-                "ERROR: GPT-5.6 not configured"
-                " (OPENAI_API_KEY missing or system prompt not found)"
+                "ERROR: Claude model not configured"
+                " (Anthropic API key missing or system prompt not found)"
             )
             return
         await ctx.send("Starting manual scan…")
@@ -242,8 +274,8 @@ def register_commands(
         ticker = ticker.upper().strip()
         if model_client is None or system_prompt is None:
             await ctx.send(
-                "ERROR: GPT-5.6 not configured"
-                " (OPENAI_API_KEY missing or system prompt not found)"
+                "ERROR: Claude model not configured"
+                " (Anthropic API key missing or system prompt not found)"
             )
             return
         await ctx.send(f"Analyzing {ticker}…")
@@ -274,11 +306,11 @@ def register_commands(
     async def status_cmd(ctx) -> None:
         try:
             from src.market_data import load_tickers
-            from src.model_client import resolve_model
+            from src.claude_client import resolve_claude_model
             ticker_file = config.get("scan", {}).get("ticker_file", "config/tickers.txt")
             count = load_tickers(ticker_file)["validation_summary"]["valid_ticker_count"]
             scan_cfg = config.get("scan", {})
-            selected_model, model_source = resolve_model(config)
+            selected_model, model_source = resolve_claude_model(config)
             msg = (
                 f"**Market Wizard Bot Status**\n"
                 f"Tickers loaded: {count}\n"

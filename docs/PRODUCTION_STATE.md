@@ -1,6 +1,6 @@
 # Current Production State
 
-Last merged production baseline: `main` at `bccd728b33adf701f30a49691ff9cc21e0ad1901` (Phase CAP-40E — operator archive health probe, on top of CAP-40D/CAP-40C/CAP-40B/CAP-40A, R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware GPT-5.6 admission, and the deterministic execution stack).
+Last merged production baseline: `main` at `bccd728b33adf701f30a49691ff9cc21e0ad1901` (Phase CAP-40E — operator archive health probe, on top of CAP-40D/CAP-40C/CAP-40B/CAP-40A, R4H-3C/3B/3A, VELOCITY-1D/1C, R4H-2 HOLD SHADOW, CFR-2 family resolution, SFC-2B family-aware Claude admission, and the deterministic execution stack).
 
 Update this file whenever architecture, authority, runtime contracts, universe, or next-phase priority changes.
 
@@ -26,9 +26,17 @@ Update this file whenever architecture, authority, runtime contracts, universe, 
 
 ## Production model provider
 
-Production deep analysis is **OpenAI GPT-5.6** through the Responses API with Structured Outputs and `store=False`.
+Production deep analysis is **Anthropic Claude Opus 5** through the Anthropic Messages API, called natively by `src/claude_client.py` with no provider adapter.
 
-`OPENAI_API_KEY` authenticates the client and `OPENAI_MODEL` may override the configured model. GPT-5.6 remains analyst/classifier only; deterministic tiering, ladder, seals, capital and routing remain sovereign.
+`ANTHROPIC_API_KEY` (or the legacy `ANTHROPIC_KEY` alias) authenticates the client and `ANTHROPIC_MODEL` may override the configured model; the repository fallback is `claude-opus-5`. Claude remains analyst/classifier only; deterministic tiering, ladder, seals, capital and routing remain sovereign.
+
+Provider history: an earlier phase migrated the model boundary to another
+provider and Phase AI-2R superseded it. Predeclared research records
+(CAP-40A-E, R4H-3A/B/C, VELOCITY-1A/1B/1D, SFC/CFR study contracts) were
+written during that period and still name the previous model in prose. Those
+documents are historical audit records — their sampling frames, windows and
+outcome definitions are deliberately left untouched. The current production
+provider and model are the ones stated above.
 
 Historical internal `claude_*` names remain compatibility debt only and do not indicate the production provider.
 
@@ -135,7 +143,7 @@ Merge CI: **2938 passed, 4 skipped**.
 
 ## Candidate-cap decision: 30 vs 40
 
-Current production cap remains **30 deep-analysis candidates per scan**. Moving to 40 would increase the maximum GPT-5.6 call count by 33.3%, so the change must earn its cost with measured opportunity recall and operational evidence.
+Current production cap remains **30 deep-analysis candidates per scan**. Moving to 40 would increase the maximum Claude call count by 33.3%, so the change must earn its cost with measured opportunity recall and operational evidence.
 
 ### CAP-40A — merged
 
@@ -144,7 +152,7 @@ Pure pre-model boundary observation for:
 - `BASELINE_EDGE` = ranks 21–30;
 - `SHADOW_INCREMENT` = ranks 31–40.
 
-The observation carries stable scan/ticker/time identity, rank/admission evidence, structural invalidation when already available, setup-family evidence and VELOCITY feasibility. Missing geometry remains missing. No extra GPT-5.6 calls and no cap change.
+The observation carries stable scan/ticker/time identity, rank/admission evidence, structural invalidation when already available, setup-family evidence and VELOCITY feasibility. Missing geometry remains missing. No extra Claude calls and no cap change.
 
 Merge CI: **2954 passed, 4 skipped**.
 
@@ -197,7 +205,7 @@ Predeclared shadow-opportunity requirements:
 - conservative lower bound for `(shadow target rate - baseline target rate)` >= -20 percentage points;
 - >=60% of evaluable shadow observations classified VELOCITY `SUPPORTED` or `PARTIAL_SUPPORT`.
 
-A passing CAP-40C report yields only `PAID_EXPERIMENT_REVIEW_READY`. It cannot change the production cap. A separately reviewed paid 30-vs-40 experiment must still measure downstream GPT-5.6 decision quality, scan duration, provider behavior, API usage/cost, precision, recall and alert quality.
+A passing CAP-40C report yields only `PAID_EXPERIMENT_REVIEW_READY`. It cannot change the production cap. A separately reviewed paid 30-vs-40 experiment must still measure downstream Claude decision quality, scan duration, provider behavior, API usage/cost, precision, recall and alert quality.
 
 Merge CI: **2982 passed, 4 skipped**.
 

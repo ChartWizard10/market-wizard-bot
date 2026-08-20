@@ -1,4 +1,4 @@
-"""AI-1 guard: provider migration cannot silently become CAP-40."""
+"""Provider guard: a provider change can never silently become CAP-40."""
 
 from pathlib import Path
 

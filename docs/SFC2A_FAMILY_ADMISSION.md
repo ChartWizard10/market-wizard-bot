@@ -30,7 +30,7 @@ The legacy generic prefilter is strongest at already-visible break/reclaim + FVG
 - a gap-fill reversal where the gap boundary/reclaim supplies the real geometry;
 - a family-specific reclaim with valid invalidation/target geometry that the generic estimator cannot express cleanly.
 
-SFC-2A allows deterministic family evidence to repair those **model-admission** blind spots. GPT-5.6 may then inspect the candidate, while deterministic downstream gates remain sovereign.
+SFC-2A allows deterministic family evidence to repair those **model-admission** blind spots. Claude may then inspect the candidate, while deterministic downstream gates remain sovereign.
 
 ## Never-rescue law
 
@@ -65,7 +65,7 @@ No missing level may be invented.
 This preserves the distinction between:
 
 - **NEAR / developing family evidence**;
-- **family-ready candidate worth GPT-5.6 deep analysis**;
+- **family-ready candidate worth Claude deep analysis**;
 - **capital-ready execution**, which remains downstream.
 
 ## Ranking law
@@ -90,7 +90,7 @@ The next subphase may wire this object into `prefilter.py` only if:
 4. rescued vetoes are explicitly recorded rather than deleted silently;
 5. `eligible_for_model` can be added while historical compatibility fields remain until the provider-neutral naming cleanup;
 6. model candidate sorting can use `admission_rank_score` while preserving the 30-candidate cap;
-7. GPT-5.6 receives the normalized family evidence in its prompt;
+7. Claude receives the normalized family evidence in its prompt;
 8. final tiering/ladder/seal remain unchanged and sovereign;
 9. real 4H remains shadow/evidence-only;
 10. universe, cadence, R:R floors, fragile-risk floor, cooldown, routing and capital contracts do not change.

@@ -6,7 +6,7 @@ CFR-1 established a pure, tested contract for resolving simultaneous detections 
 
 Production evidence flow becomes:
 
-`completed Daily evidence -> raw SFC-1 compiler -> CFR-1 resolver -> SFC-2B admission / GPT-5.6 context -> existing deterministic execution stack`
+`completed Daily evidence -> raw SFC-1 compiler -> CFR-1 resolver -> SFC-2B admission / Claude context -> existing deterministic execution stack`
 
 The scanner remains governed by the project sequence:
 
@@ -33,7 +33,7 @@ The production facade preserves CFR-1 doctrine:
 - shared/common failures remain observable for sovereign downstream gates;
 - no resolver field assigns a tier, route, or position size.
 
-## GPT-5.6 context bridge
+## Claude context bridge
 
 The existing GPT prompt already serializes the resolved primary family's `metrics` as structured JSON. CFR-2 therefore adds a namespaced `cross_family_resolution` object to a deep-copied primary metrics object.
 
@@ -82,7 +82,7 @@ CFR-2 must prove under the permanent Python 3.13 production gate that:
 1. `indicators` is using the production runtime facade;
 2. execution-proof-first resolution replaces stale raw primary selection;
 3. raw SFC evidence is not mutated;
-4. cross-family context reaches GPT-5.6 through the existing metrics payload;
+4. cross-family context reaches Claude through the existing metrics payload;
 5. SFC-2B admission sees the resolved primary;
 6. no-family cases remain no-family cases;
 7. all legacy regressions remain green.

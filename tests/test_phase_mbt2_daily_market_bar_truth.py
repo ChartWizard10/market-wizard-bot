@@ -766,11 +766,15 @@ def test_44_no_new_dependency():
                 "exchange_calendars", "exchange-calendars", "holidays",
                 "trading-calendars"):
         assert pkg not in reqs
-    # requirements.txt is byte-for-byte untouched by this phase.
-    changed = subprocess.run(
-        ["git", "diff", "--name-only", "origin/main", "--", "requirements.txt"],
-        capture_output=True, text=True).stdout.strip()
-    assert changed == ""
+    # No dependency was ADDED. (A later phase may legitimately REMOVE one —
+    # AI-2R dropped the OpenAI SDK — so byte-identity is not the claim.)
+    added = subprocess.run(
+        ["git", "diff", "-U0", "origin/main", "--", "requirements.txt"],
+        capture_output=True, text=True).stdout.splitlines()
+    added_pkgs = [ln for ln in added
+                  if ln.startswith("+") and not ln.startswith("+++")
+                  and ln[1:].strip() and not ln[1:].strip().startswith("#")]
+    assert added_pkgs == [], added_pkgs
 
 
 def test_45_mbt1_one_hour_contract_untouched():

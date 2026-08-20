@@ -3,7 +3,7 @@
 Runtime platform: Railway.
 Alert surface: Discord.
 Durable source of truth: GitHub repository.
-Production deep-analysis provider: OpenAI GPT-5.6 after AI-1 merge/cutover.
+Production deep-analysis provider: Anthropic Claude Opus 5 (restored by Phase AI-2R).
 
 This runbook records repository-verified behavior. Railway project-level settings that are not committed here must be checked in Railway rather than guessed.
 
@@ -17,7 +17,7 @@ Local equivalent:
 python main.py
 ```
 
-`main.py` loads `config/doctrine_config.yaml`, validates environment, builds the Discord/OpenAI clients, loads `prompts/market_wizard_system.md`, registers commands, and starts the bot.
+`main.py` loads `config/doctrine_config.yaml`, validates environment, builds the Discord and Anthropic clients, loads `prompts/market_wizard_system.md`, registers commands, and starts the bot.
 
 ## Required/recognized environment
 
@@ -25,19 +25,19 @@ Required for bot authentication:
 
 - `DISCORD_TOKEN`
 
-Required for GPT-5.6-backed `!scan` / `!analyze` and scheduled deep analysis:
+Required for Claude-backed `!scan` / `!analyze` and scheduled deep analysis:
 
-- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY` (the legacy `ANTHROPIC_KEY` name is also accepted)
 
 Optional runtime model override:
 
-- `OPENAI_MODEL`
+- `ANTHROPIC_MODEL`
 
 Canonical model resolution order:
 
-1. non-empty `OPENAI_MODEL` environment value;
+1. non-empty `ANTHROPIC_MODEL` environment value;
 2. `config.model.name`;
-3. code fallback `gpt-5.6`.
+3. code fallback `claude-opus-5`.
 
 Discord channel environment overrides recognized by `src/discord_alerts.py`:
 
@@ -49,20 +49,20 @@ If an override is absent, the corresponding channel ID in `config/doctrine_confi
 
 Never commit live secrets.
 
-## AI-1 compatibility note
+## Provider boundary
 
-The scheduler and telemetry still expose historical `claude_*` function/field names during the provider cutover. Production `main.py` does not instantiate Anthropic; it constructs `AsyncOpenAI`, and `src/openai_scheduler_compat.py` translates the hardened scheduler call contract to the OpenAI Responses API with strict JSON Schema output.
+Production `main.py` constructs `anthropic.AsyncAnthropic` and passes it straight to the scheduler, which calls `src/claude_client.py`. The Anthropic Messages contract (`client.messages.create`) is what the boundary already expects, so there is no adapter. The `claude_*` scheduler/telemetry names are accurate. There is no cross-provider fallback: if Anthropic is unavailable the scanner fails closed.
 
-This compatibility layer is naming/contract debt only. It exists to avoid combining a provider migration with a broad scheduler/telemetry schema migration. Remove/rename it only in a separately reviewed provider-neutral nomenclature phase.
+The `claude_*` naming is not debt — it names the real provider. Renaming it would be a needless scheduler/telemetry schema migration.
 
 ## Startup expectations
 
 `main.validate_startup` treats:
 
 - missing `DISCORD_TOKEN` as a hard startup error;
-- missing `OPENAI_API_KEY` as a warning, with model-backed commands expected to fail gracefully.
+- a missing Anthropic API key as a warning, with model-backed commands expected to fail gracefully.
 
-The system prompt must be readable from `prompts/market_wizard_system.md` for GPT-5.6 analysis.
+The system prompt must be readable from `prompts/market_wizard_system.md` for Claude analysis.
 
 ## Scheduled scanning
 
@@ -81,7 +81,7 @@ The scheduler has an overlap lock. A new scan/manual analyze does not start whil
 
 Current deep-analysis cap: **30 candidates per scan**.
 
-40 is the preferred next ceiling only if CAP-40 proves a benefit after GPT-5.6 migration and setup-family admission integration. Ranks 31-60 are already captured by near-cut telemetry, so the scanner can measure whether ranks 31-40 contain valid missed opportunities before paying for ten extra model calls.
+40 is the preferred next ceiling only if CAP-40 proves a benefit after setup-family admission integration. Ranks 31-60 are already captured by near-cut telemetry, so the scanner can measure whether ranks 31-40 contain valid missed opportunities before paying for ten extra model calls.
 
 A cap increase must satisfy:
 
@@ -206,26 +206,24 @@ Before merging a strategy/runtime change:
 12. for CAP-40E changes, the probe remains read-only/operator-gated and cannot certify durability from a single snapshot;
 13. for any forward-study change, verify the predeclared sampling frame/window was not silently altered.
 
-## AI-1 Railway cutover
+## Railway cutover
 
-After the AI-1 PR is green and merged:
+After the provider-restoration PR is green and merged:
 
-1. add/verify `OPENAI_API_KEY` in Railway;
-2. set `OPENAI_MODEL=gpt-5.6` or leave it absent to use the repo default;
+1. add/verify `ANTHROPIC_API_KEY` in Railway (or keep the existing `ANTHROPIC_KEY`);
+2. set `ANTHROPIC_MODEL=claude-opus-5` or leave it absent to use the repo default;
 3. redeploy/restart;
 4. confirm service reaches `Bot ready` / `Starting Market Wizard Bot`;
-5. run `!status` and confirm model reports `gpt-5.6`, expected ticker count and 15-minute cadence;
+5. run `!status` and confirm model reports `claude-opus-5`, expected ticker count and 15-minute cadence;
 6. run one controlled `!analyze` and confirm a strict signal reaches deterministic tiering;
 7. verify model API/rate failure is treated as a MODEL failure, not as a bearish/WAIT market judgment;
-8. during market hours, verify one scan reaches data -> prefilter -> GPT-5.6 -> final tier -> dedup -> Discord/state;
+8. during market hours, verify one scan reaches data -> prefilter -> Claude -> final tier -> dedup -> Discord/state;
 9. confirm telemetry failure, if any, is isolated and does not stop alert state;
-10. after successful cutover, remove obsolete Railway Anthropic secrets/overrides so they cannot confuse operations.
+10. after a successful Claude deploy, remove the obsolete `OPENAI_API_KEY` and `OPENAI_MODEL` Railway variables so they cannot confuse operations.
 
 ## Data-retention contract
 
-AI-1 sends Responses API requests with `store=False`. Do not remove that setting casually; changing model-response retention is an explicit data-control change.
-
-CAP-40D retention concerns only locally generated compact research evidence. It does not change OpenAI response retention or store model response bodies.
+CAP-40D retention concerns only locally generated compact research evidence. It does not change provider response retention or store model response bodies.
 
 CAP-40E reads only bounded metadata/anchors from that local archive and adds no new stored research payload.
 
@@ -242,7 +240,7 @@ CAP-40E can be rolled back independently because it is a read-only operator surf
 Keep these distinct:
 
 - DATA: provider empty/error/stale/malformed bars;
-- MODEL: OpenAI API/schema/rate-limit failure;
+- MODEL: Anthropic API/schema/rate-limit failure;
 - JUDGMENT: deterministic gate/logic failure;
 - DELIVERY: Discord routing/send failure;
 - STATE: alert-history read/write failure;

@@ -39,7 +39,7 @@ Read these before changing strategy or universe:
 python main.py
 ```
 
-`main.py` loads `config/doctrine_config.yaml`, validates runtime environment, builds the Discord/OpenAI clients, loads `prompts/market_wizard_system.md`, registers operator commands, and starts the autoscan loop.
+`main.py` loads `config/doctrine_config.yaml`, validates runtime environment, builds the Discord and Anthropic clients, loads `prompts/market_wizard_system.md`, registers operator commands, and starts the autoscan loop.
 
 ## Current high-level pipeline
 
@@ -49,7 +49,7 @@ config/tickers.txt
   -> structure-first indicators
   -> deterministic setup-family evidence
   -> algorithmic prefilter + hard vetoes + ranking
-  -> configured GPT-5.6 deep-analysis candidate set
+  -> configured Claude deep-analysis candidate set
   -> deterministic base tiering
   -> shared post-tiering chart judgment
        trade location
@@ -71,17 +71,17 @@ config/tickers.txt
 
 ## Model boundary
 
-Production deep analysis uses **OpenAI GPT-5.6**.
+Production deep analysis uses **Anthropic Claude Opus 5**.
 
-- default model: `gpt-5.6`;
-- runtime override: `OPENAI_MODEL`;
-- API: OpenAI Responses API;
+- production model: `claude-opus-5`;
+- runtime override: `ANTHROPIC_MODEL`;
+- API: Anthropic Messages API (`client.messages.create`), called natively with no adapter;
 - output: strict JSON Schema / Structured Outputs;
 - API response storage: disabled (`store=False`).
 
-GPT-5.6 is the analyst/classifier. Deterministic tiering, ladder, seal, invalidation/path law, capital authorization and Discord routing remain sovereign.
+Claude Opus 5 is the analyst/classifier. Deterministic tiering, ladder, seal, invalidation/path law, capital authorization and Discord routing remain sovereign.
 
-AI-1 deliberately retains some historical `claude_*` internal field/function names so provider migration does not simultaneously become a scheduler/telemetry schema migration. Those names are compatibility debt, not the production provider.
+The `claude_*` scheduler/telemetry field and function names are accurate: Anthropic Claude is the production provider. Renaming them would be a needless telemetry schema migration.
 
 ## External verdicts
 
@@ -112,7 +112,7 @@ From `config/doctrine_config.yaml`:
 - Daily lookback: 18 months;
 - Daily minimum bars: 120;
 - prefilter minimum score: 55;
-- deep-analysis candidate cap: **30 per scan** during AI-1;
+- deep-analysis candidate cap: **30 per scan**;
 - SNIPE_IT score floor: 85;
 - STARTER score floor: 75;
 - NEAR_ENTRY score floor: 60;
@@ -127,7 +127,7 @@ These are strategy/runtime contracts. A ticker-universe update must not silently
 
 40 is the preferred next ceiling only if measured CAP-40 validation proves it improves recall without harming cadence/cost.
 
-The scanner already observes ranks 31-60 through near-cut telemetry without additional model calls. After GPT-5.6 migration and setup-family admission integration, ranks 31-40 will be replayed/inspected for legitimate missed STARTER/SNIPE opportunities. If incremental recall is real and the scan remains comfortably inside the 15-minute budget, the cap can move to 40 in its own reviewed phase.
+The scanner already observes ranks 31-60 through near-cut telemetry without additional model calls. After setup-family admission integration, ranks 31-40 will be replayed/inspected for legitimate missed STARTER/SNIPE opportunities. If incremental recall is real and the scan remains comfortably inside the 15-minute budget, the cap can move to 40 in its own reviewed phase.
 
 Do not use a larger cap to compensate for a weak prefilter.
 
@@ -146,11 +146,11 @@ Universe changes follow [docs/UNIVERSE_MANAGEMENT.md](docs/UNIVERSE_MANAGEMENT.m
 Required:
 
 - `DISCORD_TOKEN`
-- `OPENAI_API_KEY` for GPT-5.6-backed scans/analysis
+- `ANTHROPIC_API_KEY` (or the legacy `ANTHROPIC_KEY` alias) for Claude-backed scans/analysis
 
 Optional model override:
 
-- `OPENAI_MODEL`
+- `ANTHROPIC_MODEL`
 
 Optional Discord channel overrides:
 
@@ -177,7 +177,7 @@ Manual `!analyze` bypasses universe admission/cooldown for inspection only; it u
 
 - Real 4H is currently shadow/evidence-only; the Phase-14F operational proxy remains production-authoritative until an explicit R4H-2 promotion is validated.
 - Higher-timeframe context is evidence-only under the current configuration.
-- GPT-5.6 is a classifier/analyst, not sovereign capital authority.
+- Claude Opus 5 is a classifier/analyst, not sovereign capital authority.
 - Telemetry is observational only.
 - WAIT never posts.
 - Score cannot rescue failed hard gates.

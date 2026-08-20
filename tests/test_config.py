@@ -11,15 +11,16 @@ def _load() -> dict:
 def test_config_loads():
     cfg = _load()
     assert isinstance(cfg, dict)
-    for key in ("scan", "prefilter", "tiers", "discord", "model", "state"):
+    for key in ("scan", "prefilter", "tiers", "discord", "claude", "state"):
         assert key in cfg
 
 
-def test_production_model_is_openai_gpt56():
+def test_production_model_is_anthropic_claude_opus_5():
+    """AI-2R: Anthropic is the sole production provider; Opus 5 is the model."""
     cfg = _load()
-    assert cfg["model"]["provider"] == "openai"
-    assert cfg["model"]["name"] == "gpt-5.6"
-    assert cfg["model"]["reasoning_effort"] == "medium"
+    assert cfg["claude"]["model"] == "claude-opus-5"
+    assert cfg["claude"]["max_tokens"] == 1200
+    assert "model" not in cfg          # the OpenAI provider block is gone
 
 
 def test_candidate_cap_remains_30_during_ai1():

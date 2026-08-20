@@ -8,7 +8,7 @@ This document describes the current production control flow. It is descriptive o
 
 - loads `config/doctrine_config.yaml`;
 - validates required runtime environment;
-- builds the Discord bot and Anthropic client;
+- builds the Discord bot and the native Anthropic client (`anthropic.AsyncAnthropic`);
 - loads `prompts/market_wizard_system.md`;
 - registers operator commands;
 - launches the 15-minute autoscan loop.
@@ -73,6 +73,16 @@ Owns broad-universe algorithmic score, pre-Claude vetoes, ranking, and candidate
 `src/claude_client.py` + `prompts/market_wizard_system.md`
 
 Own structured prompt payload, model routing, pacing/rate governance, strict JSON validation, and initial model classification. The model cannot bypass deterministic execution law.
+
+Provider: **Anthropic**. `main.py` constructs `anthropic.AsyncAnthropic` and the
+scheduler passes it straight through to `claude_call`, which calls
+`client.messages.create(...)` natively — the Anthropic Messages contract is what
+this boundary already expects, so there is no adapter and no second provider. If
+Anthropic is unavailable the scanner fails closed.
+
+Production model: **`claude-opus-5`**. Routing precedence is `ANTHROPIC_MODEL`
+-> `config.claude.model` -> `DEFAULT_CLAUDE_MODEL`. An emergency model rollback
+stays within Anthropic; it changes the model, never the provider.
 
 ### Deterministic base tier
 

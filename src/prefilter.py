@@ -1,17 +1,17 @@
-"""Algorithmic prefilter scorer and GPT-5.6 candidate admission layer.
+"""Algorithmic prefilter scorer and Claude candidate admission layer.
 
 Scans the full ticker universe using structure-first features, scores the legacy
 0-100 prefilter, applies common vetoes, arbitrates deterministic setup-family
 evidence, ranks candidates, and caps the deep-analysis list.
 
 This is NOT the final trade grader. It does NOT call the model and it does NOT
-assign trading tiers. SFC-2B may admit a candidate for GPT-5.6 inspection when
+assign trading tiers. SFC-2B may admit a candidate for Claude inspection when
 a normalized setup family repairs a generic prefilter blind spot, but final
 tiering, ladder, seal, risk and capital authority remain downstream.
 
 Historical ``claude_*`` result keys are retained as compatibility aliases while
 provider-neutral nomenclature is migrated separately. Production provider truth
-is OpenAI GPT-5.6.
+is Anthropic Claude.
 
 No rsi, macd, bollinger_bands, or stochastic. Ever.
 """
@@ -509,7 +509,7 @@ def prefilter(enriched_list: list, config: dict) -> dict:
     }
 
     log.info(
-        "Prefilter complete: %d input -> %d eligible -> %d GPT-5.6 candidates (family_admitted=%d)",
+        "Prefilter complete: %d input -> %d eligible -> %d Claude candidates (family_admitted=%d)",
         len(enriched_list), len(eligible), len(candidates), family_admitted,
     )
 

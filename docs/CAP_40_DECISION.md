@@ -10,11 +10,11 @@ Proposed next cap: **40**.
 
 Forty is the preferred next ceiling if it produces measurable incremental opportunity recall without compromising the 15-minute scan budget, API budget, or signal precision.
 
-Moving 30 -> 40 increases maximum model calls by 33.3%. That is large enough to require evidence but small enough to be technically plausible with GPT-5.6.
+Moving 30 -> 40 increases maximum model calls by 33.3%. That is large enough to require evidence but small enough to be technically plausible.
 
-## Why not change it inside AI-1
+## Why not change it inside a provider phase
 
-AI-1 is a provider-truth migration. Combining a capacity change with it would make any downstream difference impossible to attribute cleanly.
+A provider phase changes the model boundary only. Combining a capacity change with it would make any downstream difference impossible to attribute cleanly.
 
 The setup-family compiler also needs to influence candidate admission before the cap study. Otherwise ten extra model calls can merely process ten more candidates ranked by the legacy admission bias.
 
@@ -24,7 +24,7 @@ Phase 14V already records near-cut ranks 31-60 without extra deep-analysis calls
 
 ## CAP-40 acceptance test
 
-After GPT-5.6 migration and setup-family admission integration:
+After setup-family admission integration:
 
 1. replay/inspect ranks 31-40 across a meaningful chronological sample;
 2. measure how often they later qualify as legitimate NEAR_ENTRY, STARTER or SNIPE_IT under the same doctrine;

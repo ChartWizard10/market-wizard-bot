@@ -1,4 +1,4 @@
-# SFC-2B — Family-Aware GPT-5.6 Candidate Admission Wiring
+# SFC-2B — Family-Aware Claude Candidate Admission Wiring
 
 ## Objective
 
@@ -9,7 +9,7 @@ The result is a two-lane admission system:
 1. **Legacy generic lane** — existing structure/FVG/OB/retest/path prefilter.
 2. **Deterministic family lane** — SFC-1 evidence for the four locked bullish setup families.
 
-Both lanes feed the same GPT-5.6 analyst boundary and then the same deterministic tiering/ladder/seal stack.
+Both lanes feed the same Claude analyst boundary and then the same deterministic tiering/ladder/seal stack.
 
 ## Family evidence source
 
@@ -35,7 +35,7 @@ The following ledgers are deliberately distinct:
 - `veto_flags` — the **active downstream gate ledger** after arbitration;
 - `effective_admission_vetoes` — explicit alias of the active ledger.
 
-This distinction is required. If a generic blind spot is legitimately repaired for family admission but remains in the active `veto_flags`, deterministic tiering would force the candidate to WAIT before it could evaluate the fresh GPT-5.6 execution proof. Conversely, deleting the original evidence would destroy auditability.
+This distinction is required. If a generic blind spot is legitimately repaired for family admission but remains in the active `veto_flags`, deterministic tiering would force the candidate to WAIT before it could evaluate the fresh Claude execution proof. Conversely, deleting the original evidence would destroy auditability.
 
 A family rescue therefore removes only the *active status* of the explicitly superseded generic blocker. It does not erase history and it does not grant a tier.
 
@@ -43,7 +43,7 @@ A family rescue therefore removes only the *active status* of the explicitly sup
 
 Family admission cannot directly create `SNIPE_IT`, `STARTER`, `NEAR_ENTRY`, a Discord route, or capital action.
 
-After admission, GPT-5.6 must still produce a coherent signal and deterministic tiering must still independently enforce the existing execution laws, including:
+After admission, Claude must still produce a coherent signal and deterministic tiering must still independently enforce the existing execution laws, including:
 
 - structure event in the model signal;
 - retest and hold requirements for capital tiers;
@@ -75,7 +75,7 @@ Candidate ranking uses:
 
 The family rank ceiling remains 95 under current SFC-2A config. It is an admission priority, not a trade grade or probability.
 
-## GPT-5.6 context
+## Claude context
 
 The production prompt now includes normalized family evidence when a primary family exists:
 
@@ -102,7 +102,7 @@ Historical scheduler/telemetry names remain temporarily:
 - `claude_candidates` is the same list object as `model_candidates`;
 - `total_claude_candidates` mirrors `total_model_candidates`.
 
-These names are schema compatibility debt only. Production provider truth remains OpenAI GPT-5.6.
+These names are accurate: Anthropic Claude is the production provider.
 
 ## Capacity boundary — 30 vs 40
 
@@ -139,6 +139,6 @@ Do not merge SFC-2B unless the permanent Python 3.13 gate proves:
 5. family ranking does not overwrite the legacy score;
 6. candidate cap remains 30;
 7. model/legacy candidate aliases match exactly;
-8. GPT-5.6 receives normalized family context;
+8. Claude receives normalized family context;
 9. developing Daily contact cannot become closed family proof;
 10. downstream tiering still independently controls capital.
