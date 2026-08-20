@@ -50,9 +50,9 @@ audit_access:
   max_rows: 3
 
 prefilter:
-  # Historical key name is retained during AI-1 so provider migration is not
-  # combined with a capacity/telemetry schema migration. It means deep-analysis
-  # candidates. CAP-40 is separately measured; production remains 30 for now.
+  # Key name means deep-analysis candidates and is accurate: Anthropic Claude
+  # is the production provider. CAP-40 is separately measured; production
+  # remains 30 for now.
   max_claude_candidates_per_scan: 30
   prefilter_min_score: 55
 
@@ -111,23 +111,14 @@ discord:
   near_entry_channel_id: 1497532274470551693
   scan_log_channel_id: null
 
-# AI-1 canonical production model configuration. The OpenAI compatibility
-# adapter reads this block directly and ignores the historical Claude model ID.
-model:
-  provider: "openai"
-  name: "gpt-5.6"
-  max_output_tokens: 1200
-  reasoning_effort: "medium"
-  concurrency: 1
-  min_seconds_between_calls: 1
-  max_input_tokens_per_minute_budget: 250000
-
-# HISTORICAL TEST/COMPATIBILITY CONTRACT ONLY. Production main.py does not
-# instantiate Anthropic, and the OpenAI adapter ignores this model ID. These
-# values remain byte-semantically compatible with Phase MR-1 while AI-1 changes
-# the actual provider. Provider-neutral scheduler naming is a later phase.
+# Production deep-analysis provider: Anthropic Claude. main.py instantiates
+# anthropic.AsyncAnthropic and the scheduler calls it natively through
+# src/claude_client.py — there is no adapter and no secondary provider.
+#
+# Model routing: ANTHROPIC_MODEL -> this value -> DEFAULT_CLAUDE_MODEL.
+# Pacing values are consumed by src/claude_client.py and are unchanged.
 claude:
-  model: "claude-sonnet-4-6"
+  model: "claude-opus-5"
   max_tokens: 1200
   max_concurrent_calls: 8
   claude_concurrency: 1

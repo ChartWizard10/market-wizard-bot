@@ -664,7 +664,7 @@ def build_study_report(
         "next_required_evidence": (
             [
                 "open a separate reviewed paid 30-vs-40 experiment branch",
-                "measure downstream GPT-5.6 quality for the added candidates",
+                "measure downstream Claude quality for the added candidates",
                 "measure scan duration, provider limits, API usage and alert quality",
                 "keep permanent production cap promotion as a separate decision",
             ]

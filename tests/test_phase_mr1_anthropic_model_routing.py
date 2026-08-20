@@ -4,7 +4,7 @@ Model intelligence and scanner doctrine are separate layers.
 
     1. ANTHROPIC_MODEL environment variable (non-empty, trimmed)
     2. config["claude"]["model"]
-    3. claude-sonnet-4-6
+    3. DEFAULT_CLAUDE_MODEL (claude-opus-5 since AI-2R)
 
 The operator selects the model at runtime; the repository holds the fallback.
 Removing the environment variable restores the config model with no code
@@ -28,7 +28,8 @@ from src.claude_client import (
 
 ENV_VAR = "ANTHROPIC_MODEL"
 
-SONNET = "claude-sonnet-4-6"
+SONNET = "claude-sonnet-4-6"        # emergency in-provider model rollback
+OPUS = "claude-opus-5"              # AI-2R production default
 FABLE = "claude-fable-5"
 
 CFG = {"claude": {"model": SONNET, "max_tokens": 1200,
@@ -133,20 +134,20 @@ def test_6_config_custom_value_is_used_exactly():
 def test_7_config_model_missing_yields_the_safe_default():
     for config in ({"claude": {"max_tokens": 1200}}, {}, {"claude": {}}):
         model, source = resolve_claude_model(config)
-        assert model == DEFAULT_CLAUDE_MODEL == SONNET
+        assert model == DEFAULT_CLAUDE_MODEL == OPUS
         assert source == "DEFAULT"
 
 
 def test_8_config_model_empty_yields_the_default():
     model, source = resolve_claude_model({"claude": {"model": ""}})
-    assert model == SONNET
+    assert model == OPUS
     assert source == "DEFAULT"
 
 
 @pytest.mark.parametrize("blank", ["   ", "\t", "\n"])
 def test_9_config_model_whitespace_yields_the_default(blank):
     model, source = resolve_claude_model({"claude": {"model": blank}})
-    assert model == SONNET
+    assert model == OPUS
     assert source == "DEFAULT"
 
 
@@ -161,8 +162,8 @@ def test_9b_no_empty_model_string_can_ever_be_produced(monkeypatch):
                     {"claude": {"model": "  "}}, {"claude": {"model": None}}):
             model, source = resolve_claude_model(cfg)
             assert model.strip() == model
-            assert model == SONNET
-            assert source in ("CONFIG", "DEFAULT")
+            assert model == OPUS
+            assert source == "DEFAULT"
 
 
 def test_9c_resolver_never_raises_on_hostile_config():
@@ -194,7 +195,7 @@ def test_i2_config_model_reaches_messages_create_when_env_absent():
 
 def test_i3_default_reaches_messages_create_when_config_has_no_model():
     client, _ = call({"claude": {"max_tokens": 1200}})
-    assert client.messages.create.await_args.kwargs["model"] == SONNET
+    assert client.messages.create.await_args.kwargs["model"] == OPUS
 
 
 def test_i4_every_other_call_parameter_is_identical(monkeypatch):
@@ -216,8 +217,9 @@ def test_i4_every_other_call_parameter_is_identical(monkeypatch):
         assert other["max_tokens"] == baseline["max_tokens"] == 1200
         assert other["system"] == baseline["system"] == "SYSTEM PROMPT"
         assert other["messages"] == baseline["messages"]
-    assert baseline["model"] == SONNET
+    assert baseline["model"] == SONNET      # from the test CFG, via CONFIG
     assert fable["model"] == FABLE
+    assert default["model"] == OPUS         # via DEFAULT
 
 
 def test_i5_result_schema_and_signal_parsing_are_unchanged(monkeypatch):
@@ -372,8 +374,13 @@ def test_production_router_is_generic_not_fable_hardcoded():
         assert structure not in src
     resolver = inspect.getsource(claude_client.resolve_claude_model)
     assert "in (" not in resolver and "in {" not in resolver
-    # The only literal model name in production is the documented safe default.
-    assert src.count(SONNET) == 1
+    # The only model name the resolver LOGIC contains is the default constant.
+    # (Module prose may name other IDs when documenting the in-provider
+    # rollback path; prose routes nothing.)
+    resolver_logic = inspect.getsource(claude_client.resolve_claude_model)
+    for literal in (OPUS, SONNET, FABLE):
+        assert literal not in resolver_logic
+    assert f'DEFAULT_CLAUDE_MODEL = "{OPUS}"' in src
 
 
 def test_no_model_catalog_lookup_or_extra_network_call():
@@ -383,10 +390,12 @@ def test_no_model_catalog_lookup_or_extra_network_call():
         assert banned not in src
 
 
-def test_doctrine_config_still_holds_the_sonnet_fallback():
+def test_doctrine_config_holds_the_opus5_production_model():
+    """AI-2R: the repository fallback is Opus 5, so production stays on the
+    intended model even when the Railway override is absent."""
     import yaml
     cfg = yaml.safe_load(open("config/doctrine_config.yaml"))
-    assert cfg["claude"]["model"] == SONNET
+    assert cfg["claude"]["model"] == OPUS
     assert cfg["claude"]["max_tokens"] == 1200
 
 

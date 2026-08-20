@@ -124,7 +124,7 @@ This allows the next wiring phase to consume a coherent primary family while pre
 After CFR-1 is green, the follow-up production wiring should:
 
 1. reconcile `setup_family_evidence` before SFC-2 family admission arbitration;
-2. ensure GPT-5.6 receives the resolved relationship, conflict scope, primary and secondary family context;
+2. ensure Claude receives the resolved relationship, conflict scope, primary and secondary family context;
 3. preserve all original family objects in the prompt/audit ledger;
 4. prevent confluence from increasing `admission_rank_score` through score addition;
 5. preserve valid primary admission through local sibling failure;
@@ -137,6 +137,6 @@ After CFR-1 is green, the follow-up production wiring should:
 
 CFR-1 does not alter capacity.
 
-Current maximum GPT-5.6 deep-analysis candidates: **30 per scan**.
+Current maximum Claude deep-analysis candidates: **30 per scan**.
 
 The proposed 40-candidate ceiling remains deferred until the family-aware ranking stack, including cross-family resolution, is production-green and the ranks 31-40 shadow population can be evaluated for genuine incremental opportunity recall, scan-duration headroom, and API cost/rate impact.

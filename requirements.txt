@@ -1,7 +1,4 @@
 discord.py>=2.0
-openai
-# Historical contract tests still import the legacy wrapper during AI-1.
-# Production runtime no longer instantiates Anthropic.
 anthropic
 yfinance
 pandas

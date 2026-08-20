@@ -1,9 +1,14 @@
-"""Historical model-boundary helpers and compatibility Claude API wrapper.
+"""Production Anthropic model boundary — prompt, call, parser, pacing.
 
-Production deep analysis is OpenAI GPT-5.6. This module remains temporarily
-because the hardened prompt/parser/rate-governor contract is reused by the
-OpenAI runtime and historical scheduler tests. Direct Anthropic functions are
-compatibility debt and are not instantiated by production ``main.py``.
+Production deep analysis is Anthropic Claude. ``main.py`` instantiates
+``anthropic.AsyncAnthropic`` and passes it straight through the scheduler to
+``claude_call``, which calls ``client.messages.create(...)`` natively. There is
+no provider adapter and no cross-provider fallback: if Anthropic is
+unavailable the scanner fails closed.
+
+The model is an ANALYST. It never owns market data, proof truth, tier legality,
+risk law, capital law or routing — those belong to the deterministic scanner
+organs downstream.
 """
 
 import asyncio
@@ -18,10 +23,23 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Phase MR-1 — historical Anthropic model routing compatibility.
+# Anthropic model routing (Phase MR-1, restored to production by AI-2R).
+#
+#     1. ANTHROPIC_MODEL environment variable (non-empty, trimmed)
+#     2. config["claude"]["model"]
+#     3. DEFAULT_CLAUDE_MODEL
+#
+# The default is Opus 5 so production stays on the intended model even if the
+# Railway override is temporarily absent. An emergency model rollback stays
+# WITHIN Anthropic (e.g. ANTHROPIC_MODEL=claude-sonnet-4-6) — it changes the
+# model, never the provider.
+#
+# Deliberately no model whitelist and no catalog lookup: the messages.create
+# request is the runtime authority on whether an ID exists. An explicitly
+# selected model is never silently replaced after an API rejection.
 # ---------------------------------------------------------------------------
 
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 
 MODEL_SOURCE_ENVIRONMENT = "ENVIRONMENT"
 MODEL_SOURCE_CONFIG = "CONFIG"
@@ -29,7 +47,11 @@ MODEL_SOURCE_DEFAULT = "DEFAULT"
 
 
 def resolve_claude_model(config: dict) -> tuple[str, str]:
-    """Return historical compatibility (model, source) routing."""
+    """Return (model, source) for this runtime.
+
+    An empty or whitespace-only value at any level means "not supplied" and
+    falls through — an empty model string is never sent to Anthropic.
+    """
     env_model = str(os.getenv("ANTHROPIC_MODEL") or "").strip()
     if env_model:
         return env_model, MODEL_SOURCE_ENVIRONMENT
@@ -52,7 +74,7 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """True for historical Anthropic 429 / rate-limit errors."""
+    """True for Anthropic 429 / rate-limit errors."""
     try:
         import anthropic
         if isinstance(exc, anthropic.RateLimitError):
@@ -180,7 +202,7 @@ def load_system_prompt(path: str = "prompts/market_wizard_system.md") -> str:
 
 
 def _append_setup_family_context(lines: list[str], enriched: dict) -> None:
-    """Append compact normalized SFC evidence to the GPT-5.6 input payload.
+    """Append compact normalized SFC evidence to the Claude input payload.
 
     Family evidence is deterministic context, not capital authority. The model
     sees lifecycle/state/location/geometry so it can reason about VCP, SMA
@@ -258,7 +280,7 @@ def _append_setup_family_context(lines: list[str], enriched: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
-    """Build structured context for the production GPT-5.6 analyst boundary."""
+    """Build structured context for the production Claude analyst boundary."""
     ticker = enriched.get("ticker", "UNKNOWN")
     lines = [f"TICKER: {ticker}"]
 
@@ -358,7 +380,7 @@ def build_prompt(enriched: dict, prefilter_result: dict | None = None) -> str:
     if rr is not None:
         lines.append(f"ESTIMATED_RR: {rr:.2f}")
 
-    # SFC-2B deterministic family lifecycle context for GPT-5.6.
+    # SFC-2B deterministic family lifecycle context for Claude.
     _append_setup_family_context(lines, enriched)
 
     if prefilter_result:
@@ -445,7 +467,8 @@ async def claude_call(
     semaphore: asyncio.Semaphore,
     config: dict,
 ) -> dict:
-    """Historical compatibility call. Production client is an OpenAI adapter."""
+    """Send one enriched ticker to Claude. Returns a result dict with the
+    parsed signal or structured error info. Never raises."""
     ticker = enriched.get("ticker", "UNKNOWN")
     claude_cfg = config.get("claude", {})
     model, _model_source = resolve_claude_model(config)

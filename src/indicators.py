@@ -725,7 +725,7 @@ def _confirmed_view(confirmed_df: pd.DataFrame, config: dict,
 def enrich(ticker: str, df: pd.DataFrame, config: dict, now_utc=None) -> dict:
     """Compute all structure-first features for a validated ticker DataFrame.
 
-    Returns a flat feature dict for use by prefilter and the GPT-5.6 model boundary.
+    Returns a flat feature dict for use by prefilter and the Claude model boundary.
     No rsi, macd, bollinger_bands, or stochastic computed or included.
 
     Phase MBT-2 — dual Daily view. When the newest row is a DEVELOPING daily

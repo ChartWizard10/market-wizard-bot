@@ -2,6 +2,37 @@
 
 This is a durable high-level ledger. Git history remains the detailed source.
 
+## 2026-08-20 — Phase AI-2R Claude Opus 5 Provider Restoration
+
+Superseded the earlier OpenAI provider migration. Anthropic is restored as the
+sole production deep-analysis provider. Git history is unchanged; this entry
+records that the migration no longer describes the current tree.
+
+- Production provider: Anthropic. `main.py` constructs `anthropic.AsyncAnthropic`
+  and passes it straight through the scheduler to `src/claude_client.py`, which
+  calls `client.messages.create(...)` natively. No adapter, no cross-provider
+  fallback — if Anthropic is unavailable the scanner fails closed.
+- Production model: `claude-opus-5`. Routing remains
+  `ANTHROPIC_MODEL` -> `config.claude.model` -> `DEFAULT_CLAUDE_MODEL`, with the
+  repository fallback moved to Opus 5 so production stays on the intended model
+  even when the Railway override is absent.
+- Credentials: `ANTHROPIC_API_KEY`, with `ANTHROPIC_KEY` accepted as a
+  compatibility alias for the historical Railway secret. An OpenAI credential
+  has zero production effect.
+- Removed: the OpenAI client startup, `src/model_client.py`,
+  `src/openai_scheduler_compat.py`, the `model:` provider config block, the
+  OpenAI direct dependency, the OpenAI `.env.example` contract, and the
+  obsolete AI-1 acceptance/runtime documents.
+- Emergency model rollback stays within Anthropic (e.g.
+  `ANTHROPIC_MODEL=claude-sonnet-4-6`). Provider rollback to OpenAI is not a
+  supported path.
+- No strategy change. Prompt, parser/schema, market data, Daily/1H/4H truth,
+  tiering, ladder, gates, seal, capital, routing, dedup/cooldown, telemetry,
+  candidate cap (30), universe and 15-minute cadence are untouched. CAP-40A-E,
+  R4H-1/-2/-3, VELOCITY, SFC/CFR and the research archive are all preserved.
+- Restoring the provider says nothing about judgment quality; that is measured
+  separately against the same evidence and prompt.
+
 ## 2026-08-19 — Phase P0 Production Governance
 
 - Replaced stale README-as-old-bot-code with current production documentation.
