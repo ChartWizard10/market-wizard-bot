@@ -1,8 +1,8 @@
 """CAP-40A — pre-model candidate-cap boundary observation contract.
 
-Production currently admits at most 30 deep-analysis candidates per scan.  A
-possible move to 40 must be measured rather than assumed.  This module creates
-a compact, research-only observation from facts that already exist BEFORE the
+Production currently admits at most 30 deep-analysis candidates per scan. A
+possible move to 40 must be measured rather than assumed. This module creates a
+compact, research-only observation from facts that already exist BEFORE the
 model call so ranks 21-30 and 31-40 can later be compared on the same basis.
 
 The two canonical bands are:
@@ -45,7 +45,7 @@ def _num(value: Any) -> float | None:
 
 
 def _text(value: Any) -> str | None:
-    return value if isinstance(value, str) and value else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _dict(value: Any) -> dict:
@@ -116,6 +116,7 @@ def build_boundary_observation(
     result: dict | None,
     enriched: dict | None,
     *,
+    scan_id: str | None = None,
     current_cap: int = DEFAULT_CURRENT_CAP,
     increment: int = DEFAULT_INCREMENT,
     baseline_width: int = DEFAULT_BASELINE_WIDTH,
@@ -125,7 +126,9 @@ def build_boundary_observation(
     """Build one comparable pre-model capacity-boundary research observation.
 
     Returns ``None`` outside the declared boundary bands so telemetry does not
-    grow for candidates irrelevant to the 30-vs-40 decision.
+    grow for candidates irrelevant to the 30-vs-40 decision. Stable scan/ticker
+    identity is persisted when available because later chronological linking
+    must never join rows by rank alone.
     """
     r = deepcopy(result) if isinstance(result, dict) else {}
     e = deepcopy(enriched) if isinstance(enriched, dict) else {}
@@ -141,6 +144,9 @@ def build_boundary_observation(
     except (TypeError, ValueError, OverflowError):
         return None
 
+    observation_id = _text(scan_id)
+    ticker = _text(r.get("ticker")) or _text(e.get("ticker"))
+    observed_at = _text(scan_timestamp)
     price, price_source = _reference_price(e)
     invalidation, invalidation_source = _invalidation(r, e, price)
     feasibility = velocity_research.build_feasibility_snapshot(
@@ -151,14 +157,20 @@ def build_boundary_observation(
 
     key_features = _dict(r.get("key_features"))
     ready = bool(
-        _text(scan_timestamp)
+        observation_id
+        and ticker
+        and observed_at
         and price is not None
         and price > 0
         and invalidation is not None
         and 0 < invalidation < price
     )
     missing: list[str] = []
-    if not _text(scan_timestamp):
+    if not observation_id:
+        missing.append("scan_id")
+    if not ticker:
+        missing.append("ticker")
+    if not observed_at:
         missing.append("observed_at")
     if price is None or price <= 0:
         missing.append("reference_price")
@@ -175,7 +187,9 @@ def build_boundary_observation(
         "capital_authority": False,
         "routing_authority": False,
         "forecast_authority": False,
-        "observed_at": _text(scan_timestamp),
+        "scan_id": observation_id,
+        "ticker": ticker,
+        "observed_at": observed_at,
         "rank": rank_i,
         "current_cap": cap_i,
         "proposed_cap": cap_i + increment_i,
