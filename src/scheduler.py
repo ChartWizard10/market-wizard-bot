@@ -16,6 +16,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from src import candle_evidence
+from src import capacity_boundary_observation
 from src import discord_alerts
 from src import four_hour_operational
 from src import higher_timeframe_context
@@ -94,6 +95,15 @@ def _abort_summary(scan_id: str, started_at: str, total_tickers: int, error: str
     }
 
 
+def _attach_capacity_boundary(trace: dict, block: dict | None) -> dict:
+    """Attach CAP-40 research evidence without mutating an existing trace."""
+    if not isinstance(trace, dict) or not isinstance(block, dict):
+        return trace
+    out = dict(trace)
+    out["capacity_boundary_observation"] = dict(block)
+    return out
+
+
 def _build_decision_trace_with_velocity(
     scan_id: str,
     scan_timestamp: str,
@@ -109,14 +119,13 @@ def _build_decision_trace_with_velocity(
     base_final_tier=None,
     check_alert_evaluated_tier=None,
     check_alert_evaluated_capital_action=None,
+    capacity_boundary: dict | None = None,
 ) -> dict:
-    """Build the normal 14V trace, then attach VELOCITY research evidence.
+    """Build the normal 14V trace, then attach isolated research evidence.
 
-    The base decision trace is created first.  The VELOCITY projection is a
-    strictly additive observational block derived from already-known scan-time
-    facts.  If that projection fails for any reason, the original 14V trace is
-    returned unchanged.  This helper never mutates ``tiering_result`` or
-    ``enriched`` and therefore cannot affect dedup, routing, capital, or state.
+    VELOCITY and CAP-40 projections are additive observations derived from
+    already-known scan-time facts. Failure in either projection cannot affect
+    dedup, routing, capital or state.
     """
     trace = scan_telemetry.build_decision_trace(
         scan_id,
@@ -145,7 +154,7 @@ def _build_decision_trace_with_velocity(
             trace["velocity_observation"] = compact
     except Exception as exc:
         log.warning("VELOCITY_TELEMETRY_ERROR: %s: %s", ticker, exc)
-    return trace
+    return _attach_capacity_boundary(trace, capacity_boundary)
 
 
 # ---------------------------------------------------------------------------
@@ -442,12 +451,35 @@ async def run_scan_pipeline(
     )
 
     _tlm_rank_map = {}
+    _tlm_capacity_boundary = {}
     try:
+        cap = scan_telemetry.candidate_cap(config)
         for i, row in enumerate(pf_result.get("ranked_results") or []):
-            if isinstance(row, dict) and row.get("ticker"):
-                _tlm_rank_map[row["ticker"]] = i + 1
+            if not isinstance(row, dict) or not row.get("ticker"):
+                continue
+            ticker = row["ticker"]
+            rank = i + 1
+            _tlm_rank_map[ticker] = rank
+            observation = capacity_boundary_observation.build_boundary_observation(
+                started_at,
+                rank,
+                row,
+                enriched_map.get(ticker, {}),
+                scan_id=scan_id,
+                current_cap=cap,
+            )
+            compact = capacity_boundary_observation.compact_for_telemetry(observation)
+            if isinstance(compact, dict):
+                _tlm_capacity_boundary[ticker] = compact
+
         for row, rank in scan_telemetry.near_cut_slice(pf_result.get("ranked_results"), config):
-            _tlm_traces.append(scan_telemetry.build_near_cut_trace(scan_id, row, rank))
+            trace = scan_telemetry.build_near_cut_trace(scan_id, row, rank)
+            _tlm_traces.append(
+                _attach_capacity_boundary(
+                    trace,
+                    _tlm_capacity_boundary.get(row.get("ticker")),
+                )
+            )
     except Exception as exc:
         log.warning("TELEMETRY_NEAR_CUT_ERROR: %s", exc)
 
@@ -497,14 +529,20 @@ async def run_scan_pipeline(
                 _tlm_analysis["admitted"] += 1
                 rate_limited = error_type == "claude_rate_limited"
                 _tlm_analysis["claude_rate_limited" if rate_limited else "claude_failed"] += 1
-                _tlm_traces.append(scan_telemetry.build_analysis_failure_trace(
+                failure_trace = scan_telemetry.build_analysis_failure_trace(
                     scan_id,
                     ticker,
                     pf_map.get(ticker, {}),
                     _tlm_rank_of(ticker),
                     scan_telemetry.TRACE_RATE_LIMITED if rate_limited else scan_telemetry.TRACE_ANALYSIS_FAILED,
                     failure_code=error_type,
-                ))
+                )
+                _tlm_traces.append(
+                    _attach_capacity_boundary(
+                        failure_trace,
+                        _tlm_capacity_boundary.get(ticker),
+                    )
+                )
             except Exception as exc:
                 log.warning("TELEMETRY_ANALYSIS_TRACE_ERROR: %s: %s", ticker, exc)
             continue
@@ -525,14 +563,20 @@ async def run_scan_pipeline(
             final_tier_counts["WAIT"] += 1
             try:
                 _tlm_analysis["tiering_failed"] += 1
-                _tlm_traces.append(scan_telemetry.build_analysis_failure_trace(
+                tier_failure_trace = scan_telemetry.build_analysis_failure_trace(
                     scan_id,
                     ticker,
                     pf_res,
                     _tlm_rank_of(ticker),
                     scan_telemetry.TRACE_TIERING_FAILED,
                     failure_code="TIERING_ERROR",
-                ))
+                )
+                _tlm_traces.append(
+                    _attach_capacity_boundary(
+                        tier_failure_trace,
+                        _tlm_capacity_boundary.get(ticker),
+                    )
+                )
             except Exception as terr:
                 log.warning("TELEMETRY_TIERING_TRACE_ERROR: %s: %s", ticker, terr)
             continue
@@ -615,6 +659,7 @@ async def run_scan_pipeline(
                     base_final_tier=_tlm_base_tier,
                     check_alert_evaluated_tier=_tlm_ca_tier,
                     check_alert_evaluated_capital_action=_tlm_ca_capital,
+                    capacity_boundary=_tlm_capacity_boundary.get(ticker),
                 ))
             except Exception as terr:
                 log.warning("TELEMETRY_SEND_FAULT_TRACE_ERROR: %s: %s", ticker, terr)
@@ -652,6 +697,7 @@ async def run_scan_pipeline(
                 base_final_tier=_tlm_base_tier,
                 check_alert_evaluated_tier=_tlm_ca_tier,
                 check_alert_evaluated_capital_action=_tlm_ca_capital,
+                capacity_boundary=_tlm_capacity_boundary.get(ticker),
             ))
         except Exception as exc:
             log.warning("TELEMETRY_TRACE_ERROR: %s: %s", ticker, exc)
