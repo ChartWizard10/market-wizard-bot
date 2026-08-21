@@ -868,6 +868,17 @@ _CONTINUITY_VETO_LABELS = {
 }
 
 
+def _has_proven_failure(signal: dict) -> bool:
+    """True when the signal reports proof that has actually FAILED.
+
+    The single canonical test for the failed/missing distinction, so every
+    caller reads the same rule. `missing`, `partial`, forming and weak states
+    are absent or incomplete proof — they are never failure. Only an explicit
+    `failed` verdict is setup damage the scanner has already observed.
+    """
+    return signal.get("retest_status") == "failed" or signal.get("hold_status") == "failed"
+
+
 def _has_entry_progress(signal: dict) -> bool:
     """True when at least one of retest/hold shows real forming progress.
 
@@ -1055,7 +1066,7 @@ def _apply_near_entry_continuity(
     # has yet to arrive, so it is never eligible for lifecycle continuity and
     # continues to exhaust the cascade to WAIT. Without this the repair would
     # quietly collapse `failed` into `missing`.
-    if signal.get("retest_status") == "failed" or signal.get("hold_status") == "failed":
+    if _has_proven_failure(signal):
         return None
     if require_progress and not _has_entry_progress(signal):
         return None
@@ -1264,11 +1275,24 @@ def _determine_final_tier(
                 f"{claude_tier}→WAIT: current_acceptance=damaging with impossible geometry"
             )
             return "WAIT", downgrades, notes
+        # Phase MA-1A.1: this route returns NEAR_ENTRY before the STARTER and
+        # NEAR gates ever run, so it was the one path on which proven failure
+        # could still reach a published watch state — a pre-existing bypass of
+        # the failed/missing distinction, not something MA-1A introduced. The
+        # same signal reached WAIT correctly whenever acceptance was not
+        # damaging. Damaged location plus already-failed proof is not a forming
+        # setup; it is two failures.
+        if _has_proven_failure(signal):
+            downgrades.append(
+                f"{claude_tier}→WAIT: current_acceptance=damaging with proven failed proof "
+                f"(retest={signal.get('retest_status')!r}, hold={signal.get('hold_status')!r})"
+            )
+            return "WAIT", downgrades, notes
         # Phase MA-1A: this route reaches NEAR_ENTRY without passing the NEAR
         # metadata gate, so it could publish a watch state with no stated
-        # missing proof and no upgrade trigger. Explain it. Not newly gated —
-        # progress is not required here because this candidate already became
-        # NEAR_ENTRY under the previous behavior.
+        # missing proof and no upgrade trigger. Explain it. Not newly gated for
+        # forming evidence — progress is not required here because such a
+        # candidate already became NEAR_ENTRY under the previous behavior.
         _apply_near_entry_continuity(
             signal, prefilter_vetoes, score, config, current_price, notes,
             require_progress=False,

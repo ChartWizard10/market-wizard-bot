@@ -304,10 +304,14 @@ def test_t23_raw_signal_is_never_mutated():
     (dict(), 97.0),                                   # damaging route
 ])
 def test_t24_every_deterministic_near_entry_is_explained(kwargs, prefilter_price):
-    """T24 — no published NEAR_ENTRY may have an empty lifecycle explanation."""
+    """T24 — no published NEAR_ENTRY may have an empty lifecycle explanation.
+
+    Every case below is a route that terminates at NEAR_ENTRY, asserted
+    unconditionally: a conditional skip here would let a future regression that
+    silently rerouted one of these to WAIT pass unnoticed.
+    """
     r = run(signal(**kwargs), prefilter=pf(price=prefilter_price))
-    if r["final_tier"] != "NEAR_ENTRY":
-        pytest.skip("route did not terminate at NEAR_ENTRY for this fixture")
+    assert r["final_tier"] == "NEAR_ENTRY"
     assert_near_entry_explained(r)
 
 
@@ -359,6 +363,134 @@ def test_retest_failed_stays_distinct_from_retest_missing():
     assert failed["capital_action"] == "no_trade"
     assert missing["final_tier"] == "NEAR_ENTRY"
     assert "retest_failed" in failed["applied_vetoes"]
+
+
+# ===========================================================================
+# MA-1A.1 — the failed-proof firewall on the damaging-acceptance route
+# ===========================================================================
+#
+# `_determine_final_tier` returns NEAR_ENTRY from the current-acceptance
+# `damaging` branch BEFORE the STARTER and NEAR gates run. That made it the one
+# route on which proven failure could still reach a published watch state.
+#
+# Reproduced on origin/main (d62a167) as well, so this is a pre-existing bypass
+# that MA-1A surfaced rather than introduced: with acceptance NOT damaging the
+# same signal correctly reached WAIT, and only the damaging branch let it
+# through. MA-1A's own acceptance criteria require it closed, so it closes here.
+#
+# Geometry used throughout: trigger 99, invalidation 95, current price 97 —
+# price below trigger (damaging) but above the stop (not invalidated).
+# ===========================================================================
+
+def damaging_pf():
+    return pf(price=97.0, current_open=97.4, current_high=97.8, current_low=96.6)
+
+
+def test_b1_starter_damaging_with_failed_retest_is_wait():
+    """B1 — damaged location plus an already-failed retest is two failures."""
+    r = run(signal(retest_status="failed", hold_status="partial"), damaging_pf())
+    assert r["final_tier"] == "WAIT"
+    assert r["capital_action"] == "no_trade"
+    assert r["final_tier"] != "NEAR_ENTRY"
+    # No derived continuity metadata may be left behind on a WAIT.
+    assert r["final_signal"]["missing_conditions"] == []
+    assert r["final_signal"]["upgrade_trigger"] == "none"
+    assert "NEAR_ENTRY_CONTINUITY_DERIVED" not in r["validation_notes"]
+    assert "proven failed proof" in " ".join(r["downgrades"])
+
+
+def test_b2_snipe_damaging_with_failed_retest_is_wait():
+    """B2 — same law entering from SNIPE_IT."""
+    r = run(signal(tier="SNIPE_IT", score=90,
+                   retest_status="failed", hold_status="partial"), damaging_pf())
+    assert r["final_tier"] == "WAIT"
+    assert r["capital_action"] == "no_trade"
+
+
+def test_b3_starter_damaging_with_failed_hold_is_wait():
+    """B3 — a failed hold is not a forming hold."""
+    r = run(signal(retest_status="partial", hold_status="failed"), damaging_pf())
+    assert r["final_tier"] == "WAIT"
+    assert r["capital_action"] == "no_trade"
+    assert r["final_signal"]["missing_conditions"] == []
+
+
+def test_b4_snipe_damaging_with_failed_hold_is_wait():
+    """B4 — same law entering from SNIPE_IT."""
+    r = run(signal(tier="SNIPE_IT", score=90,
+                   retest_status="partial", hold_status="failed"), damaging_pf())
+    assert r["final_tier"] == "WAIT"
+    assert r["capital_action"] == "no_trade"
+
+
+def test_b5_starter_damaging_with_forming_proof_keeps_near_entry():
+    """B5 — the repair must not convert incomplete proof into failure."""
+    r = run(signal(retest_status="partial", hold_status="partial"), damaging_pf())
+    assert_near_entry_explained(r)
+    assert "current_acceptance=damaging" in " ".join(r["downgrades"])
+    assert any("trigger_acceptance" in c
+               for c in r["final_signal"]["missing_conditions"])
+
+
+def test_b6_snipe_damaging_with_forming_proof_keeps_near_entry():
+    """B6 — same parity entering from SNIPE_IT."""
+    r = run(signal(tier="SNIPE_IT", score=90,
+                   retest_status="confirmed", hold_status="partial"), damaging_pf())
+    assert_near_entry_explained(r)
+
+
+@pytest.mark.parametrize("status", ["missing", "partial", "confirmed"])
+def test_b6b_non_failed_states_are_never_treated_as_failure(status):
+    """B5/B6 — only `failed` is failure. missing/partial/confirmed are not."""
+    sig = signal(retest_status=status, hold_status="partial")
+    assert tiering._has_proven_failure(sig) is False
+    r = run(sig, damaging_pf())
+    assert r["final_tier"] == "NEAR_ENTRY"
+
+
+def test_b7_invalidated_acceptance_still_wait():
+    """B7 — at or below the stop remains WAIT, unchanged by MA-1A.1."""
+    r = run(signal(retest_status="partial", hold_status="partial"),
+            pf(price=95.0))
+    assert r["final_tier"] == "WAIT"
+    assert r["capital_action"] == "no_trade"
+
+
+def test_b8_ordinary_non_damaging_failed_retest_still_wait():
+    """B8 — the non-damaging route's behavior is unchanged."""
+    r = run(signal(retest_status="failed", hold_status="partial"))
+    assert r["final_tier"] == "WAIT"
+    assert r["capital_action"] == "no_trade"
+
+
+def test_b9_ordinary_missing_and_partial_proof_still_reaches_near_entry():
+    """B9 — the D1 continuity repair is untouched by the firewall."""
+    r = run(signal(hold_status="partial"))
+    assert_near_entry_explained(r)
+    assert "NEAR_ENTRY_CONTINUITY_DERIVED" in r["validation_notes"]
+
+
+@pytest.mark.parametrize("kwargs,prefilter", [
+    (dict(retest_status="failed", hold_status="partial"), "damaging"),
+    (dict(retest_status="partial", hold_status="failed"), "damaging"),
+    (dict(retest_status="partial", hold_status="partial"), "damaging"),
+    (dict(hold_status="partial"), "normal"),
+])
+def test_b10_raw_input_is_never_mutated_on_any_route(kwargs, prefilter):
+    """B10 — every route works from validate()'s copy."""
+    raw = signal(**kwargs)
+    frozen = copy.deepcopy(raw)
+    run(raw, damaging_pf() if prefilter == "damaging" else pf())
+    assert raw == frozen
+
+
+def test_failed_proof_predicate_is_the_single_source_of_truth():
+    """One canonical rule, used by both the continuity helper and the route."""
+    assert tiering._has_proven_failure({"retest_status": "failed"}) is True
+    assert tiering._has_proven_failure({"hold_status": "failed"}) is True
+    assert tiering._has_proven_failure({"retest_status": "missing",
+                                        "hold_status": "missing"}) is False
+    assert tiering._has_proven_failure({}) is False
 
 
 # ===========================================================================
@@ -550,13 +682,27 @@ def test_a6b_unusable_1h_object_has_no_display_authority(one_hour):
 
 def test_a7_low_base_score_is_labelled_not_changed_and_not_implied_to_pass():
     """A7 — the number is untouched; the label stops implying it cleared the
-    historical base STARTER gate when the ladder is what authorized the tier."""
+    historical base STARTER gate when the ladder is what authorized the tier.
+
+    `_alert_result(score=65)` sets 65 in BOTH places it lives: the top-level
+    `score` the header renders, and `final_signal["score"]`. Both must survive
+    rendering byte-for-byte — a display fix may never quietly promote a score
+    to make a tier look qualified.
+    """
     tr = _alert_result(score=65, promoted=True, one_hour=_one_hour())
+    before = copy.deepcopy(tr)
+
     body = da.format_alert(tr)
+
     assert "Base Score: 65" in body
     assert "| Score: 65" not in body
-    assert tr["score"] == 65                       # value never mutated
-    assert tr["final_signal"]["score"] == 78 or True
+    # Neither score was mutated, and neither was silently raised to the
+    # configured STARTER floor of 75.
+    assert tr["score"] == 65
+    assert tr["final_signal"]["score"] == 65
+    assert tr["score"] == before["score"]
+    assert tr["final_signal"]["score"] == before["final_signal"]["score"]
+    assert tr["score"] < CONFIG["tiers"]["starter"]["min_score"]
 
 
 def test_a7b_unpromoted_tier_keeps_the_plain_score_label():
