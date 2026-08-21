@@ -30,6 +30,7 @@ not mean SNIPE_IT, STARTER or safe_for_alert.
 
 import copy
 import inspect
+from datetime import datetime, timezone
 
 import pytest
 
@@ -400,27 +401,91 @@ def test_live_constructive_attempt_reaches_forming_not_granted():
     assert any("cannot grant" in w for w in sub["warnings"])
 
 
-def test_live_to_closed_transition_grants_only_once_matured():
-    """§45 — maturity creates authority, not excitement.
+def _maturity_frame(n=240):
+    """One raw Daily frame whose newest session is the decisive one.
 
-    The same session: while it is developing the closed evidence cannot
-    classify, so the best available answer is FORMING. Once the session
-    completes and that evidence becomes confirmation-eligible, the very same
-    facts may grant.
+    The penultimate session dips below value; the newest session reclaims
+    decisively. So the SAME frame reads `mixed` while the newest row is still
+    developing and excluded from confirmation, and `supportive` once that row
+    matures into completed evidence.
     """
-    developing = live_daily()
-    assert tfa.derive_swing_timeframe(developing)["state"] == "PERMISSION_FORMING"
+    import numpy as np
+    import pandas as pd
+    idx = pd.bdate_range(end=pd.Timestamp("2026-08-21"), periods=n)
+    base = np.linspace(50.0, 100.0, n)
+    close = base.copy()
+    close[-2] = base[-2] * 0.90
+    close[-1] = base[-1] * 1.04
+    op = np.concatenate([[close[0]], close[:-1]])
+    return pd.DataFrame({
+        "open": op, "high": np.maximum(op, close) * 1.005,
+        "low": np.minimum(op, close) * 0.995, "close": close,
+        "volume": np.full(n, 1_000_000.0)}, index=idx)
 
-    matured = copy.deepcopy(developing)
-    matured["daily_bar_context"].update(
-        status="CLOSED", status_source="regular_session_complete_et",
-        live_bar_available=False, last_closed_daily_date="2026-08-21")
-    matured.update(sma_value_alignment="supportive", structure_event="reclaim",
-                   structure_confirmed=True, retest_status="confirmed",
-                   daily_retest_proof="CLOSED_CONFIRMED",
-                   live_sma_value_alignment=None, live_structure_context=None,
-                   live_retest_context=None)
-    assert tfa.derive_swing_timeframe(matured)["state"] == "PERMISSION_GRANTED"
+
+def test_live_to_closed_maturity_through_the_real_pipeline():
+    """§45 / §9 — maturity creates authority, not excitement.
+
+    ONE raw DataFrame. ONE final bar with one set of OHLCV values. The only
+    thing that changes between the two calls is the clock: nothing in the
+    enriched object is edited by hand, so the transition is the real MBT-2
+    partition maturing a developing row into confirmation-eligible evidence.
+
+    In session, the newest row is LIVE and withheld from confirmation, so the
+    confirmed anchor is still the dip and the campaign has not earned a grant —
+    even though the live row is visibly building a reclaim. After the close the
+    very same row becomes completed evidence and the campaign is sponsored.
+    """
+    import yaml
+    from src import indicators
+
+    config = yaml.safe_load(
+        open("config/doctrine_config.yaml"))  # real production thresholds
+    df = _maturity_frame()
+    frozen = df.copy(deep=True)
+
+    in_session = indicators.enrich(
+        "T", df, config, now_utc=datetime(2026, 8, 21, 17, 0, tzinfo=timezone.utc))
+    post_close = indicators.enrich(
+        "T", df, config, now_utc=datetime(2026, 8, 21, 20, 5, tzinfo=timezone.utc))
+
+    # The raw market data is identical for both readings.
+    pd_testing_equal = df.equals(frozen)
+    assert pd_testing_equal, "the raw frame must not be mutated between clocks"
+    assert in_session["current_price"] == post_close["current_price"]
+
+    # ---- in session: the newest row is information, not confirmation -------
+    live_ctx = in_session["daily_bar_context"]
+    assert live_ctx["status"] == "LIVE"
+    assert live_ctx["live_bar_available"] is True
+    assert live_ctx["using_live_bar_for_confirmation"] is False
+    live_state = tfa.derive_swing_timeframe(in_session)["state"]
+    assert live_state != "PERMISSION_GRANTED", (
+        "a developing row must not create closed Daily permission")
+
+    # ---- after the close: the SAME row is now completed evidence -----------
+    closed_ctx = post_close["daily_bar_context"]
+    assert closed_ctx["status"] == "CLOSED"
+    assert closed_ctx["live_bar_available"] is False
+    assert closed_ctx["confirmed_bars"] == live_ctx["confirmed_bars"] + 1
+    assert tfa.derive_swing_timeframe(post_close)["state"] == "PERMISSION_GRANTED"
+
+    # ---- and the maturity is what moved, not a hand-edited field -----------
+    assert in_session["sma_value_alignment"] != post_close["sma_value_alignment"]
+    assert post_close["last_closed_daily_close"] > in_session["last_closed_daily_close"]
+
+
+def test_live_row_is_never_used_for_confirmation_in_either_reading():
+    """The MBT-2 permanent invariant, re-proven across the same transition."""
+    import yaml
+    from src import indicators
+
+    config = yaml.safe_load(open("config/doctrine_config.yaml"))
+    df = _maturity_frame()
+    for clock in (datetime(2026, 8, 21, 17, 0, tzinfo=timezone.utc),
+                  datetime(2026, 8, 21, 20, 5, tzinfo=timezone.utc)):
+        e = indicators.enrich("T", df, config, now_utc=clock)
+        assert e["daily_bar_context"]["using_live_bar_for_confirmation"] is False
 
 
 def test_ambiguous_daily_frame_never_grants_and_never_fabricates_denial():
@@ -436,11 +501,115 @@ def test_ambiguous_daily_frame_never_grants_and_never_fabricates_denial():
                    for w in sub["warnings"])
 
 
-def test_withheld_ambiguous_rows_are_disclosed_but_do_not_erase_a_safe_subset():
-    """MBT-2A already excludes ambiguous rows; the surviving subset is honest."""
-    sub = tfa.derive_swing_timeframe(daily(withheld=3))
-    assert sub["state"] == "PERMISSION_GRANTED"
+def _adverse(withheld=0, reordered=False, **kwargs):
+    ev = daily(withheld=withheld, **kwargs)
+    ev["daily_bar_context"]["index_reordered"] = reordered
+    return ev
+
+
+def test_a1_withheld_ambiguous_rows_cannot_grant_permission():
+    """A1 — a row excluded as ambiguous cannot secretly help authorize a campaign.
+
+    MBT-2A withholds the ambiguous rows, but every indicator downstream is then
+    computed over a series the partition had to repair. Sovereign permission
+    needs trustworthy provenance for that whole series, not just a surviving
+    subset that happens to look supportive.
+    """
+    sub = tfa.derive_swing_timeframe(_adverse(withheld=3))
+    assert sub["state"] == "UNKNOWN"
+    assert sub["blocks_trigger"] is False
     assert any("ambiguous Daily row" in w for w in sub["warnings"])
+
+
+def test_a2_reordered_daily_index_cannot_grant_permission():
+    """A2 — a series that needed reordering is not sovereign proof."""
+    sub = tfa.derive_swing_timeframe(_adverse(reordered=True))
+    assert sub["state"] == "UNKNOWN"
+    assert sub["blocks_trigger"] is False
+    assert any("ordering required repair" in w for w in sub["warnings"])
+
+
+def test_a3_both_provenance_faults_land_unknown():
+    """A3 — withheld rows and a repaired ordering together."""
+    sub = tfa.derive_swing_timeframe(_adverse(withheld=2, reordered=True))
+    assert sub["state"] == "UNKNOWN"
+    assert sub["blocks_trigger"] is False
+
+
+def test_a4_untrusted_provenance_is_never_classified_bearish_either():
+    """A4 — trust failure precedes market classification.
+
+    Ambiguous provenance plus hostile-looking value must not be called DENIED:
+    the scanner cannot honestly grade a series it does not trust, in either
+    direction. Unknown provenance is not permission, and it is not failure.
+    """
+    sub = tfa.derive_swing_timeframe(
+        _adverse(withheld=2, value="hostile", structure="none",
+                 confirmed=False, retest="missing", proof=""))
+    assert sub["state"] == "UNKNOWN"
+    assert sub["state"] != "PERMISSION_DENIED"
+    assert sub["blocks_trigger"] is False
+
+
+def test_a5_clean_closed_provenance_still_grants():
+    """A5 — the fix must not make ordinary clean frames untrusted."""
+    sub = tfa.derive_swing_timeframe(_adverse())
+    assert sub["state"] == "PERMISSION_GRANTED"
+
+
+def test_a6_clean_live_session_with_supportive_closed_evidence_still_grants():
+    """A6 — a developing candle does not demote an already-earned campaign.
+
+    The live bar is not granting anything here; the completed Daily evidence is.
+    Making every LIVE session FORMING would have recreated shyness.
+    """
+    sub = tfa.derive_swing_timeframe(_adverse(status="LIVE"))
+    assert sub["state"] == "PERMISSION_GRANTED"
+    assert any("live" in w.lower() for w in sub["warnings"])
+
+
+def test_a10_ambiguity_check_never_mutates_its_input():
+    """A10 — the trust boundary is read-only."""
+    for ev in (_adverse(withheld=2), _adverse(reordered=True), _adverse()):
+        frozen = copy.deepcopy(ev)
+        tfa.derive_swing_timeframe(ev)
+        assert ev == frozen
+
+
+def test_ambiguous_provenance_arises_from_the_real_partition():
+    """The adverse fields are not hypothetical dict shapes.
+
+    Proven against market_data.partition_daily_bars itself: a duplicated OLDER
+    session and a non-monotonic ordering both leave status CLOSED while an
+    ambiguity field is adverse — which is exactly the combination that used to
+    grant.
+    """
+    import numpy as np
+    import pandas as pd
+    from src import market_data
+
+    now = datetime(2026, 8, 21, 20, 5, tzinfo=timezone.utc)
+
+    def frame(n=200):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-08-20"), periods=n)
+        base = np.linspace(60.0, 100.0, n)
+        return pd.DataFrame({
+            "open": base, "high": base * 1.01, "low": base * 0.99,
+            "close": base * 1.005, "volume": np.full(n, 1_000_000.0)}, index=idx)
+
+    base_df = frame()
+    dup = base_df.copy()
+    dup.index = pd.DatetimeIndex(
+        [base_df.index[50] if i == 51 else d for i, d in enumerate(base_df.index)])
+    ctx = market_data.partition_daily_bars(dup, now_utc=now)["context"]
+    assert ctx["status"] == "CLOSED"
+    assert ctx["ambiguous_rows_withheld"] > 0
+
+    order = list(range(len(base_df)))
+    order[10], order[11] = order[11], order[10]
+    ctx2 = market_data.partition_daily_bars(base_df.iloc[order], now_utc=now)["context"]
+    assert ctx2["status"] == "CLOSED"
+    assert ctx2["index_reordered"] is True
 
 
 def test_closed_failure_outranks_constructive_live_repair():

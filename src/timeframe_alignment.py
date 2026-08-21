@@ -361,9 +361,28 @@ _CLOSED_RETEST_PROOF = "CLOSED_CONFIRMED"
 def _daily_trust_failure(enriched: dict) -> str | None:
     """Return a reason string when closed Daily evidence cannot be trusted.
 
+    Sovereign Daily permission needs two things, not one: usable completed Daily
+    evidence AND trustworthy provenance for the historical series that evidence
+    was calculated from. MBT-2A marks a duplicated CURRENT session, a
+    future-dated row or an unparseable index as UNKNOWN — but a duplicated
+    OLDER session, or a series that had to be reordered before the indicators
+    could run, still reports status CLOSED. Verified against the real partition:
+
+        duplicated older session   -> status=CLOSED, ambiguous_rows_withheld=2
+        non-monotonic ordering     -> status=CLOSED, index_reordered=True
+
+    In both cases every indicator downstream is computed over a series the
+    partition had to repair. A row excluded as ambiguous cannot secretly help
+    authorize a campaign, and a series that needed reordering is not sovereign
+    proof — so the whole frame withholds permission here rather than granting on
+    a repaired history.
+
+    Withholding is deliberately not denial: that is the caller's UNKNOWN branch,
+    which leaves blocks_trigger False. Unknown provenance is not bearish market
+    evidence — it is simply not permission.
+
     No new minimum-bar threshold is invented: indicator availability already
-    decides whether SMA/structure could be proven, and MBT-2A already marks a
-    duplicated, future-dated or unparseable frame as UNKNOWN.
+    decides whether SMA/structure could be proven.
     """
     if not isinstance(enriched, dict) or not enriched:
         return "Daily market evidence unavailable"
@@ -381,6 +400,16 @@ def _daily_trust_failure(enriched: dict) -> str | None:
         return "no confirmation-eligible Daily bars"
     if enriched.get("last_closed_daily_close") is None:
         return "no closed Daily close available"
+    try:
+        withheld = int(ctx.get("ambiguous_rows_withheld") or 0)
+    except (TypeError, ValueError):
+        withheld = 0
+    if withheld > 0:
+        return (f"{withheld} ambiguous Daily row(s) withheld; the historical series"
+                " behind this evidence is not sovereign proof")
+    if ctx.get("index_reordered") is True:
+        return ("Daily session ordering required repair; the historical series"
+                " behind this evidence is not sovereign proof")
     return None
 
 
@@ -462,12 +491,6 @@ def derive_swing_timeframe(enriched) -> dict:
             f"Daily retest interaction is provisional ({retest_proof or 'unproven'});"
             " not closed Daily confirmation"
         )
-    withheld = ctx.get("ambiguous_rows_withheld") or 0
-    if withheld:
-        sub["warnings"].append(
-            f"{withheld} ambiguous Daily row(s) withheld; judged on the confirmed subset"
-        )
-
     # ---- 1. proven CLOSED failure outranks everything below -----------------
     if closed_retest_failed:
         sub["state"] = "PERMISSION_DENIED"
