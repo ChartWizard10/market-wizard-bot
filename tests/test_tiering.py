@@ -1396,8 +1396,11 @@ from src.tiering import _classify_risk_realism
 # 12C-1 / 13.7A / 13.9A: Tiny risk distance → fragile state.
 # Phase 13.7A blocks SNIPE_IT; Phase 13.9A extends the fragile gate to STARTER.
 # trigger=100.00, invalidation=99.70 → risk_distance_pct=0.30% < 0.35% floor.
-# _snipe_signal has missing_conditions=[] and upgrade_trigger="none", so NEAR_ENTRY
-# gate also fails → final cascade is WAIT.
+# Phase MA-1A: the enduring invariant is that a fragile stop authorizes NO
+# capital — neither full size nor reduced size. The candidate previously landed
+# on WAIT only because _snipe_signal carries the prompt-mandated empty NEAR
+# metadata (MASTER-AUDIT-1 D1); it now retains the NEAR_ENTRY watch state with a
+# risk-repair trigger. Capital is still refused, which is what this test guards.
 def test_12c_valid_geometry_tiny_stop_gets_fragile_risk_state():
     signal = _snipe_signal(
         trigger_level=100.00,
@@ -1411,13 +1414,18 @@ def test_12c_valid_geometry_tiny_stop_gets_fragile_risk_state():
     # Risk realism field still reports fragile (informational layer unchanged)
     assert fs["risk_realism_state"] == "fragile"
     assert "fragile" in fs["risk_realism_note"].lower()
-    # Phase 13.9A: fragile gate now also blocks STARTER. Signal has no valid
-    # NEAR_ENTRY conditions (missing_conditions=[], upgrade_trigger="none"),
-    # so cascade exhausts all tiers → WAIT.
-    assert result["final_tier"] == "WAIT"
+    # Phase 13.9A: fragile gate blocks SNIPE_IT and STARTER — no capital.
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == "wait_no_capital"
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "fragile" in downgrade_text.lower()
     assert "snipe_it" in downgrade_text.lower()
+    # MA-1A: the retained watch state must name real risk repair, and must
+    # explicitly forbid manufacturing room by widening the stop.
+    assert fs["missing_conditions"]
+    _trigger = fs["upgrade_trigger"].lower()
+    assert "risk window" in _trigger
+    assert "do not widen the stop" in _trigger
     # Valid geometry must not produce semantic_price_sanity_failed
     assert "semantic_price_sanity_failed" not in downgrade_text
 
@@ -2133,8 +2141,8 @@ def test_12_3a_starter_and_snipe_unchanged():
 
 
 # 13.7A-1 / 13.9A: CSX-style fixture — microscopic stop → SNIPE_IT and STARTER blocked.
-# Phase 13.9A extended fragile gate to STARTER. _snipe_signal has missing_conditions=[]
-# and upgrade_trigger="none" → NEAR_ENTRY also fails → WAIT.
+# Phase MA-1A: capital refusal is the invariant; the terminal tier is NEAR_ENTRY
+# (watch, no capital) now that the D1 metadata gap no longer forces WAIT.
 def test_13_7a_csx_style_fragile_stop_blocks_snipe_it():
     # risk_distance = 44.70 - 44.68 = 0.02, pct ≈ 0.045% → far below 0.35% floor
     signal = _snipe_signal(
@@ -2146,8 +2154,9 @@ def test_13_7a_csx_style_fragile_stop_blocks_snipe_it():
         reason="Clean MSS with confirmed FVG retest and hold.",
     )
     result = validate(signal, _pf(), _BASE_CONFIG)
-    # Both SNIPE_IT and STARTER blocked by fragile gate; WAIT is the final tier.
-    assert result["final_tier"] == "WAIT"
+    # Both SNIPE_IT and STARTER blocked by the fragile gate — no capital either way.
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == "wait_no_capital"
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "fragile" in downgrade_text.lower()
     assert "snipe_it" in downgrade_text.lower()
@@ -2188,7 +2197,7 @@ def test_13_7a_stop_above_threshold_is_not_blocked():
 
 
 # 13.7A-4 / 13.9A: Just below threshold (0.34%) → SNIPE_IT and STARTER blocked.
-# Phase 13.9A: fragile gate blocks STARTER too. No valid NE conditions → WAIT.
+# Phase MA-1A: no capital is the invariant; NEAR_ENTRY watch is retained.
 def test_13_7a_stop_just_below_threshold_is_blocked():
     # trigger=100.00, invalidation=99.66 → risk_distance=0.34, pct=0.34% < 0.35%
     signal = _snipe_signal(
@@ -2198,15 +2207,16 @@ def test_13_7a_stop_just_below_threshold_is_blocked():
         risk_reward=4.0,
     )
     result = validate(signal, _pf(), _BASE_CONFIG)
-    # SNIPE_IT blocked; STARTER blocked (fragile); NEAR_ENTRY blocked (no conditions) → WAIT
-    assert result["final_tier"] == "WAIT"
+    # SNIPE_IT blocked; STARTER blocked (fragile) → no capital.
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == "wait_no_capital"
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "fragile" in downgrade_text.lower()
 
 
 # 13.7A-5 / 13.9A: Fragile stop + low score → both SNIPE_IT and STARTER blocked.
-# Phase 13.9A: fragile gate applies to STARTER regardless of score. No valid NE
-# conditions in _snipe_signal → WAIT.
+# Phase 13.9A: fragile gate applies to STARTER regardless of score.
+# Phase MA-1A: capital refusal is the invariant; NEAR_ENTRY watch is retained.
 def test_13_7a_fragile_stop_plus_low_score_cascades_to_wait():
     # score=77 is above STARTER floor (75) but fragile gate blocks STARTER too.
     # risk_distance_pct=0.30% < 0.35% triggers fragile gate for both tiers.
@@ -2219,9 +2229,9 @@ def test_13_7a_fragile_stop_plus_low_score_cascades_to_wait():
     )
     result = validate(signal, _pf(), _BASE_CONFIG)
     # SNIPE_IT: blocked (score < 85 AND fragile)
-    # STARTER:  blocked (fragile gate fires regardless of score)
-    # NEAR_ENTRY: blocked (missing_conditions=[], upgrade_trigger="none")
-    assert result["final_tier"] == "WAIT"
+    # STARTER:  blocked (fragile gate fires regardless of score) → no capital
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == "wait_no_capital"
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "snipe_it" in downgrade_text.lower()
     assert "fragile" in downgrade_text.lower()

@@ -205,9 +205,14 @@ class TestNoOvercoolingWhenConfirmed:
             candle="DISPLACEMENT", location="REALISTIC_ENTRY_LOCATION",
         )))
         # Confirmed wording remains; no overcooling injected.
+        # Phase MA-1A: the EXECUTION values are now sourced from the 1H organ
+        # that owns this proof and carry its provenance marker. The invariant is
+        # that confirmed 1H truth still renders as confirmed — never cooled.
         assert "confirmed sequence and hold" in body
-        assert _retest_value(body) == "confirmed"
-        assert _hold_value(body) == "confirmed"
+        assert _retest_value(body).startswith("confirmed")
+        assert "(1H)" in _retest_value(body)
+        assert _hold_value(body).startswith("confirmed")
+        assert "(1H)" in _hold_value(body)
         assert "1H trigger proof remains incomplete" not in body
         assert "1H evidence has not confirmed a closed hold" not in body
 
@@ -218,7 +223,8 @@ class TestNoOvercoolingWhenConfirmed:
             alert="LIVE_TRIGGER", score=92, caps=(),
         )))
         assert "1H trigger proof remains incomplete" not in body
-        assert _hold_value(body) == "confirmed"
+        # Phase MA-1A: confirmed 1H hold still renders confirmed, with provenance.
+        assert _hold_value(body).startswith("confirmed")
 
 
 # ===========================================================================

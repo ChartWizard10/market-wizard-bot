@@ -498,8 +498,12 @@ def test_starter_alert_does_not_say_all_snipe_conditions_met():
     tr["final_tier"] = "STARTER"
     tr["capital_action"] = "starter_only"
     text = format_alert(tr)
-    # Deterministic tier label must say STARTER (Phase 13.7B contract headline)
-    assert "STARTER conditions met." in text
+    # Phase MA-1A: the STARTER headline states CAPITAL truth, not a generic
+    # all-conditions-met proof claim (MASTER-AUDIT-1 D2). The enduring invariant
+    # is that a STARTER alert is labelled STARTER and never borrows SNIPE
+    # language.
+    assert "STARTER AUTHORIZED" in text
+    assert "STARTER conditions met." not in text
     # SNIPE_IT label must NOT appear in this STARTER alert
     assert "All SNIPE_IT conditions met." not in text
 
@@ -930,7 +934,8 @@ def test_12d_starter_alert_language_still_not_snipe():
     text = format_alert(tr)
     # Deterministic STARTER action label is used; the SNIPE label must not appear
     assert "All SNIPE_IT conditions met" not in text
-    assert "STARTER conditions met" in text  # Phase 13.7B contract headline
+    # Phase MA-1A: authorization wording replaces the generic completion claim.
+    assert "STARTER AUTHORIZED" in text
 
 
 # ===========================================================================

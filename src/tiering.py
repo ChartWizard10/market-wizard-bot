@@ -826,6 +826,276 @@ def _backfill_missing_conditions(signal: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Phase MA-1A: NEAR_ENTRY downgrade continuity
+# ---------------------------------------------------------------------------
+# MASTER-AUDIT-1 finding D1. The prompt contract requires SNIPE_IT and STARTER
+# signals to carry `missing_conditions: []` and `upgrade_trigger: "none"`. The
+# NEAR_ENTRY rung of the downgrade cascade requires both to be populated. A
+# higher-tier candidate that failed ONE capital gate therefore skipped the
+# NEAR_ENTRY rung and landed on WAIT — suppressed, and beyond the reach of the
+# downstream ladder, which never promotes from WAIT. A missing metadata field
+# had become a fake market failure.
+#
+# The repair is a ladder, not a cliff: when a downgraded candidate is still a
+# genuinely forming setup, deterministic code names the proof that is actually
+# absent and the exact event that would supply it, using evidence the gates just
+# computed. Nothing here can authorize capital — it only lets a legitimate
+# lifecycle state survive to NEAR_ENTRY so the evidence organs downstream can
+# judge it normally.
+#
+# Guard rails (permanent):
+#   - No fabrication. Every condition is read from a real signal field; no
+#     price, zone, level, target or invalidation is ever invented.
+#   - No fake NEAR_ENTRY. With neither retest nor hold showing partial or
+#     confirmed progress there is nothing forming, and the empty-list veto is
+#     still allowed to produce WAIT (Phase 12B rule, preserved verbatim).
+#   - Existing valid metadata always wins; derivation only fills a real gap.
+#   - Hard failures, semantic geometry and the NEAR score floor are untouched:
+#     the derived metadata is applied BEFORE the NEAR gate runs and rolled back
+#     if that gate still rejects, so a WAIT signal never carries it.
+# ---------------------------------------------------------------------------
+
+_NEAR_CONTINUITY_NOTE = "NEAR_ENTRY_CONTINUITY_DERIVED"
+
+# Vetoes that block entry tiers but are not all-alert blockers, and whose repair
+# is not already named by a signal-level rule below.
+_CONTINUITY_VETO_LABELS = {
+    "price_too_extended": (
+        "extension_repair",
+        "Allow price to return toward value and re-establish a defended entry "
+        "location; do not chase an extended price.",
+    ),
+}
+
+
+def _has_entry_progress(signal: dict) -> bool:
+    """True when at least one of retest/hold shows real forming progress.
+
+    Identical rule to the Phase 12B backfill: with both 'missing' there is no
+    observable progress, and no lifecycle state deserves to be manufactured.
+    """
+    retest = signal.get("retest_status", "missing")
+    hold = signal.get("hold_status", "missing")
+    return retest in ("partial", "confirmed") or hold in ("partial", "confirmed")
+
+
+def _continuity_min_risk_distance_pct(config: dict) -> float:
+    tiers = config.get("tiers", {}) if isinstance(config, dict) else {}
+    starter = tiers.get("starter", {}) if isinstance(tiers, dict) else {}
+    snipe = tiers.get("snipe_it", {}) if isinstance(tiers, dict) else {}
+    try:
+        return float(starter.get("min_risk_distance_pct",
+                                 snipe.get("min_risk_distance_pct", 0.35)))
+    except (TypeError, ValueError):
+        return 0.35
+
+
+def _derive_near_entry_continuity(
+    signal: dict,
+    prefilter_vetoes: list,
+    score: int,
+    config: dict,
+    current_price: float | None,
+) -> tuple[list[str], str]:
+    """Return (missing_conditions, upgrade_trigger) from the ACTUAL evidence.
+
+    Every entry is read from a real field on the signal, the prefilter veto
+    ledger, or config thresholds. The list is honest and may name several gaps;
+    the upgrade trigger is the single highest-priority actionable event, so the
+    operator is told one thing to watch rather than a menu.
+    """
+    tiers = config.get("tiers", {}) if isinstance(config, dict) else {}
+    starter_cfg = tiers.get("starter", {}) if isinstance(tiers, dict) else {}
+    min_rr = starter_cfg.get("min_rr", 3.0)
+    min_score = starter_cfg.get("min_score", 75)
+
+    trigger = signal.get("trigger_level")
+    invalidation = signal.get("invalidation_level")
+    inval_condition = str(signal.get("invalidation_condition", "") or "").strip()
+    targets = signal.get("targets")
+    rr = signal.get("risk_reward")
+    overhead = signal.get("overhead_status", "unknown")
+    alignment = signal.get("sma_value_alignment")
+    retest = signal.get("retest_status", "missing")
+    hold = signal.get("hold_status", "missing")
+    vetoes = set(prefilter_vetoes or [])
+
+    # Ordered most-actionable first. Each entry: (applies, label, trigger).
+    rules: list[tuple[bool, str, str]] = []
+
+    below_trigger = False
+    if current_price is not None and trigger is not None:
+        try:
+            below_trigger = float(current_price) < float(trigger)
+        except (TypeError, ValueError):
+            below_trigger = False
+    rules.append((
+        below_trigger,
+        "trigger_acceptance — price is below trigger and has not confirmed"
+        " acceptance above trigger",
+        "Reclaim the trigger with body acceptance, then hold the level on retest.",
+    ))
+
+    rules.append((
+        retest != "confirmed",
+        f"retest_confirmation — retest is {retest}",
+        "Complete a real retest of the defended structure/zone and preserve"
+        " control on the close.",
+    ))
+    rules.append((
+        hold != "confirmed",
+        f"closed_hold_confirmation — hold is {hold}",
+        "Print a closed hold above the defended retest/trigger level.",
+    ))
+    rules.append((
+        invalidation is None or not inval_condition or inval_condition.lower() == "none",
+        "structural_invalidation — no clear numeric invalidation",
+        "Establish a structurally valid defended low/zone that defines numeric"
+        " invalidation.",
+    ))
+    rules.append((
+        not isinstance(targets, list) or not targets,
+        "structural_target_path — no structural target path",
+        "Establish a clean structural target path before capital is reconsidered.",
+    ))
+
+    rr_below = False
+    if isinstance(rr, (int, float)):
+        try:
+            rr_below = float(rr) < float(min_rr)
+        except (TypeError, ValueError):
+            rr_below = False
+    rules.append((
+        rr_below,
+        f"risk_reward_threshold — R:R below {min_rr}",
+        "Improve entry location/path until R:R returns to the required threshold"
+        " without widening invalidation artificially.",
+    ))
+
+    rules.append((
+        overhead == "blocked",
+        "overhead_clearance — overhead path is blocking entry",
+        "Reclaim/accept through the blocking overhead level or repair to a"
+        " location with a clean target path.",
+    ))
+    rules.append((
+        alignment == "hostile",
+        "value_alignment_repair — value alignment is hostile",
+        "Repair value alignment through reclaim/acceptance of the relevant value"
+        " structure.",
+    ))
+
+    fragile = False
+    if trigger is not None and invalidation is not None:
+        try:
+            t, i = float(trigger), float(invalidation)
+            dist = t - i
+            if t != 0 and dist > 0:
+                fragile = (dist / abs(t) * 100) < _continuity_min_risk_distance_pct(config)
+        except (TypeError, ValueError):
+            fragile = False
+    rules.append((
+        fragile,
+        "risk_window_repair — risk window is below the structural floor",
+        "Establish a legitimate structural risk window above the configured"
+        " floor; do not widen the stop artificially.",
+    ))
+
+    for veto, (label, trig) in _CONTINUITY_VETO_LABELS.items():
+        rules.append((veto in vetoes, f"{label} — prefilter flagged {veto}", trig))
+
+    score_short = False
+    try:
+        score_short = int(score) < int(min_score)
+    except (TypeError, ValueError):
+        score_short = False
+    rules.append((
+        score_short,
+        "setup_readiness — setup quality is below the reduced-size threshold",
+        "Wait for new market evidence to improve setup quality/readiness before"
+        " capital is reconsidered.",
+    ))
+
+    conditions = [label for applies, label, _ in rules if applies]
+    trigger_text = next((trig for applies, _, trig in rules if applies), "")
+
+    if not conditions:
+        # Every named gate reads clean, yet an entry tier was refused. Say so
+        # honestly rather than inventing a specific proof that is not missing.
+        conditions = ["entry_proof — capital-grade entry proof is incomplete"]
+        trigger_text = (
+            "Wait for new market evidence to complete entry proof before capital"
+            " is reconsidered."
+        )
+
+    return conditions, trigger_text
+
+
+def _apply_near_entry_continuity(
+    signal: dict,
+    prefilter_vetoes: list,
+    score: int,
+    config: dict,
+    current_price: float | None,
+    notes: list[str],
+    *,
+    require_progress: bool = True,
+) -> dict | None:
+    """Fill absent NEAR metadata on a downgraded higher-tier signal.
+
+    Mutates only the caller's working copy (validate() never passes the raw
+    signal). Returns a rollback snapshot, or None when nothing was applied.
+
+    `require_progress=False` is used by the current-acceptance downgrade path,
+    which already produces NEAR_ENTRY today — that route is not newly gated, it
+    is only given the lifecycle explanation it previously lacked.
+    """
+    # Proven failure is not forming proof. A signal-level 'failed' retest or
+    # hold is setup damage the scanner has already observed, not evidence that
+    # has yet to arrive, so it is never eligible for lifecycle continuity and
+    # continues to exhaust the cascade to WAIT. Without this the repair would
+    # quietly collapse `failed` into `missing`.
+    if signal.get("retest_status") == "failed" or signal.get("hold_status") == "failed":
+        return None
+    if require_progress and not _has_entry_progress(signal):
+        return None
+
+    existing_mc = signal.get("missing_conditions")
+    has_mc = isinstance(existing_mc, list) and bool(existing_mc)
+    existing_ut = str(signal.get("upgrade_trigger") or "").strip()
+    has_ut = bool(existing_ut) and existing_ut.lower() != "none"
+    if has_mc and has_ut:
+        return None                       # honest Claude metadata always wins
+
+    conditions, trigger_text = _derive_near_entry_continuity(
+        signal, prefilter_vetoes, score, config, current_price
+    )
+
+    snapshot = {
+        "missing_conditions": existing_mc,
+        "upgrade_trigger": signal.get("upgrade_trigger"),
+    }
+    if not has_mc:
+        signal["missing_conditions"] = conditions
+    if not has_ut:
+        signal["upgrade_trigger"] = trigger_text
+    notes.append(_NEAR_CONTINUITY_NOTE)
+    return snapshot
+
+
+def _rollback_near_entry_continuity(
+    signal: dict, snapshot: dict | None, notes: list[str]
+) -> None:
+    """Undo a derivation whose NEAR_ENTRY rung still rejected the candidate."""
+    if snapshot is None:
+        return
+    signal["missing_conditions"] = snapshot["missing_conditions"]
+    signal["upgrade_trigger"] = snapshot["upgrade_trigger"]
+    if notes and notes[-1] == _NEAR_CONTINUITY_NOTE:
+        notes.pop()
+
+
+# ---------------------------------------------------------------------------
 # Phase 12C: Risk Realism informational fields
 # ---------------------------------------------------------------------------
 # Operator-clarity layer. NOT a hard-filter layer.
@@ -994,6 +1264,15 @@ def _determine_final_tier(
                 f"{claude_tier}→WAIT: current_acceptance=damaging with impossible geometry"
             )
             return "WAIT", downgrades, notes
+        # Phase MA-1A: this route reaches NEAR_ENTRY without passing the NEAR
+        # metadata gate, so it could publish a watch state with no stated
+        # missing proof and no upgrade trigger. Explain it. Not newly gated —
+        # progress is not required here because this candidate already became
+        # NEAR_ENTRY under the previous behavior.
+        _apply_near_entry_continuity(
+            signal, prefilter_vetoes, score, config, current_price, notes,
+            require_progress=False,
+        )
         downgrades.append(f"{claude_tier}→NEAR_ENTRY: current_acceptance=damaging")
         return "NEAR_ENTRY", downgrades, notes
 
@@ -1008,11 +1287,18 @@ def _determine_final_tier(
             downgrades.append(f"SNIPE_IT→STARTER: {'; '.join(snipe_failures)}")
             return "STARTER", downgrades, notes
 
+        # Phase MA-1A: the NEAR_ENTRY rung is where a still-forming setup should
+        # land. Supply the lifecycle metadata the prompt contract forbade Claude
+        # from sending before the gate reads it.
+        _continuity = _apply_near_entry_continuity(
+            signal, prefilter_vetoes, score, config, current_price, notes
+        )
         near_failures = _near_entry_gate_failures(signal, score, config, current_price)
         if not near_failures:
             downgrades.append(f"SNIPE_IT→NEAR_ENTRY: {'; '.join(snipe_failures)}")
             return "NEAR_ENTRY", downgrades, notes
 
+        _rollback_near_entry_continuity(signal, _continuity, notes)
         downgrades.append(f"SNIPE_IT→WAIT: {'; '.join(snipe_failures)}")
         return "WAIT", downgrades, notes
 
@@ -1022,11 +1308,16 @@ def _determine_final_tier(
         if not starter_failures:
             return "STARTER", downgrades, notes
 
+        # Phase MA-1A — see the SNIPE_IT path above; same continuity contract.
+        _continuity = _apply_near_entry_continuity(
+            signal, prefilter_vetoes, score, config, current_price, notes
+        )
         near_failures = _near_entry_gate_failures(signal, score, config, current_price)
         if not near_failures:
             downgrades.append(f"STARTER→NEAR_ENTRY: {'; '.join(starter_failures)}")
             return "NEAR_ENTRY", downgrades, notes
 
+        _rollback_near_entry_continuity(signal, _continuity, notes)
         downgrades.append(f"STARTER→WAIT: {'; '.join(starter_failures)}")
         return "WAIT", downgrades, notes
 
