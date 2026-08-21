@@ -492,8 +492,10 @@ class TestFormatAlertQualityNoSideEffects:
         assert "FULL-SIZE AUTHORIZED" in result
 
     def test_capital_label_unchanged_starter(self):
+        """Phase MA-1A: the capital label is authorization wording; the sizing
+        statement it must always accompany is unchanged."""
         result = format_alert(_tiering_result("STARTER"))
-        assert "STARTER conditions met." in result
+        assert "STARTER AUTHORIZED" in result
         assert "STARTER SIZE ONLY" in result
 
     def test_no_capital_yet_unchanged_near_entry(self):
@@ -585,7 +587,8 @@ class TestFormatAlertQualityRegressionGuards:
     def test_starter_execution_block_unchanged(self):
         result = self._render_starter()
         assert "EXECUTION" in result
-        assert "STARTER conditions met." in result
+        # Phase MA-1A: capital-authorization headline (MASTER-AUDIT-1 D2).
+        assert "STARTER AUTHORIZED" in result
 
     def test_quality_line_between_sizing_and_next(self):
         """Quality read line is sandwiched between sizing and Next in ACTION."""

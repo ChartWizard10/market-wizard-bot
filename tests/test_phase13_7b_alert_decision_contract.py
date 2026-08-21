@@ -516,7 +516,10 @@ def test_capital_contract_forbidden_lists_non_empty():
 def test_capital_contract_headlines_per_tier():
     """Contract headlines match Phase 13.7B spec."""
     assert CAPITAL_CONTRACT["SNIPE_IT"]["headline"] == "SNIPE_IT conditions met."
-    assert CAPITAL_CONTRACT["STARTER"]["headline"] == "STARTER conditions met."
+    # Phase MA-1A: STARTER headline states capital authorization, not generic
+    # proof completion (MASTER-AUDIT-1 D2). The denial half stays inline.
+    assert CAPITAL_CONTRACT["STARTER"]["headline"].startswith("STARTER AUTHORIZED")
+    assert "full size not granted" in CAPITAL_CONTRACT["STARTER"]["headline"]
     assert CAPITAL_CONTRACT["NEAR_ENTRY"]["headline"] == (
         "Near-entry watch — no capital until blocker resolves."
     )
@@ -580,9 +583,11 @@ def test_existing_phase136_language_tests_still_pass():
 def test_existing_phase137a_fragile_rr_tests_still_pass():
     """Phase 13.7A / 13.9A fragile risk governor operates correctly on SNIPE_IT and STARTER.
 
-    Phase 13.9A extended the fragile gate to STARTER. CSX-style signal has
-    missing_conditions=[] and upgrade_trigger='none', so NEAR_ENTRY also fails.
-    Full cascade: SNIPE_IT → STARTER (fragile) → NEAR_ENTRY (no conditions) → WAIT.
+    Phase 13.9A extended the fragile gate to STARTER.
+    Phase MA-1A: the invariant is that a fragile stop authorizes NO capital.
+    The cascade now terminates at NEAR_ENTRY (watch, no capital) instead of
+    WAIT, because the WAIT was produced by the prompt-mandated empty NEAR
+    metadata (MASTER-AUDIT-1 D1), not by market evidence.
     """
     from src.tiering import validate
 
@@ -622,6 +627,9 @@ def test_existing_phase137a_fragile_rr_tests_still_pass():
         "reason": "Clean MSS with FVG retest and hold.",
     }
     result = validate(signal, {"veto_flags": []}, _BASE_CONFIG)
-    assert result["final_tier"] == "WAIT"
+    # Phase MA-1A: no capital of any size is the invariant the fragile gate owns.
+    assert result["final_tier"] == "NEAR_ENTRY"
+    assert result["capital_action"] == "wait_no_capital"
+    assert result["final_tier"] not in ("SNIPE_IT", "STARTER")
     downgrade_text = " ".join(result.get("downgrades", []))
     assert "fragile" in downgrade_text.lower()

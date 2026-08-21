@@ -508,7 +508,8 @@ class TestExistingTierContractUnaffected:
     def test_starter_contract_intact(self):
         tr = _tr("STARTER", reason="Retest partial but OB demand holds.")
         text = format_alert(tr)
-        assert "STARTER conditions met." in text
+        # Phase MA-1A: capital-authorization headline (MASTER-AUDIT-1 D2).
+        assert "STARTER AUTHORIZED" in text
         assert "STARTER SIZE ONLY" in text
         assert "NO CAPITAL — WATCH ONLY" not in text
         assert "FULL QUALITY" not in text

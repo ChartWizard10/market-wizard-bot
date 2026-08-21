@@ -502,8 +502,9 @@ class TestFormatAlertRegressionStarter:
     def _render(self, **overrides) -> str:
         return format_alert(_starter_signal(**overrides))
 
-    def test_starter_conditions_met_present(self):
-        assert "STARTER conditions met." in self._render()
+    def test_starter_capital_authorization_present(self):
+        """Phase MA-1A: the sanitizer must not damage the capital headline."""
+        assert "STARTER AUTHORIZED" in self._render()
 
     def test_starter_sizing_present(self):
         assert "STARTER SIZE ONLY" in self._render()

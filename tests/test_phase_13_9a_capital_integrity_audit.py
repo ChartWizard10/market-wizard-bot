@@ -289,17 +289,23 @@ class TestFragileRiskGateOnStarter:
         assert fs["risk_realism_state"] == "fragile"
         assert "fragile" in fs["risk_realism_note"].lower()
 
-    def test_fragile_starter_safe_for_alert_false_when_wait(self):
-        """SNIPE_IT + fragile + no NE conditions → WAIT → safe_for_alert is False."""
-        # _snipe_signal has missing_conditions=[], upgrade_trigger="none" → NE fails → WAIT
+    def test_fragile_starter_authorizes_no_capital(self):
+        """SNIPE_IT + fragile stop → neither full-size nor reduced-size capital.
+
+        Phase MA-1A: the capital invariant is unchanged. Only the terminal tier
+        moved from WAIT to NEAR_ENTRY, because the WAIT was caused by the
+        prompt-mandated empty NEAR metadata (MASTER-AUDIT-1 D1), not by market
+        evidence. A fragile stop still buys no capital of any size.
+        """
         signal = _snipe_signal(
             invalidation_level=_FRAGILE_INVAL,
             targets=_FRAGILE_TARGETS,
             risk_reward=3.5,
         )
         result = validate(signal, _pf(), _BASE_CONFIG)
-        assert result["final_tier"] == "WAIT"
-        assert result["safe_for_alert"] is False
+        assert result["final_tier"] == "NEAR_ENTRY"
+        assert result["capital_action"] == "wait_no_capital"
+        assert result["final_tier"] not in ("SNIPE_IT", "STARTER")
 
 
 # ===========================================================================

@@ -114,7 +114,16 @@ CAPITAL_CONTRACT: dict[str, dict] = {
         ],
     },
     "STARTER": {
-        "headline": "STARTER conditions met.",
+        # Phase MA-1A (MASTER-AUDIT-1 D2): the old "STARTER conditions met."
+        # headline was a generic proof claim keyed only on the final tier, so it
+        # could assert completion in the same message that printed a missing
+        # retest or hold. STARTER may be authorized through more than one proof
+        # route; the headline therefore states CAPITAL truth — which is what
+        # this contract owns — and leaves EVIDENCE truth to the organs that own
+        # it. The denial half is kept inline so the line can never be read as
+        # full-size permission.
+        "headline": "STARTER AUTHORIZED — reduced-size capital; "
+                    "full size not granted.",
         "sizing": "STARTER SIZE ONLY — reduced-size capital only.",
         "capital_state": "starter_only",
         # Forbidden in STARTER alert text — longest first.
@@ -1858,6 +1867,113 @@ def _one_hour_proof_incomplete(one_hour) -> bool:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase MA-1A: EXECUTION retest/hold display provenance (MASTER-AUDIT-1 D2)
+# ---------------------------------------------------------------------------
+# The EXECUTION block printed Claude's Daily-stage retest_status/hold_status
+# verbatim. When the dedicated 1H entry engine has since proven a real retest or
+# a confirmed hold, that stale upstream field contradicted the authoritative
+# evidence further down the same message.
+#
+# Jurisdiction stays honest in BOTH directions. The 1H engine owns 1H trigger
+# proof, so its verdict is displayed and labelled "(1H)" — never relabelled as
+# Daily proof, and never recomputed here. Forming/weak/failed 1H states render
+# as forming/weak/failed: an unconfirmed 1H truth may not be dressed as
+# confirmation, and a live bar cannot manufacture one because the 1H organ
+# already refuses to emit HOLD_CONFIRMED from an open candle. When no usable 1H
+# evidence exists, the signal-level field is shown exactly as before.
+# ---------------------------------------------------------------------------
+
+_RETEST_TRUTH_DISPLAY = {
+    "RETEST_CORE_VALID": "confirmed (1H)",
+    "RETEST_REAL":       "confirmed (1H)",
+    "RETEST_EDGE_ONLY":  "edge-only (1H)",
+    "RETEST_MISSED":     "missed (1H)",
+}
+_HOLD_TRUTH_DISPLAY = {
+    "HOLD_CONFIRMED": "confirmed (1H)",
+    "HOLD_FORMING":   "forming (1H)",
+    "HOLD_WEAK":      "weak (1H)",
+    "HOLD_FAILED":    "failed (1H)",
+}
+
+
+def _ladder_authorized_tier(tiering_result, final_tier: str) -> bool:
+    """True when the SNIPE ladder promoted this candidate into its final tier.
+
+    Reads the stored arbitration note only — no tier, ladder or evidence is
+    recomputed here. Used purely to label the displayed score honestly.
+    """
+    if str(final_tier).upper() not in ("SNIPE_IT", "STARTER"):
+        return False
+    if not isinstance(tiering_result, dict):
+        return False
+    for note in tiering_result.get("downgrades") or []:
+        if "ladder arbitration (promoted)" in str(note):
+            return True
+    return False
+
+
+def _starter_promotion_provenance(tiering_result, final_tier: str) -> list[str]:
+    """Ladder-sourced answers to 'why STARTER and not SNIPE, and what promotes it'.
+
+    Every string is read verbatim from the already-stored ladder result. Nothing
+    is recomputed, re-graded or invented; when the ladder did not supply a field
+    the corresponding line is simply absent.
+    """
+    if str(final_tier).upper() != "STARTER":
+        return []
+    ladder = tiering_result.get("snipe_ladder") if isinstance(tiering_result, dict) else None
+    if not isinstance(ladder, dict):
+        return []
+
+    out: list[str] = []
+    why_not_higher = str(ladder.get("why_not_higher") or "").strip()
+    if why_not_higher:
+        out.append(f"  Not SNIPE: {_sanitize(_clip(why_not_higher, 150))}")
+    proofs = ladder.get("next_promotion_proof")
+    if isinstance(proofs, list) and proofs:
+        first = str(proofs[0] or "").strip()
+        if first:
+            out.append(f"  Promote on: {_sanitize(_clip(first, 110))}")
+    return out
+
+
+def _clip(text: str, limit: int) -> str:
+    text = str(text).strip()
+    return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _one_hour_evidence_usable(one_hour) -> bool:
+    """True when the 1H object is present, enabled and not stale.
+
+    A DISABLED/ERROR object or STALE data has no display authority — the
+    existing signal-level fields remain the honest fallback.
+    """
+    if not isinstance(one_hour, dict) or not one_hour:
+        return False
+    if str(one_hour.get("status", "DISABLED")).upper() in ("DISABLED", "ERROR"):
+        return False
+    if str(one_hour.get("data_freshness", "")).upper() == "STALE":
+        return False
+    return True
+
+
+def _resolve_proof_display(one_hour, truth_key: str, table: dict, fallback: str) -> str:
+    """Return the authoritative display string for retest or hold.
+
+    Precedence: dedicated 1H entry evidence when usable and it actually carries
+    the truth field, otherwise the signal-level status unchanged.
+    """
+    if not _one_hour_evidence_usable(one_hour):
+        return fallback
+    prh = one_hour.get("pullback_retest_hold")
+    if not isinstance(prh, dict):
+        return fallback
+    truth = str(prh.get(truth_key, "") or "").upper().strip()
+    return table.get(truth, fallback)
+
+
 def _apply_one_hour_truth_alignment_guard(body: str, one_hour) -> str:
     """Cool legacy retest/hold/quality PROOF wording when the 1H object — the
     sovereign trigger-proof source — has not confirmed a closed hold.
@@ -1976,8 +2092,15 @@ _STARTER_THESIS_HEADLINE = (
     "STARTER thesis valid — structure holds, but fresh 1H trigger proof is "
     "incomplete; no fresh aggression until closed 1H hold."
 )
+# Phase MA-1A: the Phase-14Q guards cool an overstated STARTER headline by
+# rewriting the ACTION headline line. MA-1A replaced that headline, so the
+# pattern must match BOTH forms — the current authorization headline and the
+# legacy completion phrase, which the contract-guard/sovereignty sanitizers can
+# still synthesize from contradicting Claude prose. Matching only one of them
+# would silently disable 14Q.
 _STARTER_CONDITIONS_MET_LINE_RE = re.compile(
-    r"^([ \t]*)STARTER conditions met\.[ \t]*$", re.MULTILINE
+    r"^([ \t]*)(?:STARTER conditions met\.|STARTER AUTHORIZED —[^\n]*)[ \t]*$",
+    re.MULTILINE,
 )
 _STARTER_ENTRY_VALID_NOW_RE = re.compile(
     r"\bentry valid (?:now|near current[\w \t]*)\b", re.IGNORECASE
@@ -2547,16 +2670,29 @@ def format_alert(
     _candle_veto    = str(_candle.get("candle_veto", "NONE")).strip().upper()
     _has_candle_gap = _has_candle_confirmation_gap(_candle)
 
+    # Phase MA-1A: EXECUTION shows the authoritative final evidence, not a stale
+    # upstream field the 1H engine has already superseded. Provenance is kept
+    # visible; the 1H organ's own truth states are trusted, never recomputed.
+    _one_hour_obj = tiering_result.get("one_hour_entry")
+    _retest_display = _sanitize(_resolve_proof_display(
+        _one_hour_obj, "retest_truth", _RETEST_TRUTH_DISPLAY, retest_status))
+    _hold_display = _sanitize(_resolve_proof_display(
+        _one_hour_obj, "hold_truth", _HOLD_TRUTH_DISPLAY, hold_status))
+    # Phase MA-1A: when the ladder — not the base score gate — authorized this
+    # tier, the header must not imply the number itself cleared the historical
+    # base threshold. The value is never changed, only labelled truthfully.
+    _score_label = "Base Score" if _ladder_authorized_tier(tiering_result, final_tier) else "Score"
+
     lines = [
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"{badge} | {ticker} | Score: {score}",
+        f"{badge} | {ticker} | {_score_label}: {score}",
         f"Setup: {setup_family}  |  Structure: {structure_event}",
         f"Trend: {trend_state}  |  Zone: {zone_type}",
         "──────────────────────────────",
         "EXECUTION",
         f"  Trigger:      {_fmt_level(trigger_level)}",
-        f"  Retest:       {retest_status}",
-        f"  Hold:         {hold_status}",
+        f"  Retest:       {_retest_display}",
+        f"  Hold:         {_hold_display}",
         f"  Invalidation: {inval_condition} @ {_fmt_level(inval_level)}",
         f"  R:R:          {rr_str}",
         f"  Overhead:     {overhead_label}",
@@ -2767,6 +2903,13 @@ def format_alert(
         )
         if _lane_public in ("STARTER_ENTRY", "SNIPER_ENTRY") and _lane_grade not in (None, "", "NONE"):
             lines.append(f"  Lane: {_lane_public} | {_lane_grade}")
+    # Phase MA-1A: a STARTER alert must answer why reduced capital is legal and
+    # why full size is not. The ladder already computed both; surface them
+    # instead of leaving the operator with a bare basket label. Appended under a
+    # length budget so the Discord limit is never breached (lowest-value line is
+    # dropped first) — an honest short alert beats a truncated one.
+    for _prov_line in _starter_promotion_provenance(tiering_result, final_tier):
+        lines.append(_prov_line)
     # Phase 14C.2 / 14C.3B Defect 3: repeated-signal realism. Keeps tier
     # intact and declares explicit capital posture (hold / conditional-add /
     # no-capital / starter-only) so the repeated alert is never mistaken for
@@ -2938,7 +3081,37 @@ def format_alert(
         rendered = rendered.replace(_SNIPE_AUDIT_SENTINEL, _snipe_audit_line)
     if _htf_context_line:
         rendered = rendered.replace(_HTF_CONTEXT_SENTINEL, _htf_context_line)
+    # Phase MA-1A: enforce the length budget the provenance lines opted into.
+    # Only MA-1A's own additions are eligible for removal, lowest value first —
+    # no pre-existing line, structured block or capital statement is ever cut.
+    rendered = _fit_within_discord_limit(rendered)
     return rendered
+
+
+_MA1A_OPTIONAL_LINE_PREFIXES = ("  Promote on: ", "  Not SNIPE: ")
+
+
+def _fit_within_discord_limit(body: str) -> str:
+    """Drop MA-1A provenance lines only when that actually buys compliance.
+
+    Removing explanation is a real cost, so it is paid only when it wins
+    something: if the body still exceeds the limit after dropping them, the
+    lines are kept and `chunk_message` splits on line boundaries as it always
+    has. Truth is never traded for a saving that does not materialize, and no
+    pre-existing line is ever eligible for removal.
+    """
+    if len(body) <= _DISCORD_MAX_CHARS:
+        return body
+    lines = body.split("\n")
+    for count in range(1, len(_MA1A_OPTIONAL_LINE_PREFIXES) + 1):
+        drop = set(_MA1A_OPTIONAL_LINE_PREFIXES[:count])
+        kept = [ln for ln in lines if not ln.startswith(tuple(drop))]
+        if len(kept) == len(lines):
+            continue
+        candidate = "\n".join(kept)
+        if len(candidate) <= _DISCORD_MAX_CHARS:
+            return candidate
+    return body
 
 
 # ---------------------------------------------------------------------------

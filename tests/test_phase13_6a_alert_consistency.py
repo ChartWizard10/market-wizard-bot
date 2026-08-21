@@ -245,8 +245,10 @@ def test_starter_capital_language_correct():
     # Must say STARTER capital language
     assert "STARTER SIZE ONLY" in text
 
-    # Must say STARTER action label (Phase 13.7B contract headline)
-    assert "STARTER conditions met." in text
+    # Must say STARTER action label. Phase MA-1A: that label is capital
+    # authorization wording, not a generic all-conditions-met proof claim.
+    assert "STARTER AUTHORIZED" in text
+    assert "STARTER conditions met." not in text
 
     # Must NOT say NEAR_ENTRY capital language
     assert "NO CAPITAL — WATCH ONLY" not in text
