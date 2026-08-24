@@ -19,7 +19,7 @@ def test_production_model_is_anthropic_claude_opus_5():
     """AI-2R: Anthropic is the sole production provider; Opus 5 is the model."""
     cfg = _load()
     assert cfg["claude"]["model"] == "claude-opus-5"
-    assert cfg["claude"]["max_tokens"] == 1200
+    assert cfg["claude"]["max_tokens"] == 8192
     assert "model" not in cfg          # the OpenAI provider block is gone
 
 
