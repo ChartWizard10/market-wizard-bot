@@ -457,6 +457,58 @@ def parse_and_validate_json(
 
 
 # ---------------------------------------------------------------------------
+# Anthropic content-block extraction
+# ---------------------------------------------------------------------------
+
+def _content_block_field(block: Any, field: str) -> Any:
+    """Read one Anthropic content-block field without assuming SDK shape."""
+    if isinstance(block, dict):
+        return block.get(field)
+    return getattr(block, field, None)
+
+
+def _extract_response_text(response: Any) -> tuple[str | None, str | None]:
+    """Extract only visible Anthropic text blocks, preserving their order.
+
+    Opus 5 may return thinking/redacted-thinking blocks before the visible
+    TextBlock. Thinking is never scanner output and must never become market
+    evidence, logs, persistence, or tier input.
+
+    A type-less object exposing a string ``text`` field is accepted only for
+    backwards compatibility with older/simple mocked TextBlock shapes.
+    """
+    content = (
+        response.get("content")
+        if isinstance(response, dict)
+        else getattr(response, "content", None)
+    )
+    if not isinstance(content, (list, tuple)):
+        return None, "response.content is missing or not a list"
+
+    text_parts: list[str] = []
+    block_types: list[str] = []
+
+    for block in content:
+        block_type = _content_block_field(block, "type")
+        if block_type is not None:
+            block_types.append(str(block_type))
+
+        text = _content_block_field(block, "text")
+        if block_type == "text" and isinstance(text, str):
+            text_parts.append(text)
+        elif block_type is None and isinstance(text, str):
+            # Legacy/mock compatibility only. Explicit non-text block types
+            # (including thinking/redacted_thinking) are never consumed.
+            text_parts.append(text)
+
+    if not text_parts:
+        types = ", ".join(block_types) if block_types else "none"
+        return None, f"response contained no text blocks (types={types})"
+
+    return "".join(text_parts), None
+
+
+# ---------------------------------------------------------------------------
 # Historical single Claude call compatibility path
 # ---------------------------------------------------------------------------
 
@@ -484,7 +536,6 @@ async def claude_call(
                 system=system_prompt,
                 messages=[{"role": "user", "content": prompt_text}],
             )
-            response_text = response.content[0].text
         except Exception as exc:
             if _is_rate_limit_error(exc):
                 log.warning("CLAUDE_RATE_LIMITED: %s: %s", ticker, exc)
@@ -501,6 +552,20 @@ async def claude_call(
                 "error_type": "CLAUDE_API_ERROR",
                 "error_message": str(exc),
             }
+
+    response_text, response_shape_error = _extract_response_text(response)
+    if response_text is None:
+        log.warning(
+            "CLAUDE_RESPONSE_NO_TEXT: %s: %s",
+            ticker,
+            response_shape_error,
+        )
+        return {
+            "ticker": ticker,
+            "signal": None,
+            "error_type": "CLAUDE_RESPONSE_NO_TEXT",
+            "error_message": response_shape_error,
+        }
 
     signal, error_type, error_message = parse_and_validate_json(response_text)
 
