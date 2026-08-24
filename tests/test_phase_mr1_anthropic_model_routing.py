@@ -396,7 +396,7 @@ def test_doctrine_config_holds_the_opus5_production_model():
     import yaml
     cfg = yaml.safe_load(open("config/doctrine_config.yaml"))
     assert cfg["claude"]["model"] == OPUS
-    assert cfg["claude"]["max_tokens"] == 1200
+    assert cfg["claude"]["max_tokens"] == 8192
 
 
 def test_rate_governor_and_concurrency_settings_are_untouched(monkeypatch):
