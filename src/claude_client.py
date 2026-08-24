@@ -462,9 +462,12 @@ def parse_and_validate_json(
 
 def _content_block_field(block: Any, field: str) -> Any:
     """Read one Anthropic content-block field without assuming SDK shape."""
-    if isinstance(block, dict):
-        return block.get(field)
-    return getattr(block, field, None)
+    value = block.get(field) if isinstance(block, dict) else getattr(block, field, None)
+    # Legacy MagicMock/SimpleNamespace test doubles may synthesize a non-string
+    # ``type`` attribute. Only a real string block type is authoritative.
+    if field == "type" and not isinstance(value, str):
+        return None
+    return value
 
 
 def _extract_response_text(response: Any) -> tuple[str | None, str | None]:
@@ -491,7 +494,7 @@ def _extract_response_text(response: Any) -> tuple[str | None, str | None]:
     for block in content:
         block_type = _content_block_field(block, "type")
         if block_type is not None:
-            block_types.append(str(block_type))
+            block_types.append(block_type)
 
         text = _content_block_field(block, "text")
         if block_type == "text" and isinstance(text, str):
