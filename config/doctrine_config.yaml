@@ -116,10 +116,12 @@ discord:
 # src/claude_client.py — there is no adapter and no secondary provider.
 #
 # Model routing: ANTHROPIC_MODEL -> this value -> DEFAULT_CLAUDE_MODEL.
-# Pacing values are consumed by src/claude_client.py and are unchanged.
+# Opus 5 adaptive thinking is on by default and its reasoning tokens count
+# against max_tokens together with the visible JSON response. The prior 1200
+# ceiling could therefore truncate valid JSON after a successful HTTP 200.
 claude:
   model: "claude-opus-5"
-  max_tokens: 1200
+  max_tokens: 8192
   max_concurrent_calls: 8
   claude_concurrency: 1
   claude_min_seconds_between_calls: 4

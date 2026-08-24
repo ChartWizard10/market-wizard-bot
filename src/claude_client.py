@@ -470,6 +470,12 @@ def _content_block_field(block: Any, field: str) -> Any:
     return value
 
 
+def _response_stop_reason(response: Any) -> str | None:
+    """Return a real Anthropic stop reason without trusting synthetic mocks."""
+    value = response.get("stop_reason") if isinstance(response, dict) else getattr(response, "stop_reason", None)
+    return value if isinstance(value, str) else None
+
+
 def _extract_response_text(response: Any) -> tuple[str | None, str | None]:
     """Extract only visible Anthropic text blocks, preserving their order.
 
@@ -527,7 +533,7 @@ async def claude_call(
     ticker = enriched.get("ticker", "UNKNOWN")
     claude_cfg = config.get("claude", {})
     model, _model_source = resolve_claude_model(config)
-    max_tokens = claude_cfg.get("max_tokens", 1200)
+    max_tokens = int(claude_cfg.get("max_tokens", 8192))
 
     prompt_text = build_prompt(enriched)
 
@@ -555,6 +561,21 @@ async def claude_call(
                 "error_type": "CLAUDE_API_ERROR",
                 "error_message": str(exc),
             }
+
+    stop_reason = _response_stop_reason(response)
+    if stop_reason in {"max_tokens", "model_context_window_exceeded"}:
+        log.warning(
+            "CLAUDE_OUTPUT_TRUNCATED: %s: stop_reason=%s max_tokens=%d",
+            ticker,
+            stop_reason,
+            max_tokens,
+        )
+        return {
+            "ticker": ticker,
+            "signal": None,
+            "error_type": "CLAUDE_OUTPUT_TRUNCATED",
+            "error_message": f"stop_reason={stop_reason}; max_tokens={max_tokens}",
+        }
 
     response_text, response_shape_error = _extract_response_text(response)
     if response_text is None:

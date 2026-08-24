@@ -418,8 +418,9 @@ def test_scanner_strategy_configuration_is_preserved():
     assert cfg["prefilter"]["max_claude_candidates_per_scan"] == 30
     assert cfg["prefilter"]["prefilter_min_score"] == 55
     assert cfg["tiers"]["snipe_it"]["min_rr"] == 3.0
-    # Pacing values are untouched by AI-2R.
-    assert cfg["claude"]["max_tokens"] == 1200
+    # AI-2R pacing remains intact; the Opus 5 output ceiling was later raised
+    # after a live adaptive-thinking truncation incident.
+    assert cfg["claude"]["max_tokens"] == 8192
     assert cfg["claude"]["claude_concurrency"] == 1
     assert cfg["claude"]["claude_min_seconds_between_calls"] == 4
     assert cfg["claude"]["claude_max_input_tokens_per_minute_budget"] == 25000
