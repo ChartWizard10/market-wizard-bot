@@ -43,16 +43,17 @@ jobs:
               insert_anchor = '_OH_APLUS_SETUP_RE = re.compile(r"\\bA\\+[ \\t]+setup\\b", re.IGNORECASE)\n'
               if insert_anchor not in text:
                   raise SystemExit('STOP: MA-1C regex insertion anchor not found; refusing broad edit')
-              reason_regex = '''# Phase MA-1C.1: scope proof-claim cooling to affirmative Why narrative.
-          # Future/conditional instructions (Next:, upgrade triggers, blockers) must
-          # preserve phrases such as "wait until confirmed retest"; rewriting those
-          # phrases can invert the operator instruction. The live defect originated
-          # in affirmative Why: prose, so MA-1C proof cooling is intentionally scoped
-          # to that line while the existing dedicated EXECUTION/1H blocks stay sovereign.
-          _OH_REASON_LINE_RE = re.compile(
-              r"^([ \\t]*Why:[ \\t]*)(.*)$", re.MULTILINE
-          )
-          '''
+              reason_regex = (
+                  '# Phase MA-1C.1: scope proof-claim cooling to affirmative Why narrative.\n'
+                  '# Future/conditional instructions (Next:, upgrade triggers, blockers) must\n'
+                  '# preserve phrases such as "wait until confirmed retest"; rewriting those\n'
+                  '# phrases can invert the operator instruction. The live defect originated\n'
+                  '# in affirmative Why: prose, so MA-1C proof cooling is intentionally scoped\n'
+                  '# to that line while the existing dedicated EXECUTION/1H blocks stay sovereign.\n'
+                  '_OH_REASON_LINE_RE = re.compile(\n'
+                  '    r"^([ \\t]*Why:[ \\t]*)(.*)$", re.MULTILINE\n'
+                  ')\n'
+              )
               text = text.replace(insert_anchor, reason_regex + insert_anchor, 1)
 
               start_anchor = '    if not _hold_confirmed_1h:\n        _pair_replacement = (\n'
@@ -62,40 +63,41 @@ jobs:
               if start < 0 or end < 0:
                   raise SystemExit('STOP: MA-1C guard slice anchors not found; refusing broad edit')
 
-              scoped_guard = '''    def _cool_affirmative_reason_line(match: re.Match) -> str:
-              """Cool stale 1H proof claims only inside affirmative Why: prose.
-
-              Future/conditional operator instructions elsewhere in the alert are
-              deliberately untouched. This is display-only and does not mutate any
-              evidence object, tier, capital state, routing, or scanner decision.
-              """
-              prefix, prose = match.group(1), match.group(2)
-
-              if not _hold_confirmed_1h:
-                  pair_replacement = (
-                      "confirmed 1H retest; closed 1H hold still pending"
-                      if _retest_confirmed_1h
-                      else "1H retest/hold proof remains incomplete"
-                  )
-                  prose = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(
-                      pair_replacement, prose
-                  )
-                  prose = _OH_CLOSED_HOLD_CLAIM_RE.sub(
-                      "closed 1H hold still pending", prose
-                  )
-                  prose = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(
-                      "1H hold not yet confirmed", prose
-                  )
-              if not _retest_confirmed_1h:
-                  prose = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(
-                      "1H retest not yet confirmed", prose
-                  )
-
-              return prefix + prose
-
-              result = _OH_REASON_LINE_RE.sub(_cool_affirmative_reason_line, result)
-
-          '''
+              scoped_guard = (
+                  '    def _cool_affirmative_reason_line(match: re.Match) -> str:\n'
+                  '        """Cool stale 1H proof claims only inside affirmative Why: prose.\n'
+                  '\n'
+                  '        Future/conditional operator instructions elsewhere in the alert are\n'
+                  '        deliberately untouched. This is display-only and does not mutate any\n'
+                  '        evidence object, tier, capital state, routing, or scanner decision.\n'
+                  '        """\n'
+                  '        prefix, prose = match.group(1), match.group(2)\n'
+                  '\n'
+                  '        if not _hold_confirmed_1h:\n'
+                  '            pair_replacement = (\n'
+                  '                "confirmed 1H retest; closed 1H hold still pending"\n'
+                  '                if _retest_confirmed_1h\n'
+                  '                else "1H retest/hold proof remains incomplete"\n'
+                  '            )\n'
+                  '            prose = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(\n'
+                  '                pair_replacement, prose\n'
+                  '            )\n'
+                  '            prose = _OH_CLOSED_HOLD_CLAIM_RE.sub(\n'
+                  '                "closed 1H hold still pending", prose\n'
+                  '            )\n'
+                  '            prose = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(\n'
+                  '                "1H hold not yet confirmed", prose\n'
+                  '            )\n'
+                  '        if not _retest_confirmed_1h:\n'
+                  '            prose = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(\n'
+                  '                "1H retest not yet confirmed", prose\n'
+                  '            )\n'
+                  '\n'
+                  '        return prefix + prose\n'
+                  '\n'
+                  '    result = _OH_REASON_LINE_RE.sub(_cool_affirmative_reason_line, result)\n'
+                  '\n'
+              )
               text = text[:start] + scoped_guard + text[end:]
               src.write_text(text)
               print('Applied MA-1C.1 source hotfix')
