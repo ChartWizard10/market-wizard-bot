@@ -1,0 +1,56 @@
+name: MA-1C.1 Final Review Correction
+on:
+  push:
+    branches: [phase-ma1c1-conditional-narrative-hotfix]
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: phase-ma1c1-conditional-narrative-hotfix
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - run: python -m pip install -r requirements.txt
+      - name: Patch display-only conditional proof guard
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/discord_alerts.py')
+          s=p.read_text()
+          s=s.replace('rf"capital|entry|full(?:[ \\t-]+size)?|starter[ \\t]+sizing|"', 'rf"capital|entry|execution|execute|executing|orders?|full(?:[ \\t-]+size)?|starter[ \\t]+sizing|"', 1)
+          s=s.replace('''        line = match.group(0)\n        if _OH_CONDITIONAL_LINE_RE.match(line):\n            return line\n\n        protected: list[tuple[str, str]] = []\n''', '''        line = match.group(0)\n        _is_labeled_conditional = bool(_OH_CONDITIONAL_LINE_RE.match(line))\n\n        protected: list[tuple[str, str]] = []\n''', 1)
+          anchor='''_OH_PROOF_BEFORE_REQUIREMENT_RE = re.compile(\n    rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})"\n    r"(?=[ \\t]+(?:(?:is|are)[ \\t]+)?(?:required|needed)\\b)",\n    re.IGNORECASE,\n)\n'''
+          add=anchor+'''_OH_LABELED_LEADING_PROOF_RE = re.compile(\n    rf"^(?:[ \\t]*(?:Next|Blocker|Missing[ \\t]+conditions|Missing[ \\t]+proof|Upgrade[ \\t]+trigger|Promote[ \\t]+on|Not[ \\t]+SNIPE)[ \\t]*:[ \\t]*)(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",\n    re.IGNORECASE,\n)\n'''
+          if '_OH_LABELED_LEADING_PROOF_RE' not in s:
+              if anchor not in s: raise SystemExit('proof anchor missing')
+              s=s.replace(anchor,add,1)
+          old='''        # Protect only the proof span owned by future/conditional grammar.\n        line = _OH_FUTURE_BEFORE_PROOF_RE.sub(\n            _stash_conditional_proof, line\n        )\n'''
+          new='''        # Protect only proof spans owned by future/conditional grammar.\n        if _is_labeled_conditional:\n            line = _OH_LABELED_LEADING_PROOF_RE.sub(_stash_conditional_proof, line)\n        line = _OH_FUTURE_BEFORE_PROOF_RE.sub(\n            _stash_conditional_proof, line\n        )\n'''
+          if old not in s: raise SystemExit('protection anchor missing')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          t=Path('tests/test_phase_ma1c_one_hour_narrative_truth.py')
+          x=t.read_text()
+          if 'test_labeled_conditional_field_does_not_shield_stale_context' not in x:
+              x+='''\n\ndef test_labeled_conditional_field_does_not_shield_stale_context():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    out = _guard("Next: buyers confirmed hold at value, but wait for another close before entry.", oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "wait for another close before entry" in out\n\ndef test_labeled_leading_proof_remains_future_requirement():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    assert _guard("Next: confirmed hold before entry.", oh) == "Next: confirmed hold before entry."\n\ndef test_execution_after_proof_remains_future_requirement():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    for body in ("Execution after confirmed hold is permitted.", "Execute after confirmed hold.", "Order after confirmed hold."):\n        assert _guard(body, oh) == body\n'''
+              t.write_text(x)
+          PY
+      - name: Validate
+        run: |
+          python -m pytest -q tests/test_phase_ma1c_one_hour_narrative_truth.py tests/test_phase_14e1a_alert_truth_alignment.py
+          python -m compileall -q src tests main.py
+          python -m pytest -q
+      - name: Commit only if green
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/discord_alerts.py tests/test_phase_ma1c_one_hour_narrative_truth.py
+          git diff --cached --quiet && exit 0
+          git commit -m "Phase MA-1C.1 close final review P1s"
+          git push origin HEAD:phase-ma1c1-conditional-narrative-hotfix
