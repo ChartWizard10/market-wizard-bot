@@ -1822,6 +1822,26 @@ _OH_QUALITY_LINE_RE = re.compile(
 _OH_CONFIRMED_SEQUENCE_RE = re.compile(
     r"\bconfirmed[ \t]+sequence[ \t]+and[ \t]+hold\b", re.IGNORECASE
 )
+# Phase MA-1C: free-form 1H narrative sovereignty. The MA-1A EXECUTION
+# block already displays dedicated 1H retest/hold truth, but Claude prose
+# can still carry stale Daily-stage claims such as "confirmed retest and
+# closed-bar hold". These patterns are intentionally prose-only; the
+# structured 1H block is spliced after all guards and cannot be rewritten.
+_OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE = re.compile(
+    r"\bconfirmed[ \t]+retest[ \t]+and[ \t]+(?:a[ \t]+)?"
+    r"(?:confirmed[ \t]+)?closed(?:[ \t-]+bar|[ \t-]+candle)?[ \t]+hold\b",
+    re.IGNORECASE,
+)
+_OH_CLOSED_HOLD_CLAIM_RE = re.compile(
+    r"\b(?:confirmed[ \t]+)?closed(?:[ \t-]+bar|[ \t-]+candle)?[ \t]+hold\b",
+    re.IGNORECASE,
+)
+_OH_CONFIRMED_HOLD_CLAIM_RE = re.compile(
+    r"\b(?:confirmed[ \t]+hold|hold[ \t]+confirmed)\b", re.IGNORECASE
+)
+_OH_CONFIRMED_RETEST_CLAIM_RE = re.compile(
+    r"\b(?:confirmed[ \t]+retest|retest[ \t]+confirmed)\b", re.IGNORECASE
+)
 _OH_APLUS_SETUP_RE = re.compile(r"\bA\+[ \t]+setup\b", re.IGNORECASE)
 _OH_NEAR_READY_RE = re.compile(r"\bnear[\t\- ]ready\b", re.IGNORECASE)
 
@@ -1999,6 +2019,47 @@ def _apply_one_hour_truth_alignment_guard(body: str, one_hour) -> str:
     result = _OH_CONFIRMED_SEQUENCE_RE.sub(
         "structure present; 1H hold not yet confirmed", result
     )
+
+    # Phase MA-1C: preserve each organ's jurisdiction inside free-form
+    # narrative. A valid 1H retest may remain described as confirmed even
+    # while the hold is weak/forming; only the unproven component is
+    # cooled. Stale/degraded 1H evidence cannot retain confirmation prose.
+    _prh = one_hour.get("pullback_retest_hold") or {}
+    _retest_truth = str(_prh.get("retest_truth", "")).upper().strip()
+    _hold_truth = str(_prh.get("hold_truth", "")).upper().strip()
+    _usable_1h = _one_hour_evidence_usable(one_hour)
+    _retest_confirmed_1h = _usable_1h and _retest_truth in {
+        "RETEST_CORE_VALID", "RETEST_REAL",
+    }
+    _hold_confirmed_1h = (
+        _usable_1h
+        and _hold_truth == "HOLD_CONFIRMED"
+        and str(one_hour.get("trigger_state", "")).upper().strip()
+            in _ONE_HOUR_CONFIRMED_STATES
+        and str(one_hour.get("alert_truth_label", "")).upper().strip()
+            in _ONE_HOUR_CONFIRMED_ALERTS
+    )
+
+    if not _hold_confirmed_1h:
+        _pair_replacement = (
+            "confirmed 1H retest; closed 1H hold still pending"
+            if _retest_confirmed_1h
+            else "1H retest/hold proof remains incomplete"
+        )
+        result = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(
+            _pair_replacement, result
+        )
+        result = _OH_CLOSED_HOLD_CLAIM_RE.sub(
+            "closed 1H hold still pending", result
+        )
+        result = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(
+            "1H hold not yet confirmed", result
+        )
+    if not _retest_confirmed_1h:
+        result = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(
+            "1H retest not yet confirmed", result
+        )
+
     result = _OH_APLUS_SETUP_RE.sub("Watch-only valid setup", result)
     result = _OH_NEAR_READY_RE.sub("watch-only", result)
 
