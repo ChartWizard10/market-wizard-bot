@@ -95,48 +95,49 @@ jobs:
               if helper_start < 0 or helper_end < 0:
                   raise SystemExit('STOP: MA-1C.1 helper slice anchors not found')
 
-              new_helper = '''    def _cool_nonconditional_proof_line(match: re.Match) -> str:
-              """Cool stale affirmative proof claims while preserving future conditions.
-
-              Known conditional alert fields and explicit future-requirement language
-              are left verbatim. Every other descriptive line remains subject to 1H
-              proof sovereignty, including target reasons and forced-participation
-              prose. Display-only: no evidence, tier, capital, routing, or score change.
-              """
-              line = match.group(0)
-              if (
-                  _OH_CONDITIONAL_LINE_RE.match(line)
-                  or _OH_FUTURE_REQUIREMENT_RE.search(line)
-              ):
-                  return line
-
-              line = _OH_CONFIRMED_SEQUENCE_RE.sub(
-                  "structure present; 1H hold not yet confirmed", line
+              new_helper = (
+                  '    def _cool_nonconditional_proof_line(match: re.Match) -> str:\n'
+                  '        """Cool stale affirmative proof claims while preserving future conditions.\n'
+                  '\n'
+                  '        Known conditional alert fields and explicit future-requirement language\n'
+                  '        are left verbatim. Every other descriptive line remains subject to 1H\n'
+                  '        proof sovereignty, including target reasons and forced-participation\n'
+                  '        prose. Display-only: no evidence, tier, capital, routing, or score change.\n'
+                  '        """\n'
+                  '        line = match.group(0)\n'
+                  '        if (\n'
+                  '            _OH_CONDITIONAL_LINE_RE.match(line)\n'
+                  '            or _OH_FUTURE_REQUIREMENT_RE.search(line)\n'
+                  '        ):\n'
+                  '            return line\n'
+                  '\n'
+                  '        line = _OH_CONFIRMED_SEQUENCE_RE.sub(\n'
+                  '            "structure present; 1H hold not yet confirmed", line\n'
+                  '        )\n'
+                  '        if not _hold_confirmed_1h:\n'
+                  '            pair_replacement = (\n'
+                  '                "confirmed 1H retest; closed 1H hold still pending"\n'
+                  '                if _retest_confirmed_1h\n'
+                  '                else "1H retest/hold proof remains incomplete"\n'
+                  '            )\n'
+                  '            line = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(\n'
+                  '                pair_replacement, line\n'
+                  '            )\n'
+                  '            line = _OH_CLOSED_HOLD_CLAIM_RE.sub(\n'
+                  '                "closed 1H hold still pending", line\n'
+                  '            )\n'
+                  '            line = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(\n'
+                  '                "1H hold not yet confirmed", line\n'
+                  '            )\n'
+                  '        if not _retest_confirmed_1h:\n'
+                  '            line = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(\n'
+                  '                "1H retest not yet confirmed", line\n'
+                  '            )\n'
+                  '        return line\n'
+                  '\n'
+                  '    result = _OH_ALERT_LINE_RE.sub(_cool_nonconditional_proof_line, result)\n'
+                  '\n'
               )
-              if not _hold_confirmed_1h:
-                  pair_replacement = (
-                      "confirmed 1H retest; closed 1H hold still pending"
-                      if _retest_confirmed_1h
-                      else "1H retest/hold proof remains incomplete"
-                  )
-                  line = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(
-                      pair_replacement, line
-                  )
-                  line = _OH_CLOSED_HOLD_CLAIM_RE.sub(
-                      "closed 1H hold still pending", line
-                  )
-                  line = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(
-                      "1H hold not yet confirmed", line
-                  )
-              if not _retest_confirmed_1h:
-                  line = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(
-                      "1H retest not yet confirmed", line
-                  )
-              return line
-
-              result = _OH_ALERT_LINE_RE.sub(_cool_nonconditional_proof_line, result)
-
-          '''
               text = text[:helper_start] + new_helper + text[helper_end:]
               src.write_text(text)
               print('Applied MA-1C.1 review correction')
