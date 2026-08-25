@@ -21,25 +21,103 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          p=Path('src/discord_alerts.py')
-          s=p.read_text()
-          s=s.replace('rf"capital|entry|full(?:[ \\t-]+size)?|starter[ \\t]+sizing|"', 'rf"capital|entry|execution|execute|executing|orders?|full(?:[ \\t-]+size)?|starter[ \\t]+sizing|"', 1)
-          s=s.replace('''        line = match.group(0)\n        if _OH_CONDITIONAL_LINE_RE.match(line):\n            return line\n\n        protected: list[tuple[str, str]] = []\n''', '''        line = match.group(0)\n        _is_labeled_conditional = bool(_OH_CONDITIONAL_LINE_RE.match(line))\n\n        protected: list[tuple[str, str]] = []\n''', 1)
-          anchor='''_OH_PROOF_BEFORE_REQUIREMENT_RE = re.compile(\n    rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})"\n    r"(?=[ \\t]+(?:(?:is|are)[ \\t]+)?(?:required|needed)\\b)",\n    re.IGNORECASE,\n)\n'''
-          add=anchor+'''_OH_LABELED_LEADING_PROOF_RE = re.compile(\n    rf"^(?:[ \\t]*(?:Next|Blocker|Missing[ \\t]+conditions|Missing[ \\t]+proof|Upgrade[ \\t]+trigger|Promote[ \\t]+on|Not[ \\t]+SNIPE)[ \\t]*:[ \\t]*)(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",\n    re.IGNORECASE,\n)\n'''
-          if '_OH_LABELED_LEADING_PROOF_RE' not in s:
-              if anchor not in s: raise SystemExit('proof anchor missing')
-              s=s.replace(anchor,add,1)
-          old='''        # Protect only the proof span owned by future/conditional grammar.\n        line = _OH_FUTURE_BEFORE_PROOF_RE.sub(\n            _stash_conditional_proof, line\n        )\n'''
-          new='''        # Protect only proof spans owned by future/conditional grammar.\n        if _is_labeled_conditional:\n            line = _OH_LABELED_LEADING_PROOF_RE.sub(_stash_conditional_proof, line)\n        line = _OH_FUTURE_BEFORE_PROOF_RE.sub(\n            _stash_conditional_proof, line\n        )\n'''
-          if old not in s: raise SystemExit('protection anchor missing')
-          s=s.replace(old,new,1)
-          p.write_text(s)
-          t=Path('tests/test_phase_ma1c_one_hour_narrative_truth.py')
-          x=t.read_text()
+
+          p = Path('src/discord_alerts.py')
+          s = p.read_text()
+          marker = '_OH_LABELED_CLAUSE_PROOF_RE'
+
+          if marker not in s:
+              old_after = '''_OH_EXECUTION_AFTER_PROOF_RE = re.compile(
+              rf"\\b(?:capital|entry|full(?:[ \\t-]+size)?|starter[ \\t]+sizing|"
+              rf"promotion|position|adding[ \\t]+size)"
+              rf"[ \\t]+(?:only[ \\t]+)?after[ \\t]+"
+              rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
+              re.IGNORECASE,
+          )
+          '''
+              new_after = '''_OH_EXECUTION_AFTER_PROOF_RE = re.compile(
+              rf"\\b(?:capital|entry|execution|execute|executing|orders?|"
+              rf"order[ \\t]+placement|place(?:[ \\t]+an?)?[ \\t]+order|"
+              rf"full(?:[ \\t-]+size)?|starter[ \\t]+sizing|promotion|position|"
+              rf"adding[ \\t]+size)"
+              rf"[ \\t]+(?:only[ \\t]+)?after[ \\t]+"
+              rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
+              re.IGNORECASE,
+          )
+          '''
+              if old_after not in s:
+                  raise SystemExit('STOP: exact execution-after block not found')
+              s = s.replace(old_after, new_after, 1)
+
+              early = '''        line = match.group(0)
+              if _OH_CONDITIONAL_LINE_RE.match(line):
+                  return line
+
+              protected: list[tuple[str, str]] = []
+          '''
+              early_new = '''        line = match.group(0)
+              _is_labeled_conditional = bool(_OH_CONDITIONAL_LINE_RE.match(line))
+
+              protected: list[tuple[str, str]] = []
+          '''
+              if early not in s:
+                  raise SystemExit('STOP: exact conditional early-return block not found')
+              s = s.replace(early, early_new, 1)
+
+              anchor = '''_OH_PROOF_BEFORE_REQUIREMENT_RE = re.compile(
+              rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})"
+              r"(?=[ \\t]+(?:(?:is|are)[ \\t]+)?(?:required|needed)\\b)",
+              re.IGNORECASE,
+          )
+          '''
+              add = anchor + '''# Conditional labels convey future jurisdiction to proof-only requirement
+          # clauses, but never shield unrelated historical prose on the same line.
+          # Protect a proof phrase only when it begins the labeled field or a
+          # semicolon-delimited requirement-list clause.
+          _OH_LABELED_CLAUSE_PROOF_RE = re.compile(
+              rf"(?P<prefix>(?:^[ \\t]*(?:"
+              rf"Next|Blocker|Missing[ \\t]+conditions|Missing[ \\t]+proof|"
+              rf"Upgrade[ \\t]+trigger|Promote[ \\t]+on|Not[ \\t]+SNIPE"
+              rf")[ \\t]*:[ \\t]*|;[ \\t]*))"
+              rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
+              re.IGNORECASE,
+          )
+          '''
+              if anchor not in s:
+                  raise SystemExit('STOP: proof-before-requirement anchor not found')
+              s = s.replace(anchor, add, 1)
+
+              old = '''        # Protect only the proof span owned by future/conditional grammar.
+              line = _OH_FUTURE_BEFORE_PROOF_RE.sub(
+                  _stash_conditional_proof, line
+              )
+          '''
+              new = '''        # Protect only proof spans owned by future/conditional grammar.
+              if _is_labeled_conditional:
+                  line = _OH_LABELED_CLAUSE_PROOF_RE.sub(
+                      _stash_conditional_proof, line
+                  )
+              line = _OH_FUTURE_BEFORE_PROOF_RE.sub(
+                  _stash_conditional_proof, line
+              )
+          '''
+              if old not in s:
+                  raise SystemExit('STOP: proof-protection insertion point not found')
+              s = s.replace(old, new, 1)
+
+              p.write_text(s)
+              print('Applied final MA-1C.1 review corrections')
+          else:
+              print('Final MA-1C.1 review corrections already present')
+
+          t = Path('tests/test_phase_ma1c_one_hour_narrative_truth.py')
+          x = t.read_text()
           if 'test_labeled_conditional_field_does_not_shield_stale_context' not in x:
-              x+='''\n\ndef test_labeled_conditional_field_does_not_shield_stale_context():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    out = _guard("Next: buyers confirmed hold at value, but wait for another close before entry.", oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "wait for another close before entry" in out\n\ndef test_labeled_leading_proof_remains_future_requirement():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    assert _guard("Next: confirmed hold before entry.", oh) == "Next: confirmed hold before entry."\n\ndef test_execution_after_proof_remains_future_requirement():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    for body in ("Execution after confirmed hold is permitted.", "Execute after confirmed hold.", "Order after confirmed hold."):\n        assert _guard(body, oh) == body\n'''
+              x += '''\n\ndef test_labeled_conditional_field_does_not_shield_stale_context():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    out = _guard("Next: buyers confirmed hold at value, but wait for another close before entry.", oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "wait for another close before entry" in out\n    assert "buyers confirmed hold at value" not in out\n\ndef test_labeled_leading_proof_remains_future_requirement():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    assert _guard("Next: confirmed hold before entry.", oh) == "Next: confirmed hold before entry."\n\ndef test_labeled_requirement_list_preserves_each_proof_clause():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    body = "Missing conditions: confirmed retest; confirmed hold."\n    assert _guard(body, oh) == body\n\ndef test_labeled_mixed_line_cools_history_and_preserves_required_proof():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    body = "Next: buyers confirmed hold at value; confirmed retest is required before entry."\n    out = _guard(body, oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "confirmed retest is required before entry" in out\n\ndef test_execution_after_proof_remains_future_requirement():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    for body in (\n        "Execution after confirmed hold is permitted.",\n        "Execute after confirmed hold.",\n        "Order after confirmed hold.",\n        "Place an order after confirmed retest.",\n    ):\n        assert _guard(body, oh) == body\n\ndef test_affirmative_bare_after_remains_coolable():\n    body = "Why: structure is valid after a closed-bar hold at the trigger."\n    out = _guard(body)\n    assert "closed-bar hold" not in out.lower()\n    assert "closed 1H hold still pending" in out\n'''
               t.write_text(x)
+              print('Added final MA-1C.1 review regressions')
+          else:
+              print('Final MA-1C.1 review regressions already present')
           PY
       - name: Validate
         run: |
