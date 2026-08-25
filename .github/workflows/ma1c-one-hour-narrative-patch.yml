@@ -35,7 +35,7 @@ jobs:
               r"\\bconfirmed[ \\t]+sequence[ \\t]+and[ \\t]+hold\\b", re.IGNORECASE
           )
           _OH_APLUS_SETUP_RE = re.compile(r"\\bA\\+[ \\t]+setup\\b", re.IGNORECASE)
-          _OH_NEAR_READY_RE = re.compile(r"\\bnear[\\t\\- ]+ready\\b", re.IGNORECASE)
+          _OH_NEAR_READY_RE = re.compile(r"\\bnear[\\t\\- ]ready\\b", re.IGNORECASE)
           '''
           new_patterns = '''_OH_CONFIRMED_SEQUENCE_RE = re.compile(
               r"\\bconfirmed[ \\t]+sequence[ \\t]+and[ \\t]+hold\\b", re.IGNORECASE
@@ -61,7 +61,7 @@ jobs:
               r"\\b(?:confirmed[ \\t]+retest|retest[ \\t]+confirmed)\\b", re.IGNORECASE
           )
           _OH_APLUS_SETUP_RE = re.compile(r"\\bA\\+[ \\t]+setup\\b", re.IGNORECASE)
-          _OH_NEAR_READY_RE = re.compile(r"\\bnear[\\t\\- ]+ready\\b", re.IGNORECASE)
+          _OH_NEAR_READY_RE = re.compile(r"\\bnear[\\t\\- ]ready\\b", re.IGNORECASE)
           '''
           if old_patterns not in text:
               raise SystemExit('STOP: expected 14E.1A pattern block not found; refusing broad edit')
