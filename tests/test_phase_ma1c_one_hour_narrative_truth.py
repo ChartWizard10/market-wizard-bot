@@ -140,3 +140,43 @@ def test_guard_does_not_mutate_one_hour_evidence_object():
     before = deepcopy(oh)
     _guard("Why: confirmed retest and closed-bar hold.", oh)
     assert oh == before
+
+
+# ===========================================================================
+# Phase MA-1C.1 — conditional/future wording must never be inverted.
+# ===========================================================================
+
+def test_future_retest_requirement_outside_reason_is_preserved():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    body = (
+        "Next: Wait until confirmed retest before entry.\n"
+        "Upgrade trigger: confirmed retest required before any capital.\n"
+        "Why: confirmed retest and closed-bar hold at the FVG."
+    )
+    out = _guard(body, oh)
+
+    assert "Next: Wait until confirmed retest before entry." in out
+    assert "Upgrade trigger: confirmed retest required before any capital." in out
+    assert "Why: 1H retest/hold proof remains incomplete" in out
+
+
+def test_future_hold_requirement_outside_reason_is_preserved():
+    body = (
+        "Next: Wait for confirmed hold before adding size.\n"
+        "Why: confirmed hold at value."
+    )
+    out = _guard(body)
+
+    assert "Next: Wait for confirmed hold before adding size." in out
+    assert "Why: 1H hold not yet confirmed at value." in out
+
+
+def test_bare_future_retest_instruction_is_noop():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    body = "Wait until confirmed retest before entry."
+    assert _guard(body, oh) == body
+
+
+def test_bare_future_hold_instruction_is_noop():
+    body = "Wait for confirmed hold before adding size."
+    assert _guard(body) == body

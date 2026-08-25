@@ -1842,6 +1842,15 @@ _OH_CONFIRMED_HOLD_CLAIM_RE = re.compile(
 _OH_CONFIRMED_RETEST_CLAIM_RE = re.compile(
     r"\b(?:confirmed[ \t]+retest|retest[ \t]+confirmed)\b", re.IGNORECASE
 )
+# Phase MA-1C.1: scope proof-claim cooling to affirmative Why narrative.
+# Future/conditional instructions (Next:, upgrade triggers, blockers) must
+# preserve phrases such as "wait until confirmed retest"; rewriting those
+# phrases can invert the operator instruction. The live defect originated
+# in affirmative Why: prose, so MA-1C proof cooling is intentionally scoped
+# to that line while the existing dedicated EXECUTION/1H blocks stay sovereign.
+_OH_REASON_LINE_RE = re.compile(
+    r"^([ \t]*Why:[ \t]*)(.*)$", re.MULTILINE
+)
 _OH_APLUS_SETUP_RE = re.compile(r"\bA\+[ \t]+setup\b", re.IGNORECASE)
 _OH_NEAR_READY_RE = re.compile(r"\bnear[\t\- ]ready\b", re.IGNORECASE)
 
@@ -2040,25 +2049,38 @@ def _apply_one_hour_truth_alignment_guard(body: str, one_hour) -> str:
             in _ONE_HOUR_CONFIRMED_ALERTS
     )
 
-    if not _hold_confirmed_1h:
-        _pair_replacement = (
-            "confirmed 1H retest; closed 1H hold still pending"
-            if _retest_confirmed_1h
-            else "1H retest/hold proof remains incomplete"
-        )
-        result = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(
-            _pair_replacement, result
-        )
-        result = _OH_CLOSED_HOLD_CLAIM_RE.sub(
-            "closed 1H hold still pending", result
-        )
-        result = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(
-            "1H hold not yet confirmed", result
-        )
-    if not _retest_confirmed_1h:
-        result = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(
-            "1H retest not yet confirmed", result
-        )
+    def _cool_affirmative_reason_line(match: re.Match) -> str:
+        """Cool stale 1H proof claims only inside affirmative Why: prose.
+
+        Future/conditional operator instructions elsewhere in the alert are
+        deliberately untouched. This is display-only and does not mutate any
+        evidence object, tier, capital state, routing, or scanner decision.
+        """
+        prefix, prose = match.group(1), match.group(2)
+
+        if not _hold_confirmed_1h:
+            pair_replacement = (
+                "confirmed 1H retest; closed 1H hold still pending"
+                if _retest_confirmed_1h
+                else "1H retest/hold proof remains incomplete"
+            )
+            prose = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(
+                pair_replacement, prose
+            )
+            prose = _OH_CLOSED_HOLD_CLAIM_RE.sub(
+                "closed 1H hold still pending", prose
+            )
+            prose = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(
+                "1H hold not yet confirmed", prose
+            )
+        if not _retest_confirmed_1h:
+            prose = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(
+                "1H retest not yet confirmed", prose
+            )
+
+        return prefix + prose
+
+    result = _OH_REASON_LINE_RE.sub(_cool_affirmative_reason_line, result)
 
     result = _OH_APLUS_SETUP_RE.sub("Watch-only valid setup", result)
     result = _OH_NEAR_READY_RE.sub("watch-only", result)
