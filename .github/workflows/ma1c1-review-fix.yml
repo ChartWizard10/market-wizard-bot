@@ -38,8 +38,10 @@ jobs:
 
           src = Path('src/discord_alerts.py')
           text = src.read_text()
+          marker = 'Phase MA-1C.1: distinguish affirmative proof claims from future conditions.'
 
-          old_regex = '''# Phase MA-1C.1: scope proof-claim cooling to affirmative Why narrative.
+          if marker not in text:
+              old_regex = '''# Phase MA-1C.1: scope proof-claim cooling to affirmative Why narrative.
           # Future/conditional instructions (Next:, upgrade triggers, blockers) must
           # preserve phrases such as "wait until confirmed retest"; rewriting those
           # phrases can invert the operator instruction. The live defect originated
@@ -49,7 +51,7 @@ jobs:
               r"^([ \\t]*Why:[ \\t]*)(.*)$", re.MULTILINE
           )
           '''
-          new_regex = '''# Phase MA-1C.1: distinguish affirmative proof claims from future conditions.
+              new_regex = '''# Phase MA-1C.1: distinguish affirmative proof claims from future conditions.
           # Proof claims in Why/TARGETS/FORCED PARTICIPATION/other descriptive prose
           # must obey the sovereign 1H object. Conditional operator instructions must
           # retain the proof they are waiting for; cooling those phrases can invert
@@ -67,60 +69,33 @@ jobs:
               re.IGNORECASE,
           )
           '''
-          if old_regex not in text:
-              raise SystemExit('STOP: expected MA-1C.1 regex block not found')
-          text = text.replace(old_regex, new_regex, 1)
+              if old_regex not in text:
+                  raise SystemExit('STOP: expected MA-1C.1 regex block not found')
+              text = text.replace(old_regex, new_regex, 1)
 
-          old_sequence = '''    # Defense-in-depth: neutralize the same proof phrases anywhere else in prose.
+              old_sequence = '''    # Defense-in-depth: neutralize the same proof phrases anywhere else in prose.
               result = _OH_CONFIRMED_SEQUENCE_RE.sub(
                   "structure present; 1H hold not yet confirmed", result
               )
 
-              # Phase MA-1C: preserve each organ's jurisdiction inside free-form
           '''
-          new_sequence = '''    # Defense-in-depth is applied below line-by-line so affirmative proof claims
+              new_sequence = '''    # Defense-in-depth is applied below line-by-line so affirmative proof claims
               # remain governed without corrupting future/conditional instructions.
 
-              # Phase MA-1C: preserve each organ's jurisdiction inside free-form
           '''
-          if old_sequence not in text:
-              raise SystemExit('STOP: expected sequence-cooling anchor not found')
-          text = text.replace(old_sequence, new_sequence, 1)
+              if old_sequence not in text:
+                  raise SystemExit('STOP: expected sequence-cooling block not found')
+              text = text.replace(old_sequence, new_sequence, 1)
 
-          old_helper = '''    def _cool_affirmative_reason_line(match: re.Match) -> str:
-              """Cool stale 1H proof claims only inside affirmative Why: prose.
+              helper_start = text.find('    def _cool_affirmative_reason_line(match: re.Match) -> str:\n')
+              helper_end = text.find(
+                  '    result = _OH_APLUS_SETUP_RE.sub("Watch-only valid setup", result)\n',
+                  helper_start,
+              )
+              if helper_start < 0 or helper_end < 0:
+                  raise SystemExit('STOP: MA-1C.1 helper slice anchors not found')
 
-              Future/conditional operator instructions elsewhere in the alert are
-              deliberately untouched. This is display-only and does not mutate any
-              evidence object, tier, capital state, routing, or scanner decision.
-              """
-              prefix, prose = match.group(1), match.group(2)
-
-              if not _hold_confirmed_1h:
-                  pair_replacement = (
-                      "confirmed 1H retest; closed 1H hold still pending"
-                      if _retest_confirmed_1h
-                      else "1H retest/hold proof remains incomplete"
-                  )
-                  prose = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(
-                      pair_replacement, prose
-                  )
-                  prose = _OH_CLOSED_HOLD_CLAIM_RE.sub(
-                      "closed 1H hold still pending", prose
-                  )
-                  prose = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(
-                      "1H hold not yet confirmed", prose
-                  )
-              if not _retest_confirmed_1h:
-                  prose = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(
-                      "1H retest not yet confirmed", prose
-                  )
-
-              return prefix + prose
-
-              result = _OH_REASON_LINE_RE.sub(_cool_affirmative_reason_line, result)
-          '''
-          new_helper = '''    def _cool_nonconditional_proof_line(match: re.Match) -> str:
+              new_helper = '''    def _cool_nonconditional_proof_line(match: re.Match) -> str:
               """Cool stale affirmative proof claims while preserving future conditions.
 
               Known conditional alert fields and explicit future-requirement language
@@ -160,20 +135,23 @@ jobs:
               return line
 
               result = _OH_ALERT_LINE_RE.sub(_cool_nonconditional_proof_line, result)
+
           '''
-          if old_helper not in text:
-              raise SystemExit('STOP: expected MA-1C.1 helper block not found')
-          text = text.replace(old_helper, new_helper, 1)
-          src.write_text(text)
+              text = text[:helper_start] + new_helper + text[helper_end:]
+              src.write_text(text)
+              print('Applied MA-1C.1 review correction')
+          else:
+              print('MA-1C.1 review correction already present')
 
           tests = Path('tests/test_phase_ma1c_one_hour_narrative_truth.py')
           t = tests.read_text()
-          marker = 'test_affirmative_target_and_forced_participation_claims_are_cooled'
-          if marker not in t:
-              t += '''\n\n# ===========================================================================\n# Phase MA-1C.1 review correction — affirmative non-Why prose stays governed.\n# ===========================================================================\n\ndef test_affirmative_target_and_forced_participation_claims_are_cooled():\n    body = (\n        "TARGETS\\n"\n        "  T1: $120 — confirmed retest and closed-bar hold opens the path.\\n"\n        "FORCED PARTICIPATION: buyers have confirmed hold above value.\\n"\n        "Why: confirmed retest and closed-bar hold at the FVG."\n    )\n    out = _guard(body)\n\n    assert "T1: $120 — confirmed 1H retest; closed 1H hold still pending opens the path." in out\n    assert "FORCED PARTICIPATION: buyers have 1H hold not yet confirmed above value." in out\n    assert "Why: confirmed 1H retest; closed 1H hold still pending at the FVG." in out\n\n\ndef test_all_known_conditional_fields_preserve_future_confirmation_language():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    lines = [\n        "Next: Wait until confirmed retest before entry.",\n        "Blocker: confirmed hold required before capital.",\n        "Missing conditions: confirmed retest; confirmed hold.",\n        "Missing proof: confirmed hold.",\n        "Upgrade trigger: confirmed retest and closed-bar hold required.",\n        "  Promote on: confirmed retest and closed-bar hold.",\n        "  Not SNIPE: full size requires confirmed hold.",\n    ]\n    body = "\\n".join(lines)\n    out = _guard(body, oh)\n    for line in lines:\n        assert line in out\n\n\ndef test_affirmative_sequence_claim_outside_why_is_cooled():\n    body = "FORCED PARTICIPATION: confirmed sequence and hold forced buyers to defend."\n    out = _guard(body)\n    assert "confirmed sequence and hold" not in out.lower()\n    assert "structure present; 1H hold not yet confirmed" in out\n\n\ndef test_explicit_future_requirement_language_is_preserved_even_without_field_label():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    samples = [\n        "Wait until confirmed retest before entry.",\n        "Full capital requires confirmed hold.",\n        "Confirmed retest is required before adding size.",\n        "Confirmed hold needed before promotion.",\n    ]\n    for body in samples:\n        assert _guard(body, oh) == body\n'''
+          test_marker = 'test_affirmative_target_and_forced_participation_claims_are_cooled'
+          if test_marker not in t:
+              t += '''\n\n# ===========================================================================\n# Phase MA-1C.1 review correction — affirmative non-Why prose stays governed.\n# ===========================================================================\n\ndef test_affirmative_target_and_forced_participation_claims_are_cooled():\n    body = (\n        "TARGETS\\n"\n        "  T1: $120 — confirmed retest and closed-bar hold opens the path.\\n"\n        "FORCED PARTICIPATION: buyers have confirmed hold above value.\\n"\n        "Why: confirmed retest and closed-bar hold at the FVG."\n    )\n    out = _guard(body)\n\n    assert "T1: $120 — confirmed 1H retest; closed 1H hold still pending opens the path." in out\n    assert "FORCED PARTICIPATION: buyers have 1H hold not yet confirmed above value." in out\n    assert "Why: confirmed 1H retest; closed 1H hold still pending at the FVG." in out\n\n\ndef test_all_known_conditional_fields_preserve_future_confirmation_language():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    lines = [\n        "Next: Wait until confirmed retest before entry.",\n        "Blocker: confirmed hold required before capital.",\n        "Missing conditions: confirmed retest; confirmed hold.",\n        "Missing proof: confirmed hold.",\n        "Upgrade trigger: confirmed retest and closed-bar hold required.",\n        "  Promote on: confirmed retest and closed-bar hold.",\n        "  Not SNIPE: full size requires confirmed hold.",\n    ]\n    out = _guard("\\n".join(lines), oh)\n    for line in lines:\n        assert line in out\n\n\ndef test_affirmative_sequence_claim_outside_why_is_cooled():\n    body = "FORCED PARTICIPATION: confirmed sequence and hold forced buyers to defend."\n    out = _guard(body)\n    assert "confirmed sequence and hold" not in out.lower()\n    assert "structure present; 1H hold not yet confirmed" in out\n\n\ndef test_explicit_future_requirement_language_is_preserved_even_without_field_label():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    samples = [\n        "Wait until confirmed retest before entry.",\n        "Full capital requires confirmed hold.",\n        "Confirmed retest is required before adding size.",\n        "Confirmed hold needed before promotion.",\n    ]\n    for body in samples:\n        assert _guard(body, oh) == body\n'''
               tests.write_text(t)
-
-          print('Applied MA-1C.1 review correction and regressions')
+              print('Added MA-1C.1 review regressions')
+          else:
+              print('MA-1C.1 review regressions already present')
           PY
 
       - name: Run focused regression
