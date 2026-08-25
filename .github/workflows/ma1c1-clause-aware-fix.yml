@@ -66,12 +66,22 @@ jobs:
               rf"wait(?:s|ing)?[ \\t]+(?:for|until)"
               rf"|await(?:s|ing)?"
               rf"|only[ \\t]+after"
-              rf"|once|upon|after|before|when|if|until"
+              rf"|once|upon|before|when|if|until"
               rf"|requires?|required|need(?:s|ed)?"
               rf"|subject[ \\t]+to|pending"
               rf"|must(?:[ \\t]+(?:have|show|see|get|produce))?"
               rf")\\b"
               rf"(?:(?!\\b(?:and|but|however|while|whereas)\\b)[^,;.!?]){{0,64}}?"
+              rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
+              re.IGNORECASE,
+          )
+          # Bare 'after' is ambiguous: 'structure is valid after a closed hold' is
+          # an affirmative historical claim, not a future requirement. Protect
+          # 'after <proof>' only in explicit execution/capital noun phrases.
+          _OH_EXECUTION_AFTER_PROOF_RE = re.compile(
+              rf"\\b(?:capital|entry|full(?:[ \\t-]+size)?|starter[ \\t]+sizing|"
+              rf"promotion|position|adding[ \\t]+size)"
+              rf"[ \\t]+(?:only[ \\t]+)?after[ \\t]+"
               rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
               re.IGNORECASE,
           )
@@ -116,6 +126,9 @@ jobs:
                   '',
                   '        # Protect only the proof span owned by future/conditional grammar.',
                   '        line = _OH_FUTURE_BEFORE_PROOF_RE.sub(',
+                  '            _stash_conditional_proof, line',
+                  '        )',
+                  '        line = _OH_EXECUTION_AFTER_PROOF_RE.sub(',
                   '            _stash_conditional_proof, line',
                   '        )',
                   '        line = _OH_PROOF_BEFORE_REQUIREMENT_RE.sub(',
@@ -163,7 +176,7 @@ jobs:
           t = tests.read_text()
           test_marker = 'test_mixed_requirement_line_cools_affirmative_clause'
           if test_marker not in t:
-              t += '''\n\n# ===========================================================================\n# Phase MA-1C.1 P1 correction — clause-aware future-proof preservation.\n# ===========================================================================\n\ndef test_mixed_requirement_line_cools_affirmative_clause():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    body = "Why: buyers confirmed hold at value, but full size requires another close."\n    out = _guard(body, oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "full size requires another close" in out\n    assert "buyers confirmed hold at value" not in out\n\n\ndef test_mixed_requirement_line_without_comma_still_cools_affirmative_clause():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    body = "Why: buyers confirmed hold at value but full size requires another close."\n    out = _guard(body, oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "full size requires another close" in out\n    assert "buyers confirmed hold at value" not in out\n\n\ndef test_mixed_pair_claim_cools_while_separate_requirement_survives():\n    body = (\n        "Why: confirmed retest and closed-bar hold supports target, "\n        "but full size requires another close."\n    )\n    out = _guard(body)\n    assert "confirmed 1H retest; closed 1H hold still pending supports target" in out\n    assert "full size requires another close" in out\n\n\ndef test_unlabeled_future_condition_forms_preserve_proof_phrase_verbatim():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    samples = [\n        "FORCED PARTICIPATION: capital only after confirmed hold.",\n        "FORCED PARTICIPATION: once confirmed retest, capital may be considered.",\n        "FORCED PARTICIPATION: upon confirmed hold, starter sizing may begin.",\n        "Capital after confirmed retest is allowed only if risk remains valid.",\n        "No entry before confirmed hold.",\n        "When confirmed hold appears, reassess capital.",\n        "If confirmed retest appears, reassess the entry.",\n        "No capital until confirmed hold.",\n        "Wait until confirmed retest before entry.",\n        "Wait for confirmed hold before adding size.",\n        "Full capital requires confirmed hold.",\n        "Confirmed retest is required before adding size.",\n        "Confirmed hold needed before promotion.",\n        "Capital must have confirmed hold before entry.",\n        "Full size requires confirmed retest and closed-bar hold.",\n    ]\n    for body in samples:\n        assert _guard(body, oh) == body\n\n\ndef test_affirmative_claim_does_not_escape_because_requirement_is_later_on_same_line():\n    body = "Why: confirmed hold at value and full size requires another close."\n    out = _guard(body)\n    assert "Why: 1H hold not yet confirmed at value" in out\n    assert "full size requires another close" in out\n    assert "confirmed hold at value" not in out\n'''
+              t += '''\n\n# ===========================================================================\n# Phase MA-1C.1 P1 correction — clause-aware future-proof preservation.\n# ===========================================================================\n\ndef test_mixed_requirement_line_cools_affirmative_clause():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    body = "Why: buyers confirmed hold at value, but full size requires another close."\n    out = _guard(body, oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "full size requires another close" in out\n    assert "buyers confirmed hold at value" not in out\n\n\ndef test_mixed_requirement_line_without_comma_still_cools_affirmative_clause():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    body = "Why: buyers confirmed hold at value but full size requires another close."\n    out = _guard(body, oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "full size requires another close" in out\n    assert "buyers confirmed hold at value" not in out\n\n\ndef test_mixed_pair_claim_cools_while_separate_requirement_survives():\n    body = (\n        "Why: confirmed retest and closed-bar hold supports target, "\n        "but full size requires another close."\n    )\n    out = _guard(body)\n    assert "confirmed 1H retest; closed 1H hold still pending supports target" in out\n    assert "full size requires another close" in out\n\n\ndef test_unlabeled_future_condition_forms_preserve_proof_phrase_verbatim():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    samples = [\n        "FORCED PARTICIPATION: capital only after confirmed hold.",\n        "FORCED PARTICIPATION: once confirmed retest, capital may be considered.",\n        "FORCED PARTICIPATION: upon confirmed hold, starter sizing may begin.",\n        "Capital after confirmed retest is allowed only if risk remains valid.",\n        "No entry before confirmed hold.",\n        "When confirmed hold appears, reassess capital.",\n        "If confirmed retest appears, reassess the entry.",\n        "No capital until confirmed hold.",\n        "Wait until confirmed retest before entry.",\n        "Wait for confirmed hold before adding size.",\n        "Full capital requires confirmed hold.",\n        "Confirmed retest is required before adding size.",\n        "Confirmed hold needed before promotion.",\n        "Capital must have confirmed hold before entry.",\n        "Full size requires confirmed retest and closed-bar hold.",\n    ]\n    for body in samples:\n        assert _guard(body, oh) == body\n\n\ndef test_affirmative_claim_does_not_escape_because_requirement_is_later_on_same_line():\n    body = "Why: confirmed hold at value and full size requires another close."\n    out = _guard(body)\n    assert "Why: 1H hold not yet confirmed at value" in out\n    assert "full size requires another close" in out\n    assert "confirmed hold at value" not in out\n\n\ndef test_bare_after_affirmative_claim_is_not_treated_as_future_requirement():\n    body = "Why: structure is valid after a closed-bar hold at the trigger."\n    out = _guard(body)\n    assert "closed-bar hold" not in out.lower()\n    assert "closed 1H hold still pending" in out\n'''
               tests.write_text(t)
               print('Added clause-aware MA-1C.1 regressions')
           else:
