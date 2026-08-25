@@ -303,3 +303,44 @@ def test_bare_after_affirmative_claim_is_not_treated_as_future_requirement():
     out = _guard(body)
     assert "closed-bar hold" not in out.lower()
     assert "closed 1H hold still pending" in out
+
+
+def test_labeled_conditional_field_does_not_shield_stale_context():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    out = _guard("Next: buyers confirmed hold at value, but wait for another close before entry.", oh)
+    assert "buyers 1H hold not yet confirmed at value" in out
+    assert "wait for another close before entry" in out
+    assert "buyers confirmed hold at value" not in out
+
+def test_labeled_leading_proof_remains_future_requirement():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    assert _guard("Next: confirmed hold before entry.", oh) == "Next: confirmed hold before entry."
+
+def test_labeled_requirement_list_preserves_each_proof_clause():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    body = "Missing conditions: confirmed retest; confirmed hold."
+    assert _guard(body, oh) == body
+
+def test_labeled_mixed_line_cools_history_and_preserves_required_proof():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    body = "Next: buyers confirmed hold at value; confirmed retest is required before entry."
+    out = _guard(body, oh)
+    assert "buyers 1H hold not yet confirmed at value" in out
+    assert "confirmed retest is required before entry" in out
+    assert "buyers confirmed hold at value" not in out
+
+def test_execution_after_proof_remains_future_requirement():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    for body in (
+        "Execution after confirmed hold is permitted.",
+        "Execute after confirmed hold.",
+        "Order after confirmed hold.",
+        "Place an order after confirmed retest.",
+    ):
+        assert _guard(body, oh) == body
+
+def test_affirmative_bare_after_remains_coolable():
+    body = "Why: structure is valid after a closed-bar hold at the trigger."
+    out = _guard(body)
+    assert "closed-bar hold" not in out.lower()
+    assert "closed 1H hold still pending" in out

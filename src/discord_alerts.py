@@ -1888,8 +1888,10 @@ _OH_FUTURE_BEFORE_PROOF_RE = re.compile(
 # an affirmative historical claim, not a future requirement. Protect
 # 'after <proof>' only in explicit execution/capital noun phrases.
 _OH_EXECUTION_AFTER_PROOF_RE = re.compile(
-    rf"\b(?:capital|entry|full(?:[ \t-]+size)?|starter[ \t]+sizing|"
-    rf"promotion|position|adding[ \t]+size)"
+    rf"\b(?:capital|entry|execution|execute|executing|orders?|"
+    rf"order[ \t]+placement|place(?:[ \t]+an?)?[ \t]+order|"
+    rf"full(?:[ \t-]+size)?|starter[ \t]+sizing|promotion|position|"
+    rf"adding[ \t]+size)"
     rf"[ \t]+(?:only[ \t]+)?after[ \t]+"
     rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
     re.IGNORECASE,
@@ -1897,6 +1899,17 @@ _OH_EXECUTION_AFTER_PROOF_RE = re.compile(
 _OH_PROOF_BEFORE_REQUIREMENT_RE = re.compile(
     rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})"
     r"(?=[ \t]+(?:(?:is|are)[ \t]+)?(?:required|needed)\b)",
+    re.IGNORECASE,
+)
+# Conditional labels convey future jurisdiction to proof-only requirement
+# clauses, but never shield unrelated historical prose on the same line.
+# Protect proof when it begins the labeled field or a semicolon clause.
+_OH_LABELED_CLAUSE_PROOF_RE = re.compile(
+    rf"(?P<prefix>(?:^[ \t]*(?:"
+    rf"Next|Blocker|Missing[ \t]+conditions|Missing[ \t]+proof|"
+    rf"Upgrade[ \t]+trigger|Promote[ \t]+on|Not[ \t]+SNIPE"
+    rf")[ \t]*:[ \t]*|;[ \t]*))"
+    rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
     re.IGNORECASE,
 )
 _OH_APLUS_SETUP_RE = re.compile(r"\bA\+[ \t]+setup\b", re.IGNORECASE)
@@ -2104,8 +2117,7 @@ def _apply_one_hour_truth_alignment_guard(body: str, one_hour) -> str:
         obey the sovereign 1H object. Display-only — no decision mutation.
         """
         line = match.group(0)
-        if _OH_CONDITIONAL_LINE_RE.match(line):
-            return line
+        _is_labeled_conditional = bool(_OH_CONDITIONAL_LINE_RE.match(line))
 
         protected: list[tuple[str, str]] = []
 
@@ -2115,7 +2127,11 @@ def _apply_one_hour_truth_alignment_guard(body: str, one_hour) -> str:
             protected.append((token, phrase))
             return proof_match.group(0).replace(phrase, token, 1)
 
-        # Protect only the proof span owned by future/conditional grammar.
+        # Protect only proof spans owned by future/conditional grammar.
+        if _is_labeled_conditional:
+            line = _OH_LABELED_CLAUSE_PROOF_RE.sub(
+                _stash_conditional_proof, line
+            )
         line = _OH_FUTURE_BEFORE_PROOF_RE.sub(
             _stash_conditional_proof, line
         )
