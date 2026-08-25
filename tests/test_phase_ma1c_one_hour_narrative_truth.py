@@ -180,3 +180,56 @@ def test_bare_future_retest_instruction_is_noop():
 def test_bare_future_hold_instruction_is_noop():
     body = "Wait for confirmed hold before adding size."
     assert _guard(body) == body
+
+
+# ===========================================================================
+# Phase MA-1C.1 review correction — affirmative non-Why prose stays governed.
+# ===========================================================================
+
+def test_affirmative_target_and_forced_participation_claims_are_cooled():
+    body = (
+        "TARGETS\n"
+        "  T1: $120 — confirmed retest and closed-bar hold opens the path.\n"
+        "FORCED PARTICIPATION: buyers have confirmed hold above value.\n"
+        "Why: confirmed retest and closed-bar hold at the FVG."
+    )
+    out = _guard(body)
+
+    assert "T1: $120 — confirmed 1H retest; closed 1H hold still pending opens the path." in out
+    assert "FORCED PARTICIPATION: buyers have 1H hold not yet confirmed above value." in out
+    assert "Why: confirmed 1H retest; closed 1H hold still pending at the FVG." in out
+
+
+def test_all_known_conditional_fields_preserve_future_confirmation_language():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    lines = [
+        "Next: Wait until confirmed retest before entry.",
+        "Blocker: confirmed hold required before capital.",
+        "Missing conditions: confirmed retest; confirmed hold.",
+        "Missing proof: confirmed hold.",
+        "Upgrade trigger: confirmed retest and closed-bar hold required.",
+        "  Promote on: confirmed retest and closed-bar hold.",
+        "  Not SNIPE: full size requires confirmed hold.",
+    ]
+    out = _guard("\n".join(lines), oh)
+    for line in lines:
+        assert line in out
+
+
+def test_affirmative_sequence_claim_outside_why_is_cooled():
+    body = "FORCED PARTICIPATION: confirmed sequence and hold forced buyers to defend."
+    out = _guard(body)
+    assert "confirmed sequence and hold" not in out.lower()
+    assert "structure present; 1H hold not yet confirmed" in out
+
+
+def test_explicit_future_requirement_language_is_preserved_even_without_field_label():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    samples = [
+        "Wait until confirmed retest before entry.",
+        "Full capital requires confirmed hold.",
+        "Confirmed retest is required before adding size.",
+        "Confirmed hold needed before promotion.",
+    ]
+    for body in samples:
+        assert _guard(body, oh) == body
