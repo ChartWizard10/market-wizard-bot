@@ -1,0 +1,192 @@
+name: MA-1C.1 Clause-Aware Review Correction
+
+on:
+  push:
+    branches: [phase-ma1c1-conditional-narrative-hotfix]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: phase-ma1c1-conditional-narrative-hotfix
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Apply clause-aware proof correction
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          src = Path('src/discord_alerts.py')
+          text = src.read_text()
+          marker = 'Phase MA-1C.1 P1 correction: protect only conditional proof spans.'
+
+          if marker not in text:
+              old_future = '''_OH_FUTURE_REQUIREMENT_RE = re.compile(
+              r"\\b(?:wait(?:s|ing)?[ \\t]+(?:for|until)|requires?|required|needed|must)\\b",
+              re.IGNORECASE,
+          )
+          '''
+              new_future = '''# Phase MA-1C.1 P1 correction: protect only conditional proof spans.
+          # A whole-line exemption is unsafe because a single rendered line can contain
+          # both an affirmative stale proof claim and a separate future requirement.
+          # Protect the proof phrase only when grammar makes that phrase conditional,
+          # cool the remaining prose, then restore the protected phrase verbatim.
+          _OH_PROOF_CLAIM_PATTERN = (
+              r"(?:"
+              r"confirmed[ \\t]+retest[ \\t]+and[ \\t]+(?:a[ \\t]+)?"
+              r"(?:confirmed[ \\t]+)?closed(?:[ \\t-]+bar|[ \\t-]+candle)?[ \\t]+hold"
+              r"|confirmed[ \\t]+sequence[ \\t]+and[ \\t]+hold"
+              r"|(?:confirmed[ \\t]+)?closed(?:[ \\t-]+bar|[ \\t-]+candle)?[ \\t]+hold"
+              r"|(?:confirmed[ \\t]+hold|hold[ \\t]+confirmed)"
+              r"|(?:confirmed[ \\t]+retest|retest[ \\t]+confirmed)"
+              r")"
+          )
+          _OH_FUTURE_BEFORE_PROOF_RE = re.compile(
+              rf"\\b(?:"
+              rf"wait(?:s|ing)?[ \\t]+(?:for|until)"
+              rf"|await(?:s|ing)?"
+              rf"|only[ \\t]+after"
+              rf"|once|upon|after|before|when|if|until"
+              rf"|requires?|required|need(?:s|ed)?"
+              rf"|subject[ \\t]+to|pending"
+              rf"|must(?:[ \\t]+(?:have|show|see|get|produce))?"
+              rf")\\b"
+              rf"(?:(?!\\b(?:and|but|however|while|whereas)\\b)[^,;.!?]){{0,64}}?"
+              rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
+              re.IGNORECASE,
+          )
+          _OH_PROOF_BEFORE_REQUIREMENT_RE = re.compile(
+              rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})"
+              r"(?=[ \\t]+(?:(?:is|are)[ \\t]+)?(?:required|needed)\\b)",
+              re.IGNORECASE,
+          )
+          '''
+              if old_future not in text:
+                  raise SystemExit('STOP: expected MA-1C.1 future-requirement block not found')
+              text = text.replace(old_future, new_future, 1)
+
+              helper_start = text.find('    def _cool_nonconditional_proof_line(match: re.Match) -> str:\n')
+              helper_end = text.find(
+                  '    result = _OH_APLUS_SETUP_RE.sub("Watch-only valid setup", result)\n',
+                  helper_start,
+              )
+              if helper_start < 0 or helper_end < 0:
+                  raise SystemExit('STOP: MA-1C.1 helper anchors not found')
+
+              lines = [
+                  '    def _cool_nonconditional_proof_line(match: re.Match) -> str:',
+                  '        """Cool affirmative proof while preserving conditional proof spans.',
+                  '',
+                  '        Known conditional fields remain untouched. For free-form mixed prose,',
+                  '        only proof phrases grammatically owned by a future requirement are',
+                  '        protected; stale affirmative claims elsewhere on the same line still',
+                  '        obey the sovereign 1H object. Display-only — no decision mutation.',
+                  '        """',
+                  '        line = match.group(0)',
+                  '        if _OH_CONDITIONAL_LINE_RE.match(line):',
+                  '            return line',
+                  '',
+                  '        protected: list[tuple[str, str]] = []',
+                  '',
+                  '        def _stash_conditional_proof(proof_match: re.Match) -> str:',
+                  '            phrase = proof_match.group("proof")',
+                  '            token = f"\\x1fOHCOND{len(protected)}\\x1f"',
+                  '            protected.append((token, phrase))',
+                  '            return proof_match.group(0).replace(phrase, token, 1)',
+                  '',
+                  '        # Protect only the proof span owned by future/conditional grammar.',
+                  '        line = _OH_FUTURE_BEFORE_PROOF_RE.sub(',
+                  '            _stash_conditional_proof, line',
+                  '        )',
+                  '        line = _OH_PROOF_BEFORE_REQUIREMENT_RE.sub(',
+                  '            _stash_conditional_proof, line',
+                  '        )',
+                  '',
+                  '        line = _OH_CONFIRMED_SEQUENCE_RE.sub(',
+                  '            "structure present; 1H hold not yet confirmed", line',
+                  '        )',
+                  '        if not _hold_confirmed_1h:',
+                  '            pair_replacement = (',
+                  '                "confirmed 1H retest; closed 1H hold still pending"',
+                  '                if _retest_confirmed_1h',
+                  '                else "1H retest/hold proof remains incomplete"',
+                  '            )',
+                  '            line = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(',
+                  '                pair_replacement, line',
+                  '            )',
+                  '            line = _OH_CLOSED_HOLD_CLAIM_RE.sub(',
+                  '                "closed 1H hold still pending", line',
+                  '            )',
+                  '            line = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(',
+                  '                "1H hold not yet confirmed", line',
+                  '            )',
+                  '        if not _retest_confirmed_1h:',
+                  '            line = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(',
+                  '                "1H retest not yet confirmed", line',
+                  '            )',
+                  '',
+                  '        for token, phrase in protected:',
+                  '            line = line.replace(token, phrase)',
+                  '        return line',
+                  '',
+                  '    result = _OH_ALERT_LINE_RE.sub(_cool_nonconditional_proof_line, result)',
+                  '',
+              ]
+              new_helper = '\n'.join(lines) + '\n'
+              text = text[:helper_start] + new_helper + text[helper_end:]
+              src.write_text(text)
+              print('Applied clause-aware MA-1C.1 P1 correction')
+          else:
+              print('Clause-aware MA-1C.1 P1 correction already present')
+
+          tests = Path('tests/test_phase_ma1c_one_hour_narrative_truth.py')
+          t = tests.read_text()
+          test_marker = 'test_mixed_requirement_line_cools_affirmative_clause'
+          if test_marker not in t:
+              t += '''\n\n# ===========================================================================\n# Phase MA-1C.1 P1 correction — clause-aware future-proof preservation.\n# ===========================================================================\n\ndef test_mixed_requirement_line_cools_affirmative_clause():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    body = "Why: buyers confirmed hold at value, but full size requires another close."\n    out = _guard(body, oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "full size requires another close" in out\n    assert "buyers confirmed hold at value" not in out\n\n\ndef test_mixed_requirement_line_without_comma_still_cools_affirmative_clause():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    body = "Why: buyers confirmed hold at value but full size requires another close."\n    out = _guard(body, oh)\n    assert "buyers 1H hold not yet confirmed at value" in out\n    assert "full size requires another close" in out\n    assert "buyers confirmed hold at value" not in out\n\n\ndef test_mixed_pair_claim_cools_while_separate_requirement_survives():\n    body = (\n        "Why: confirmed retest and closed-bar hold supports target, "\n        "but full size requires another close."\n    )\n    out = _guard(body)\n    assert "confirmed 1H retest; closed 1H hold still pending supports target" in out\n    assert "full size requires another close" in out\n\n\ndef test_unlabeled_future_condition_forms_preserve_proof_phrase_verbatim():\n    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")\n    samples = [\n        "FORCED PARTICIPATION: capital only after confirmed hold.",\n        "FORCED PARTICIPATION: once confirmed retest, capital may be considered.",\n        "FORCED PARTICIPATION: upon confirmed hold, starter sizing may begin.",\n        "Capital after confirmed retest is allowed only if risk remains valid.",\n        "No entry before confirmed hold.",\n        "When confirmed hold appears, reassess capital.",\n        "If confirmed retest appears, reassess the entry.",\n        "No capital until confirmed hold.",\n        "Wait until confirmed retest before entry.",\n        "Wait for confirmed hold before adding size.",\n        "Full capital requires confirmed hold.",\n        "Confirmed retest is required before adding size.",\n        "Confirmed hold needed before promotion.",\n        "Capital must have confirmed hold before entry.",\n        "Full size requires confirmed retest and closed-bar hold.",\n    ]\n    for body in samples:\n        assert _guard(body, oh) == body\n\n\ndef test_affirmative_claim_does_not_escape_because_requirement_is_later_on_same_line():\n    body = "Why: confirmed hold at value and full size requires another close."\n    out = _guard(body)\n    assert "Why: 1H hold not yet confirmed at value" in out\n    assert "full size requires another close" in out\n    assert "confirmed hold at value" not in out\n'''
+              tests.write_text(t)
+              print('Added clause-aware MA-1C.1 regressions')
+          else:
+              print('Clause-aware MA-1C.1 regressions already present')
+          PY
+
+      - name: Run focused regressions
+        run: |
+          python -m pytest -q tests/test_phase_ma1c_one_hour_narrative_truth.py tests/test_phase_14e1a_alert_truth_alignment.py
+          python -m compileall -q src tests main.py
+
+      - name: Run full suite
+        run: python -m pytest -q
+
+      - name: Commit correction
+        shell: bash
+        run: |
+          if git diff --quiet -- src/discord_alerts.py tests/test_phase_ma1c_one_hour_narrative_truth.py; then
+            echo "No source/test change to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/discord_alerts.py tests/test_phase_ma1c_one_hour_narrative_truth.py
+          git commit -m "Phase MA-1C.1 make proof cooling clause-aware"
+          git push origin HEAD:phase-ma1c1-conditional-narrative-hotfix
