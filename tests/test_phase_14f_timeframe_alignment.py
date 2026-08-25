@@ -53,6 +53,55 @@ def _oh(state="RETEST_IN_PROGRESS", hold="HOLD_WEAK", sl="1H_TRIGGER_WEAK",
     }
 
 
+# ---------------------------------------------------------------------------
+# Phase MA-1B: Daily swing permission is derived from Daily market evidence, so
+# a test that wants a specific Daily state must supply the chart that earns it.
+# Before MA-1B these helpers passed no Daily evidence at all and the Daily state
+# fell out of `final_tier` — which is exactly the circularity MA-1B removed.
+# ---------------------------------------------------------------------------
+
+def _daily(value="supportive", structure="BOS", confirmed=True,
+           retest="confirmed", proof="CLOSED_CONFIRMED", status="CLOSED", **over):
+    e = {
+        "ticker": "T", "data_status": "OK",
+        "current_price": 101.2, "last_closed_daily_close": 101.0,
+        "daily_bar_context": {
+            "status": status, "status_source": "prior_session_date_et",
+            "last_closed_daily_date": "2026-08-20", "confirmed_bars": 380,
+            "ambiguous_rows_withheld": 0, "live_bar_available": status == "LIVE",
+            "using_live_bar_for_confirmation": False, "current_row_trusted": True,
+        },
+        "sma_value_alignment": value,
+        "structure_event": structure, "structure_confirmed": confirmed,
+        "structure_level": 100.0, "prior_structural_high": 100.0,
+        "retest_status": retest, "daily_retest_proof": proof,
+    }
+    e.update(over)
+    return e
+
+
+def _daily_supportive():
+    """Closed Daily evidence that genuinely earns PERMISSION_GRANTED."""
+    return _daily()
+
+
+def _daily_hostile():
+    """Closed hostile value with no confirmed bullish repair -> DENIED."""
+    return _daily(value="hostile", structure="none", confirmed=False,
+                  retest="missing", proof="")
+
+
+def _daily_forming():
+    """Closed evidence cannot classify; the developing session is constructive."""
+    return _daily(value="unavailable", structure="none", confirmed=False,
+                  retest="missing", proof="", status="LIVE",
+                  live_sma_value_alignment="supportive",
+                  live_structure_context={"state": "LIVE_RECLAIM_BUILDING",
+                                          "level": 100.0, "confirms_structure": False},
+                  live_retest_context={"live_interaction": "INSIDE_ZONE",
+                                       "confirms_retest": False, "confirms_failure": False})
+
+
 def _tiering(tier="NEAR_ENTRY", loc_state="mid_zone_acceptance", oh=None,
              safe=False, signal_over=None, trade_location="default",
              rejection_reason=""):
@@ -71,8 +120,9 @@ def _tiering(tier="NEAR_ENTRY", loc_state="mid_zone_acceptance", oh=None,
     }
 
 
-def _build(tier="NEAR_ENTRY", **kw):
-    return tfa.build_timeframe_alignment_context("T", _tiering(tier, **kw))
+def _build(tier="NEAR_ENTRY", daily=None, **kw):
+    return tfa.build_timeframe_alignment_context(
+        "T", _tiering(tier, **kw), enriched_data=daily)
 
 
 # ===========================================================================
@@ -155,15 +205,20 @@ class TestMapping:
         assert o["alignment_label"] != "LOWER_TIMEFRAME_ONLY"
 
     def test_starter_confirmed_full_stack(self):
+        # MA-1B: a full stack needs a Daily chart that actually grants.
         o = _build("STARTER", safe=True, loc_state="mid_zone_acceptance",
+                   daily=_daily_supportive(),
                    oh=_oh("TRIGGER_LIVE", "HOLD_CONFIRMED", "1H_TRIGGER_VALID",
                           "LIVE_TRIGGER", closed=True))
+        assert o["swing_timeframe"]["state"] == "PERMISSION_GRANTED"
         assert o["alignment_label"] == "FULL_STACK_ALIGNED"
 
     def test_snipe_confirmed_full_stack(self):
         o = _build("SNIPE_IT", safe=True, loc_state="mid_zone_acceptance",
+                   daily=_daily_supportive(),
                    oh=_oh("HOLD_CONFIRMED", "HOLD_CONFIRMED", "1H_TRIGGER_A_PLUS",
                           "CONFIRMED_TRIGGER", closed=True))
+        assert o["swing_timeframe"]["state"] == "PERMISSION_GRANTED"
         assert o["alignment_label"] == "FULL_STACK_ALIGNED"
 
     def test_wait_one_hour_only_no_htf(self):
@@ -250,7 +305,11 @@ class TestScoringAndCaps:
         assert tfa.grade_from_score(capped) == "D"
 
     def test_daily_denied_cap_applies(self):
-        o = _build("INVALID", oh=_oh())
+        # MA-1B: the cap and its value are unchanged. Only the SOURCE of the
+        # DENIED state moved — from `final_tier == "INVALID"` to real hostile
+        # closed Daily evidence with no confirmed bullish repair.
+        o = _build("NEAR_ENTRY", daily=_daily_hostile(), oh=_oh())
+        assert o["swing_timeframe"]["state"] == "PERMISSION_DENIED"
         assert "DAILY_PERMISSION_DENIED" in o["hard_caps_applied"]
         assert o["alignment_score"] <= 49
 
@@ -366,7 +425,11 @@ def _discord_tiering(oh=None, loc_state="mid_zone_acceptance", tier="NEAR_ENTRY"
             "path_quality": {"path_label": "ACCEPTABLE"},
         },
     }
-    tr["timeframe_alignment"] = tfa.build_timeframe_alignment_context("SPG", tr)
+    # MA-1B: supply the Daily chart that earns PERMISSION_FORMING — closed
+    # evidence cannot classify, developing session is constructive — so the
+    # enum-protection assertions below still exercise a real Daily state.
+    tr["timeframe_alignment"] = tfa.build_timeframe_alignment_context(
+        "SPG", tr, enriched_data=_daily_forming())
     return tr
 
 
@@ -437,6 +500,7 @@ class TestRegression:
 
     def test_confirmed_setup_full_stack(self):
         o = _build("SNIPE_IT", safe=True, loc_state="mid_zone_acceptance",
+                   daily=_daily_supportive(),
                    oh=_oh("TRIGGER_LIVE", "HOLD_CONFIRMED", "1H_TRIGGER_A_PLUS",
                           "LIVE_TRIGGER", closed=True))
         assert o["alignment_label"] == "FULL_STACK_ALIGNED"
@@ -498,9 +562,13 @@ class TestEliteAdditions:
         assert off["blocks_trigger"] is False
 
     def test_blocks_trigger_truth_table_daily(self):
-        on = tfa.derive_swing_timeframe({"final_tier": "INVALID"}, {})
-        off = tfa.derive_swing_timeframe({"final_tier": "NEAR_ENTRY"}, {})
+        # MA-1B: derive_swing_timeframe takes Daily market evidence, not a
+        # tiering result. Only a proven-denied Daily campaign blocks the trigger.
+        on = tfa.derive_swing_timeframe(_daily_hostile())
+        off = tfa.derive_swing_timeframe(_daily_supportive())
+        assert on["state"] == "PERMISSION_DENIED"
         assert on["blocks_trigger"] is True
+        assert off["state"] == "PERMISSION_GRANTED"
         assert off["blocks_trigger"] is False
 
     def test_blocks_trigger_truth_table_4h(self):

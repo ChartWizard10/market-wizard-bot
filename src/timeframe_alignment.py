@@ -1,11 +1,18 @@
 """Phase 14F — Multi-Timeframe Alignment Evidence Object.
 
 A dedicated, auditable ledger that records Weekly / Daily / 4H / 1H alignment
-state in one place. It is evidence / display / audit ONLY.
+state in one place.
+
+This module never mutates final_tier, capital_action, routing or suppression
+itself. It is NOT, however, inert: the Daily state it publishes is read
+downstream by the capital-authoritative SNIPE ladder as Daily sponsorship, and
+by the SNIPE gate audit and blocker taxonomy. Its evidence therefore has to be
+true — an inaccurate layer here becomes an inaccurate capital decision there.
+Phase MA-1B corrected the Daily layer for exactly that reason.
 
 Doctrine (fixed):
   - Weekly  = campaign context.
-  - Daily   = swing permission.
+  - Daily   = swing permission, derived from Daily market evidence (MA-1B).
   - 4H      = operational location / repair state / entry neighborhood.
   - 1H      = trigger proof (sourced from tiering_result["one_hour_entry"]).
 
@@ -183,7 +190,10 @@ def _build(ticker, tiering_result, enriched, config) -> dict:
 
     # ---- Per-layer derivation (read-only) ---------------------------------
     weekly = derive_campaign_timeframe(signal, tiering_result, enriched)
-    daily = derive_swing_timeframe(tiering_result, signal)
+    # Phase MA-1B: Daily permission is derived from the Daily chart the
+    # scheduler already supplies here, never from the tier this pipeline is in
+    # the middle of deciding.
+    daily = derive_swing_timeframe(enriched)
     operational = derive_operational_timeframe(trade_location, one_hour)
     trigger = derive_trigger_timeframe_from_one_hour_entry(one_hour)
 
@@ -292,45 +302,241 @@ def derive_campaign_timeframe(signal, tiering_result, enriched) -> dict:
     return sub
 
 
-def derive_swing_timeframe(tiering_result, signal) -> dict:
-    """Daily swing permission — sourced from validated tiering fields."""
+# ---------------------------------------------------------------------------
+# Phase MA-1B — Daily swing permission from real Daily market evidence
+# ---------------------------------------------------------------------------
+# MASTER-AUDIT-1 finding D3. This layer previously read `final_tier`,
+# `safe_for_alert`, `capital_action` and `rejection_reason` — and nothing else.
+# The Daily state it produced is consumed downstream by the capital-authoritative
+# ladder as "Daily sponsorship", so the scanner's own answer was being relabelled
+# as Daily evidence and then fed back in to justify that answer.
+#
+# The cycle was measurable in both directions. One identical Daily chart produced
+# four different Daily states depending only on the tier; and one identical tier
+# produced PERMISSION_GRANTED across a supportive chart, a hostile chart, a
+# closed-failure chart and an ambiguous frame alike.
+#
+# Daily permission now comes from the Daily chart. The MBT-2/MBT-2A evidence the
+# scheduler already passes in as `enriched_data` is the source; no new market
+# request, indicator or threshold is introduced.
+#
+# Sovereignty rules enforced here:
+#   - No downstream judgment (tier, capital, safety, rejection, score, ladder,
+#     seal, channel) may influence the state. Evidence flows toward judgment;
+#     judgment never flows back and becomes evidence.
+#   - No 1H and no 4H input. Daily owns Daily.
+#   - Only COMPLETED Daily evidence may GRANT. A developing candle is
+#     information: it can say "forming", never "confirmed".
+#   - Ambiguous provenance withholds permission without inventing a bearish
+#     verdict — unknown data is not hostile market evidence.
+#   - Proven closed failure outranks live repair excitement.
+#   - Missing proof is not failed proof: an absent structural event is not a
+#     denial, and an established supportive Daily value can sponsor an ongoing
+#     campaign without a fresh break every session.
+#
+# Daily permission is campaign sponsorship, not entry permission. GRANTED never
+# means SNIPE_IT, STARTER or safe_for_alert — the full downstream proof burden
+# is untouched.
+# ---------------------------------------------------------------------------
+
+_DAILY_STATUS_TRUSTED = ("CLOSED", "LIVE")
+
+# Confirmed bullish Daily structural events, as emitted by indicators.detect_structure
+# alongside structure_confirmed. Read from completed bars only.
+_BULLISH_DAILY_STRUCTURE = {
+    "BOS", "MSS", "RECLAIM", "ACCEPTED_BREAK", "FAILED_BREAKDOWN_RECLAIM",
+}
+
+# Developing-session states that count as a constructive attempt. Every one of
+# these is emitted by indicators' live_* helpers, which carry permanent
+# confirms_structure / confirms_retest = False.
+_LIVE_CONSTRUCTIVE_STRUCTURE = {
+    "LIVE_RECLAIM_BUILDING", "LIVE_BREAK_BUILDING", "LIVE_ABOVE_LEVEL",
+}
+_LIVE_CONSTRUCTIVE_ZONE = {"INSIDE_ZONE", "NEAR_ZONE"}
+
+_CLOSED_RETEST_PROOF = "CLOSED_CONFIRMED"
+
+
+def _daily_trust_failure(enriched: dict) -> str | None:
+    """Return a reason string when closed Daily evidence cannot be trusted.
+
+    Sovereign Daily permission needs two things, not one: usable completed Daily
+    evidence AND trustworthy provenance for the historical series that evidence
+    was calculated from. MBT-2A marks a duplicated CURRENT session, a
+    future-dated row or an unparseable index as UNKNOWN — but a duplicated
+    OLDER session, or a series that had to be reordered before the indicators
+    could run, still reports status CLOSED. Verified against the real partition:
+
+        duplicated older session   -> status=CLOSED, ambiguous_rows_withheld=2
+        non-monotonic ordering     -> status=CLOSED, index_reordered=True
+
+    In both cases every indicator downstream is computed over a series the
+    partition had to repair. A row excluded as ambiguous cannot secretly help
+    authorize a campaign, and a series that needed reordering is not sovereign
+    proof — so the whole frame withholds permission here rather than granting on
+    a repaired history.
+
+    Withholding is deliberately not denial: that is the caller's UNKNOWN branch,
+    which leaves blocks_trigger False. Unknown provenance is not bearish market
+    evidence — it is simply not permission.
+
+    No new minimum-bar threshold is invented: indicator availability already
+    decides whether SMA/structure could be proven.
+    """
+    if not isinstance(enriched, dict) or not enriched:
+        return "Daily market evidence unavailable"
+    ctx = enriched.get("daily_bar_context")
+    if not isinstance(ctx, dict) or not ctx:
+        return "Daily bar provenance unavailable"
+    status = str(ctx.get("status") or "").upper().strip()
+    if status not in _DAILY_STATUS_TRUSTED:
+        source = str(ctx.get("status_source") or "unknown")
+        return f"Daily bar provenance not trustworthy (status={status or 'MISSING'}, {source})"
+    try:
+        if int(ctx.get("confirmed_bars") or 0) <= 0:
+            return "no confirmation-eligible Daily bars"
+    except (TypeError, ValueError):
+        return "no confirmation-eligible Daily bars"
+    if enriched.get("last_closed_daily_close") is None:
+        return "no closed Daily close available"
+    try:
+        withheld = int(ctx.get("ambiguous_rows_withheld") or 0)
+    except (TypeError, ValueError):
+        withheld = 0
+    if withheld > 0:
+        return (f"{withheld} ambiguous Daily row(s) withheld; the historical series"
+                " behind this evidence is not sovereign proof")
+    if ctx.get("index_reordered") is True:
+        return ("Daily session ordering required repair; the historical series"
+                " behind this evidence is not sovereign proof")
+    return None
+
+
+def _live_daily_is_constructive(enriched: dict) -> tuple[bool, list]:
+    """Whether the DEVELOPING session shows a constructive attempt.
+
+    Information only. Nothing here can grant permission — the caller reaches
+    this branch solely to distinguish FORMING from UNKNOWN.
+    """
+    notes: list = []
+    live_structure = enriched.get("live_structure_context")
+    if isinstance(live_structure, dict):
+        state = str(live_structure.get("state") or "").upper().strip()
+        if state in _LIVE_CONSTRUCTIVE_STRUCTURE:
+            notes.append(f"live Daily structure attempt={state}")
+    if str(enriched.get("live_sma_value_alignment") or "").lower().strip() == "supportive":
+        notes.append("live Daily value alignment=supportive")
+    live_retest = enriched.get("live_retest_context")
+    if isinstance(live_retest, dict):
+        interaction = str(live_retest.get("live_interaction") or "").upper().strip()
+        if interaction in _LIVE_CONSTRUCTIVE_ZONE:
+            notes.append(f"live Daily zone interaction={interaction}")
+    return bool(notes), notes
+
+
+def derive_swing_timeframe(enriched) -> dict:
+    """Daily swing permission — derived from Daily market evidence.
+
+    Reads the completed-bar Daily evidence in `enriched` (MBT-2/MBT-2A) and
+    nothing else. It does NOT read final_tier, safe_for_alert, capital_action,
+    rejection_reason, score, the ladder, the seal, the Discord channel, the 1H
+    engine or any 4H state — those are downstream judgments, and a judgment may
+    never become the evidence that justifies it.
+
+    When real Daily evidence is unavailable the answer is UNKNOWN with an honest
+    warning. There is deliberately no fallback to the historical tier-derived
+    behaviour: that path was the defect.
+    """
     sub = _blank_layer("1D", "SWING_PERMISSION")
-    final_tier = str(tiering_result.get("final_tier", "") or "").upper().strip()
-    safe = bool(tiering_result.get("safe_for_alert", False))
-    capital_action = str(tiering_result.get("capital_action", "") or "").lower().strip()
-    rejection = str(tiering_result.get("rejection_reason", "") or "").lower().strip()
+    sub["authority_source"] = "DAILY_MARKET_EVIDENCE"
 
-    if final_tier in ("SNIPE_IT", "STARTER"):
-        state = "PERMISSION_GRANTED" if safe else "PERMISSION_REPAIRING"
-    elif final_tier == "NEAR_ENTRY":
-        state = "PERMISSION_FORMING"
-    elif final_tier == "INVALID":
-        state = "PERMISSION_DENIED"
-    elif final_tier == "WAIT":
-        # WAIT alone is "no permission established", not necessarily an active
-        # denial. Only an explicit invalid-setup rejection denies permission.
-        if rejection and any(
-            k in rejection for k in ("invalid", "hostile", "fail", "reject", "violat")
-        ):
-            state = "PERMISSION_DENIED"
-        else:
-            state = "UNKNOWN"
-    elif capital_action == "wait_no_capital":
-        state = "PERMISSION_FORMING"
+    # ---- trust gate: ambiguity withholds permission, it never denies --------
+    trust_failure = _daily_trust_failure(enriched)
+    if trust_failure:
+        sub["state"] = "UNKNOWN"
+        sub["warnings"].append(trust_failure)
+        sub["warnings"].append("Daily permission not proven; unknown data is not bearish evidence")
+        return sub
+
+    ctx = enriched["daily_bar_context"]
+    bar_status = str(ctx.get("status") or "").upper().strip()
+    value = str(enriched.get("sma_value_alignment") or "unavailable").lower().strip()
+    structure_event = str(enriched.get("structure_event") or "none").upper().strip()
+    structure_confirmed = bool(enriched.get("structure_confirmed"))
+    retest_status = str(enriched.get("retest_status") or "missing").lower().strip()
+    retest_proof = str(enriched.get("daily_retest_proof") or "").upper().strip()
+
+    bullish_structure = structure_confirmed and structure_event in _BULLISH_DAILY_STRUCTURE
+    retest_is_closed = retest_proof == _CLOSED_RETEST_PROOF
+    closed_retest_failed = retest_is_closed and retest_status == "failed"
+
+    # ---- evidence ledger: closed facts only ---------------------------------
+    sub["evidence"].append(f"closed Daily value alignment={value}")
+    sub["evidence"].append(
+        f"closed Daily structure_event={structure_event.lower()}"
+        f" (confirmed={structure_confirmed})"
+    )
+    if retest_is_closed:
+        sub["evidence"].append(f"closed Daily retest={retest_status}")
+    last_closed_date = ctx.get("last_closed_daily_date")
+    if last_closed_date:
+        sub["evidence"].append(f"last closed Daily date={last_closed_date}")
+    sub["evidence"].append(f"Daily bar status={bar_status}")
+
+    if bar_status == "LIVE":
+        sub["warnings"].append("current Daily candle is live; not confirmation")
+    if not retest_is_closed and retest_status in ("partial", "confirmed"):
+        sub["warnings"].append(
+            f"Daily retest interaction is provisional ({retest_proof or 'unproven'});"
+            " not closed Daily confirmation"
+        )
+    # ---- 1. proven CLOSED failure outranks everything below -----------------
+    if closed_retest_failed:
+        sub["state"] = "PERMISSION_DENIED"
+        sub["warnings"].append("closed Daily retest proved failed")
+    elif value == "hostile" and not bullish_structure:
+        sub["state"] = "PERMISSION_DENIED"
+        sub["warnings"].append(
+            "closed Daily value is hostile with no confirmed bullish structural repair"
+        )
+    # ---- 2. GRANTED: completed Daily evidence sponsors the campaign ---------
+    # Supportive closed value IS ongoing campaign sponsorship. A fresh structural
+    # break is not required every session merely to keep a healthy trend legal.
+    elif value == "supportive":
+        sub["state"] = "PERMISSION_GRANTED"
+        if not bullish_structure:
+            sub["evidence"].append(
+                "no fresh Daily structural event; established closed value sponsors the campaign"
+            )
+    # ---- 3. REPAIRING: alive and constructive, sponsorship not yet clean ----
+    elif bullish_structure:
+        sub["state"] = "PERMISSION_REPAIRING"
+        sub["warnings"].append(
+            f"confirmed bullish Daily structure with {value} value; sponsorship not yet clean"
+        )
+    elif value == "mixed":
+        sub["state"] = "PERMISSION_REPAIRING"
+        sub["warnings"].append("closed Daily value remains mixed")
     else:
-        state = "UNKNOWN"
+        # ---- 4. FORMING: closed evidence has not earned GRANTED, but the
+        # developing session is making a constructive attempt. Reached only on a
+        # trusted frame with no proven closed failure.
+        constructive, live_notes = _live_daily_is_constructive(enriched)
+        if constructive:
+            sub["state"] = "PERMISSION_FORMING"
+            sub["evidence"].extend(live_notes)
+            sub["warnings"].append(
+                "developing Daily attempt only; live evidence cannot grant permission"
+            )
+        else:
+            # ---- 5. UNKNOWN: trustworthy frame, nothing classifiable --------
+            sub["state"] = "UNKNOWN"
+            sub["warnings"].append(
+                "closed Daily evidence insufficient to classify swing permission"
+            )
 
-    sub["state"] = state
-    sub["blocks_trigger"] = state == "PERMISSION_DENIED"
-    if final_tier:
-        sub["evidence"].append(f"final_tier={final_tier}")
-    sub["evidence"].append(f"safe_for_alert={safe}")
-    if capital_action:
-        sub["evidence"].append(f"capital_action={capital_action}")
-    if state == "PERMISSION_REPAIRING":
-        sub["warnings"].append("setup tier present but not yet safe_for_alert")
-    if state == "PERMISSION_DENIED" and rejection:
-        sub["warnings"].append(f"swing permission denied: {rejection}")
+    sub["blocks_trigger"] = sub["state"] == "PERMISSION_DENIED"
     return sub
 
 
