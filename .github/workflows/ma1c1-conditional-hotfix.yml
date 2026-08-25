@@ -28,15 +28,10 @@ jobs:
           text = src.read_text()
           marker = 'Phase MA-1C.1: scope proof-claim cooling to affirmative Why narrative'
           if marker not in text:
-              old_patterns = '''_OH_CONFIRMED_RETEST_CLAIM_RE = re.compile(
-              r"\\b(?:confirmed[ \\t]+retest|retest[ \\t]+confirmed)\\b", re.IGNORECASE
-          )
-          _OH_APLUS_SETUP_RE = re.compile(r"\\bA\\+[ \\t]+setup\\b", re.IGNORECASE)
-          '''
-              new_patterns = '''_OH_CONFIRMED_RETEST_CLAIM_RE = re.compile(
-              r"\\b(?:confirmed[ \\t]+retest|retest[ \\t]+confirmed)\\b", re.IGNORECASE
-          )
-          # Phase MA-1C.1: scope proof-claim cooling to affirmative Why narrative.
+              insert_anchor = '_OH_APLUS_SETUP_RE = re.compile(r"\\bA\\+[ \\t]+setup\\b", re.IGNORECASE)\n'
+              if insert_anchor not in text:
+                  raise SystemExit('STOP: MA-1C regex insertion anchor not found; refusing broad edit')
+              reason_regex = '''# Phase MA-1C.1: scope proof-claim cooling to affirmative Why narrative.
           # Future/conditional instructions (Next:, upgrade triggers, blockers) must
           # preserve phrases such as "wait until confirmed retest"; rewriting those
           # phrases can invert the operator instruction. The live defect originated
@@ -45,35 +40,17 @@ jobs:
           _OH_REASON_LINE_RE = re.compile(
               r"^([ \\t]*Why:[ \\t]*)(.*)$", re.MULTILINE
           )
-          _OH_APLUS_SETUP_RE = re.compile(r"\\bA\\+[ \\t]+setup\\b", re.IGNORECASE)
           '''
-              if old_patterns not in text:
-                  raise SystemExit('STOP: MA-1C regex anchor not found; refusing broad edit')
-              text = text.replace(old_patterns, new_patterns, 1)
+              text = text.replace(insert_anchor, reason_regex + insert_anchor, 1)
 
-              old_guard = '''    if not _hold_confirmed_1h:
-              _pair_replacement = (
-                  "confirmed 1H retest; closed 1H hold still pending"
-                  if _retest_confirmed_1h
-                  else "1H retest/hold proof remains incomplete"
-              )
-              result = _OH_CONFIRMED_RETEST_AND_CLOSED_HOLD_RE.sub(
-                  _pair_replacement, result
-              )
-              result = _OH_CLOSED_HOLD_CLAIM_RE.sub(
-                  "closed 1H hold still pending", result
-              )
-              result = _OH_CONFIRMED_HOLD_CLAIM_RE.sub(
-                  "1H hold not yet confirmed", result
-              )
-          if not _retest_confirmed_1h:
-              result = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(
-                  "1H retest not yet confirmed", result
-              )
+              start_anchor = '    if not _hold_confirmed_1h:\n        _pair_replacement = (\n'
+              end_anchor = '    result = _OH_APLUS_SETUP_RE.sub("Watch-only valid setup", result)\n'
+              start = text.find(start_anchor)
+              end = text.find(end_anchor, start)
+              if start < 0 or end < 0:
+                  raise SystemExit('STOP: MA-1C guard slice anchors not found; refusing broad edit')
 
-              result = _OH_APLUS_SETUP_RE.sub("Watch-only valid setup", result)
-          '''
-              new_guard = '''    def _cool_affirmative_reason_line(match: re.Match) -> str:
+              scoped_guard = '''    def _cool_affirmative_reason_line(match: re.Match) -> str:
               """Cool stale 1H proof claims only inside affirmative Why: prose.
 
               Future/conditional operator instructions elsewhere in the alert are
@@ -106,11 +83,8 @@ jobs:
 
               result = _OH_REASON_LINE_RE.sub(_cool_affirmative_reason_line, result)
 
-              result = _OH_APLUS_SETUP_RE.sub("Watch-only valid setup", result)
           '''
-              if old_guard not in text:
-                  raise SystemExit('STOP: MA-1C guard anchor not found; refusing broad edit')
-              text = text.replace(old_guard, new_guard, 1)
+              text = text[:start] + scoped_guard + text[end:]
               src.write_text(text)
               print('Applied MA-1C.1 source hotfix')
           else:
