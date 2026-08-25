@@ -1855,8 +1855,48 @@ _OH_CONDITIONAL_LINE_RE = re.compile(
     r"):[ \t]*",
     re.IGNORECASE,
 )
-_OH_FUTURE_REQUIREMENT_RE = re.compile(
-    r"\b(?:wait(?:s|ing)?[ \t]+(?:for|until)|requires?|required|needed|must)\b",
+# Phase MA-1C.1 P1 correction: protect only conditional proof spans.
+# A whole-line exemption is unsafe because a single rendered line can contain
+# both an affirmative stale proof claim and a separate future requirement.
+# Protect the proof phrase only when grammar makes that phrase conditional,
+# cool the remaining prose, then restore the protected phrase verbatim.
+_OH_PROOF_CLAIM_PATTERN = (
+    r"(?:"
+    r"confirmed[ \t]+retest[ \t]+and[ \t]+(?:a[ \t]+)?"
+    r"(?:confirmed[ \t]+)?closed(?:[ \t-]+bar|[ \t-]+candle)?[ \t]+hold"
+    r"|confirmed[ \t]+sequence[ \t]+and[ \t]+hold"
+    r"|(?:confirmed[ \t]+)?closed(?:[ \t-]+bar|[ \t-]+candle)?[ \t]+hold"
+    r"|(?:confirmed[ \t]+hold|hold[ \t]+confirmed)"
+    r"|(?:confirmed[ \t]+retest|retest[ \t]+confirmed)"
+    r")"
+)
+_OH_FUTURE_BEFORE_PROOF_RE = re.compile(
+    rf"\b(?:"
+    rf"wait(?:s|ing)?[ \t]+(?:for|until)"
+    rf"|await(?:s|ing)?"
+    rf"|only[ \t]+after"
+    rf"|once|upon|before|when|if|until"
+    rf"|requires?|required|need(?:s|ed)?"
+    rf"|subject[ \t]+to|pending"
+    rf"|must(?:[ \t]+(?:have|show|see|get|produce))?"
+    rf")\b"
+    rf"(?:(?!\b(?:and|but|however|while|whereas)\b)[^,;.!?]){{0,64}}?"
+    rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
+    re.IGNORECASE,
+)
+# Bare 'after' is ambiguous: 'structure is valid after a closed hold' is
+# an affirmative historical claim, not a future requirement. Protect
+# 'after <proof>' only in explicit execution/capital noun phrases.
+_OH_EXECUTION_AFTER_PROOF_RE = re.compile(
+    rf"\b(?:capital|entry|full(?:[ \t-]+size)?|starter[ \t]+sizing|"
+    rf"promotion|position|adding[ \t]+size)"
+    rf"[ \t]+(?:only[ \t]+)?after[ \t]+"
+    rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})",
+    re.IGNORECASE,
+)
+_OH_PROOF_BEFORE_REQUIREMENT_RE = re.compile(
+    rf"(?P<proof>{_OH_PROOF_CLAIM_PATTERN})"
+    r"(?=[ \t]+(?:(?:is|are)[ \t]+)?(?:required|needed)\b)",
     re.IGNORECASE,
 )
 _OH_APLUS_SETUP_RE = re.compile(r"\bA\+[ \t]+setup\b", re.IGNORECASE)
@@ -2056,19 +2096,35 @@ def _apply_one_hour_truth_alignment_guard(body: str, one_hour) -> str:
     )
 
     def _cool_nonconditional_proof_line(match: re.Match) -> str:
-        """Cool stale affirmative proof claims while preserving future conditions.
+        """Cool affirmative proof while preserving conditional proof spans.
 
-        Known conditional alert fields and explicit future-requirement language
-        are left verbatim. Every other descriptive line remains subject to 1H
-        proof sovereignty, including target reasons and forced-participation
-        prose. Display-only: no evidence, tier, capital, routing, or score change.
+        Known conditional fields remain untouched. For free-form mixed prose,
+        only proof phrases grammatically owned by a future requirement are
+        protected; stale affirmative claims elsewhere on the same line still
+        obey the sovereign 1H object. Display-only — no decision mutation.
         """
         line = match.group(0)
-        if (
-            _OH_CONDITIONAL_LINE_RE.match(line)
-            or _OH_FUTURE_REQUIREMENT_RE.search(line)
-        ):
+        if _OH_CONDITIONAL_LINE_RE.match(line):
             return line
+
+        protected: list[tuple[str, str]] = []
+
+        def _stash_conditional_proof(proof_match: re.Match) -> str:
+            phrase = proof_match.group("proof")
+            token = f"\x1fOHCOND{len(protected)}\x1f"
+            protected.append((token, phrase))
+            return proof_match.group(0).replace(phrase, token, 1)
+
+        # Protect only the proof span owned by future/conditional grammar.
+        line = _OH_FUTURE_BEFORE_PROOF_RE.sub(
+            _stash_conditional_proof, line
+        )
+        line = _OH_EXECUTION_AFTER_PROOF_RE.sub(
+            _stash_conditional_proof, line
+        )
+        line = _OH_PROOF_BEFORE_REQUIREMENT_RE.sub(
+            _stash_conditional_proof, line
+        )
 
         line = _OH_CONFIRMED_SEQUENCE_RE.sub(
             "structure present; 1H hold not yet confirmed", line
@@ -2092,6 +2148,9 @@ def _apply_one_hour_truth_alignment_guard(body: str, one_hour) -> str:
             line = _OH_CONFIRMED_RETEST_CLAIM_RE.sub(
                 "1H retest not yet confirmed", line
             )
+
+        for token, phrase in protected:
+            line = line.replace(token, phrase)
         return line
 
     result = _OH_ALERT_LINE_RE.sub(_cool_nonconditional_proof_line, result)

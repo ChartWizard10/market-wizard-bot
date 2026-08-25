@@ -233,3 +233,73 @@ def test_explicit_future_requirement_language_is_preserved_even_without_field_la
     ]
     for body in samples:
         assert _guard(body, oh) == body
+
+
+# ===========================================================================
+# Phase MA-1C.1 P1 correction — clause-aware future-proof preservation.
+# ===========================================================================
+
+def test_mixed_requirement_line_cools_affirmative_clause():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    body = "Why: buyers confirmed hold at value, but full size requires another close."
+    out = _guard(body, oh)
+    assert "buyers 1H hold not yet confirmed at value" in out
+    assert "full size requires another close" in out
+    assert "buyers confirmed hold at value" not in out
+
+
+def test_mixed_requirement_line_without_comma_still_cools_affirmative_clause():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    body = "Why: buyers confirmed hold at value but full size requires another close."
+    out = _guard(body, oh)
+    assert "buyers 1H hold not yet confirmed at value" in out
+    assert "full size requires another close" in out
+    assert "buyers confirmed hold at value" not in out
+
+
+def test_mixed_pair_claim_cools_while_separate_requirement_survives():
+    body = (
+        "Why: confirmed retest and closed-bar hold supports target, "
+        "but full size requires another close."
+    )
+    out = _guard(body)
+    assert "confirmed 1H retest; closed 1H hold still pending supports target" in out
+    assert "full size requires another close" in out
+
+
+def test_unlabeled_future_condition_forms_preserve_proof_phrase_verbatim():
+    oh = _one_hour(retest="NONE", hold="HOLD_WEAK")
+    samples = [
+        "FORCED PARTICIPATION: capital only after confirmed hold.",
+        "FORCED PARTICIPATION: once confirmed retest, capital may be considered.",
+        "FORCED PARTICIPATION: upon confirmed hold, starter sizing may begin.",
+        "Capital after confirmed retest is allowed only if risk remains valid.",
+        "No entry before confirmed hold.",
+        "When confirmed hold appears, reassess capital.",
+        "If confirmed retest appears, reassess the entry.",
+        "No capital until confirmed hold.",
+        "Wait until confirmed retest before entry.",
+        "Wait for confirmed hold before adding size.",
+        "Full capital requires confirmed hold.",
+        "Confirmed retest is required before adding size.",
+        "Confirmed hold needed before promotion.",
+        "Capital must have confirmed hold before entry.",
+        "Full size requires confirmed retest and closed-bar hold.",
+    ]
+    for body in samples:
+        assert _guard(body, oh) == body
+
+
+def test_affirmative_claim_does_not_escape_because_requirement_is_later_on_same_line():
+    body = "Why: confirmed hold at value and full size requires another close."
+    out = _guard(body)
+    assert "Why: 1H hold not yet confirmed at value" in out
+    assert "full size requires another close" in out
+    assert "confirmed hold at value" not in out
+
+
+def test_bare_after_affirmative_claim_is_not_treated_as_future_requirement():
+    body = "Why: structure is valid after a closed-bar hold at the trigger."
+    out = _guard(body)
+    assert "closed-bar hold" not in out.lower()
+    assert "closed 1H hold still pending" in out
