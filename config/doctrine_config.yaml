@@ -140,6 +140,13 @@ research_archive:
   retention_days: 120
   max_daily_file_bytes: 10485760
 
+# Phase 92 commercial evidence store. Separate from operational dedup state
+# and from the research archive. Records only successfully delivered Discord
+# alerts and has zero strategy, tier, capital, routing, or outcome authority.
+signal_outcomes:
+  enabled: true
+  directory: ".state/signal_outcomes"
+
 state:
   cooldown_minutes: 60
   max_memory_entries: 500

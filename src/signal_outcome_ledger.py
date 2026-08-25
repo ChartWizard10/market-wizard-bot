@@ -341,25 +341,37 @@ def _timeframe_projection(tiering_result: dict) -> dict | None:
 
 
 def _four_hour_projection(tiering_result: dict) -> dict | None:
+    """Project the actual R4H-1 schema without inventing proxy-shaped keys."""
     four = tiering_result.get("four_hour_operational")
     if not isinstance(four, dict):
         return None
-    return _projection(
-        four,
-        (
-            "status",
-            "authority_mode",
-            "structural_state",
-            "location_state",
-            "readiness",
-            "last_closed_time",
-            "live_bar_available",
-            "freshness_status",
-            "missing_proofs",
-            "proxy_comparison",
-        ),
-    )
-
+    bar = four.get("bar_context") if isinstance(four.get("bar_context"), dict) else {}
+    return {
+        "status": _text(four.get("status")),
+        "engine_version": _text(four.get("engine_version")),
+        "authority_mode": _text(four.get("authority_mode")),
+        "structural_state": _text(four.get("structural_state")),
+        "state_confidence": _text(four.get("state_confidence")),
+        "operational_location": _text(four.get("operational_location")),
+        "operational_readiness": _text(four.get("operational_readiness")),
+        "bar_context": {
+            "last_closed_4h_time": _text(bar.get("last_closed_4h_time")),
+            "current_live_4h_time": _text(bar.get("current_live_4h_time")),
+            "live_bar_available": bar.get("live_bar_available") if isinstance(bar.get("live_bar_available"), bool) else None,
+            "last_closed_source_complete": bar.get("last_closed_source_complete") if isinstance(bar.get("last_closed_source_complete"), bool) else None,
+            "using_live_bar_for_confirmation": bar.get("using_live_bar_for_confirmation") if isinstance(bar.get("using_live_bar_for_confirmation"), bool) else None,
+            "freshness_status": _text(bar.get("freshness_status")),
+        },
+        "retest_truth": _json_safe(four.get("retest_truth")),
+        "hold_truth": _json_safe(four.get("hold_truth")),
+        "invalidation_quality": _json_safe(four.get("invalidation_quality")),
+        "target_path": _json_safe(four.get("target_path")),
+        "daily_relationship": _text(four.get("daily_relationship")),
+        "hard_failures": _string_list(four.get("hard_failures")),
+        "soft_warnings": _string_list(four.get("soft_warnings")),
+        "missing_proofs": _string_list(four.get("missing_proofs")),
+        "proxy_comparison": _json_safe(four.get("proxy_comparison")),
+    }
 
 def _ladder_projection(tiering_result: dict) -> dict | None:
     ladder = tiering_result.get("snipe_ladder")
@@ -369,17 +381,35 @@ def _ladder_projection(tiering_result: dict) -> dict | None:
         ladder,
         (
             "internal_ladder_tier",
+            "public_signal_tier",
+            "existing_final_tier_recommendation",
+            "capital_action_recommendation",
+            "opportunity_lane",
+            "starter_grade",
+            "sniper_grade",
+            "base_alive",
             "proof_state",
-            "why_this_tier",
-            "why_not_higher",
-            "next_promotion_proof",
+            "proof_failure",
+            "structure_state",
+            "location_state",
+            "trigger_state",
+            "candle_state",
+            "risk_state",
             "hard_failures",
             "starter_blockers",
             "sniper_only_blockers",
+            "soft_caps",
+            "info_notes",
+            "basket_reason",
+            "why_this_ladder_tier",
+            "why_not_higher",
+            "why_not_lower",
+            "next_promotion_proof",
+            "failure_condition",
+            "audit_tags",
             "snipe_capital_floor_violation",
         ),
     )
-
 
 def _audit_projection(tiering_result: dict) -> dict | None:
     audit = tiering_result.get("snipe_gate_audit")
@@ -407,9 +437,20 @@ def _event_id(
     final_tier: str,
     dedup_key: str | None,
     origin: str,
+    scan_started_at: str,
 ) -> str:
+    # scan_started_at is part of identity because manual !analyze scan IDs
+    # historically contain only HHMMSS and may repeat on another date.
     basis = "|".join(
-        [VERSION, scan_id, ticker.upper(), final_tier, dedup_key or "", origin]
+        [
+            VERSION,
+            scan_id,
+            ticker.upper(),
+            final_tier,
+            dedup_key or "",
+            origin,
+            scan_started_at,
+        ]
     )
     digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
     return f"mw_{digest}"
@@ -463,7 +504,7 @@ def build_published_event(
             "routing_authority": False,
             "outcome_authority": False,
         },
-        "alert_id": _event_id(scan_id, ticker, final_tier, dedup_key, origin),
+        "alert_id": _event_id(scan_id, ticker, final_tier, dedup_key, origin, scan_started_at),
         "scan_id": _text(scan_id),
         "ticker": _text(ticker.upper()),
         "origin": origin,
@@ -478,7 +519,7 @@ def build_published_event(
         "delivery": {
             "sent": True,
             "channel_id": _text(send_result.get("channel_id")),
-            "chunks": _finite_number(send_result.get("chunks") or send_result.get("chunk_count")),
+            "message_count": _finite_number(send_result.get("message_count") or send_result.get("chunks") or send_result.get("chunk_count")),
             "dedup_reason": _text(dedup.get("reason")),
             "dedup_key": dedup_key,
         },
@@ -539,9 +580,9 @@ def build_published_event(
             "reason": _text(final_signal.get("reason")),
             "sanitized_reason": _text(final_signal.get("sanitized_reason")),
             "sanitized_next_action": _text(final_signal.get("sanitized_next_action")),
-            "why_this_tier": _text((ladder or {}).get("why_this_tier")),
+            "why_this_tier": _text((ladder or {}).get("why_this_ladder_tier")),
             "why_not_higher": _text((ladder or {}).get("why_not_higher")),
-            "next_promotion_proof": _text((ladder or {}).get("next_promotion_proof")),
+            "next_promotion_proof": _json_safe((ladder or {}).get("next_promotion_proof")),
         },
     }
 

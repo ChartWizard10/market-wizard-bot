@@ -26,6 +26,7 @@ from src import market_data as market_data_mod
 from src import one_hour_entry
 from src import prefilter as prefilter_mod
 from src import scan_telemetry
+from src import signal_outcome_ledger
 from src import score_calibration
 from src import snipe_confirmed_seal
 from src import snipe_gate_audit
@@ -156,6 +157,54 @@ def _build_decision_trace_with_velocity(
     except Exception as exc:
         log.warning("VELOCITY_TELEMETRY_ERROR: %s: %s", ticker, exc)
     return _attach_capacity_boundary(trace, capacity_boundary)
+
+
+async def _record_published_event_isolated(
+    *,
+    ticker: str,
+    tiering_result: dict,
+    dedup_decision: dict | None,
+    send_result: dict,
+    config: dict,
+    scan_id: str,
+    scan_started_at: str,
+    system_prompt: str,
+    origin: str,
+    tickers: list | tuple | None = None,
+) -> dict:
+    """Persist Phase-92 evidence without owning scanner judgment.
+
+    This runs only after Discord reports a successful send. File I/O is moved
+    off the event loop. Failure is observable but cannot change the signal,
+    tier, capital permission, routing, dedup decision, or state continuity.
+    """
+    try:
+        result = await asyncio.to_thread(
+            signal_outcome_ledger.append_published_event,
+            ticker=ticker,
+            tiering_result=tiering_result,
+            dedup_decision=dedup_decision,
+            send_result=send_result,
+            config=config,
+            scan_id=scan_id,
+            scan_started_at=scan_started_at,
+            system_prompt=system_prompt,
+            origin=origin,
+            tickers=tickers,
+        )
+    except Exception as exc:  # pragma: no cover - defensive isolation boundary
+        log.critical("SIGNAL_OUTCOME_LEDGER_UNCAUGHT: %s: %s", ticker, exc)
+        return {"ok": False, "status": "uncaught_error", "error": str(exc)}
+
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        log.critical(
+            "SIGNAL_OUTCOME_LEDGER_DEGRADED: ticker=%s scan_id=%s status=%s error=%s",
+            ticker,
+            scan_id,
+            result.get("status") if isinstance(result, dict) else "invalid_result",
+            result.get("error") if isinstance(result, dict) else "",
+        )
+    return result if isinstance(result, dict) else {"ok": False, "status": "invalid_result"}
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +717,22 @@ async def run_scan_pipeline(
 
         if send_result.get("sent"):
             alerts_sent += 1
+            await _record_published_event_isolated(
+                ticker=ticker,
+                tiering_result=tiering_result,
+                dedup_decision=dedup_decision,
+                send_result=send_result,
+                config=config,
+                scan_id=scan_id,
+                scan_started_at=started_at,
+                system_prompt=system_prompt,
+                origin=(
+                    signal_outcome_ledger.ORIGIN_MANUAL_SCAN
+                    if is_manual
+                    else signal_outcome_ledger.ORIGIN_SCHEDULED_SCAN
+                ),
+                tickers=tickers,
+            )
             try:
                 state_store.record_alert(ticker, tiering_result, state, config, scan_id)
             except Exception as exc:
@@ -849,6 +914,7 @@ async def run_analyze(
         }
 
     async with lock:
+        started_at = datetime.utcnow().isoformat()
         scan_id = f"analyze_{ticker}_{datetime.utcnow().strftime('%H%M%S')}"
 
         try:
@@ -924,6 +990,18 @@ async def run_analyze(
         )
 
         if send_result.get("sent"):
+            await _record_published_event_isolated(
+                ticker=ticker,
+                tiering_result=tiering_result,
+                dedup_decision=dedup_decision,
+                send_result=send_result,
+                config=config,
+                scan_id=scan_id,
+                scan_started_at=started_at,
+                system_prompt=system_prompt,
+                origin=signal_outcome_ledger.ORIGIN_MANUAL_ANALYZE,
+                tickers=None,
+            )
             state_store.record_alert(ticker, tiering_result, state, config, scan_id)
             try:
                 state_store.save(state, config)
