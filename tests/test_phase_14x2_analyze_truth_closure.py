@@ -49,10 +49,19 @@ from tests.test_phase_14x_full_manual_operator_audit import (
 # ---------------------------------------------------------------------------
 
 def _real_nested_htf(**overrides) -> dict:
+    """A REAL production-vocabulary nested HTF fixture — every enum value
+    below is a literal member of higher_timeframe_context.py's own current
+    canonical sets (BIAS_STATES, CAMPAIGN_STATES, CAMPAIGN_LOCATIONS,
+    LOCATION_QUALITY, GRADES), verified by test_real_nested_htf_fixture_
+    uses_only_canonical_enum_values below. This is NOT a legacy/
+    compatibility fixture — see test_htf_flat_compatibility_still_renders
+    for that (intentionally separate) case, which represents an
+    already-persisted snapshot and is not asserted against these enums.
+    """
     obj = htf_engine.default_htf_object()
     obj["data_status"] = "OK"
     obj["monthly"]["bias_state"] = "BULLISH"
-    obj["weekly"]["campaign_state"] = "EXPANSION"
+    obj["weekly"]["campaign_state"] = "HTF_CONTINUATION"
     obj["campaign_location"]["label"] = "MID_RANGE"
     obj["campaign_location"]["quality"] = "FUNCTIONAL"
     obj["setup_relationship"]["context_grade"] = "B"
@@ -64,6 +73,18 @@ def _real_nested_htf(**overrides) -> dict:
     for k, v in overrides.items():
         obj[k] = v
     return obj
+
+
+def test_real_nested_htf_fixture_uses_only_canonical_enum_values():
+    """Locks the production-vocabulary claim: every enum value in
+    _real_nested_htf() must be a literal member of higher_timeframe_
+    context.py's own current canonical sets — never an invented value."""
+    obj = _real_nested_htf()
+    assert obj["monthly"]["bias_state"] in htf_engine.BIAS_STATES
+    assert obj["weekly"]["campaign_state"] in htf_engine.CAMPAIGN_STATES
+    assert obj["campaign_location"]["label"] in htf_engine.CAMPAIGN_LOCATIONS
+    assert obj["campaign_location"]["quality"] in htf_engine.LOCATION_QUALITY
+    assert obj["setup_relationship"]["context_grade"] in htf_engine.GRADES
 
 
 # ===========================================================================
@@ -198,7 +219,7 @@ def test_htf_nested_object_renders_actual_nested_values():
     weekly = audit["timeframe_sovereignty"]["weekly"]
     assert weekly["available"] is True
     assert weekly["monthly_bias"] == "BULLISH"
-    assert weekly["weekly_campaign"] == "EXPANSION"
+    assert weekly["weekly_campaign"] == "HTF_CONTINUATION"
     assert weekly["location"] == "MID_RANGE"
     assert weekly["location_quality"] == "FUNCTIONAL"
     assert weekly["posture"] == "supportive"
@@ -211,6 +232,14 @@ def test_htf_nested_object_renders_actual_nested_values():
 # ===========================================================================
 
 def test_htf_flat_compatibility_still_renders():
+    """LEGACY / COMPATIBILITY FIXTURE — this deliberately represents an
+    already-persisted flat snapshot, which may carry vocabulary from an
+    older engine revision (e.g. "EXPANSION"/"GOOD" are not current
+    higher_timeframe_context.py canonical enum members — see
+    test_real_nested_htf_fixture_uses_only_canonical_enum_values for the
+    fixture that IS asserted against today's real enums). This test only
+    proves the flat-shape fallback path renders without error and reads
+    its own fields verbatim — it makes no production-vocabulary claim."""
     result = _snipe_it_result()
     result["tiering_result"]["higher_timeframe_context"] = {
         "data_status": "OK",
@@ -336,6 +365,17 @@ def test_renderer_invokes_no_market_or_strategy_calls():
     # name, explaining what it returns, is fine — an actual call is not).
     assert "_htf_engine.build_higher_timeframe_context(" not in src
     assert ".build_higher_timeframe_context(" not in src
+
+
+def test_module_docstring_truthfully_documents_the_one_exception():
+    """Documentation/enforcement must stay in sync: the module's own hard-
+    guarantees docstring must name the narrowly-scoped compact_history_
+    snapshot exception explicitly, rather than an unqualified 'no scanner
+    imports' claim that Phase 14X.2 would otherwise make false."""
+    src = Path("src/manual_operator_audit.py").read_text(encoding="utf-8")
+    header = src[: src.index('"""', 3)]
+    assert "compact_history_snapshot" in header
+    assert "EVIDENCE BUILDER" in header
 
 
 # ===========================================================================

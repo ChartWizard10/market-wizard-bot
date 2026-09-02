@@ -17,9 +17,19 @@ never runs indicators/prefilter/tiering/ladder/seal, never writes state,
 never sends a Discord alert, and never mutates its input.
 
 Hard guarantees (mirrors src/audit_access.py's documented contract):
-  - Pure stdlib only (json, re) plus src.display_formatting.format_usd_price
-    (itself pure/stdlib — see that module's docstring). No scanner/tiering/
-    market-data/Discord/network imports.
+  - The renderer is pure/read-only. It uses stdlib (json, re),
+    src.display_formatting.format_usd_price (itself pure/stdlib), and exactly
+    ONE narrowly-scoped exception: the canonical, pure
+    higher_timeframe_context.compact_history_snapshot(htf) serializer (Phase
+    14X.2), used solely to normalize the live nested HTF evidence object into
+    the same flat shape as its persisted snapshot — never a hand-rolled
+    parallel mapping that could drift from production's own serialization.
+    That single call performs no market/network/clock access, computes no
+    judgment, and mutates nothing; it only reshapes fields the HTF engine has
+    already computed. This module still never invokes an HTF (or any other)
+    EVIDENCE BUILDER, never runs indicators/prefilter/tiering/ladder/seal,
+    never writes state, never sends a Discord alert, and never mutates its
+    input. No other scanner/tiering/market-data/Discord/network imports.
   - Every accessor is a defensive `.get()` read; nothing here can raise on a
     partial/missing sub-object, and nothing here writes back into `result`.
   - A missing/unavailable datum renders as "—" or an explicit "UNAVAILABLE"
