@@ -454,7 +454,7 @@ def test_execution_proof_shows_break_acceptance_retest_hold():
     assert "Acceptance:" in text
     assert "Retest:" in text
     assert "Hold:" in text
-    assert "Sequence:          COMPLETE" in text
+    assert "Local sequence:    COMPLETE" in text
 
 
 def test_execution_proof_incomplete_for_near_entry():
@@ -608,7 +608,11 @@ def test_chunk_operator_audit_respects_discord_length_and_keeps_all_sections():
     assert len(chunks) > 1
     for c in chunks:
         assert len(c) <= 500
-    assert "".join(chunks).replace("\n", "") == long_text.replace("\n", "")
+    # Lossless reconstruction, newlines included — a dropped newline at a
+    # chunk boundary is not "content loss" by character count, but two
+    # section headers silently fusing into one line is a real readability
+    # defect (found and fixed during the Phase 14X.1 adversarial review).
+    assert "".join(chunks) == long_text
 
 
 def test_mention_sanitization_neutralizes_everyone_and_user_mentions():

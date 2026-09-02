@@ -12,7 +12,7 @@ the same post-tiering evidence/arbitration organ.
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from src import candle_evidence
@@ -851,6 +851,19 @@ async def run_analyze(
     async with lock:
         scan_id = f"analyze_{ticker}_{datetime.utcnow().strftime('%H%M%S')}"
 
+        # Phase 14X.1: the ONLY authoritative operator scan-clock instant.
+        # Captured once, here, by the runtime — never by the model. Claude's
+        # own final_signal.timestamp_et remains in the schema for model-
+        # contract compatibility but carries zero scan-clock authority; see
+        # src/manual_operator_audit.py's verdict/capital section.
+        _scan_started_at_utc = datetime.now(timezone.utc)
+        try:
+            _scan_tz = ZoneInfo(config.get("scan", {}).get("timezone", "America/New_York"))
+        except Exception:
+            _scan_tz = ZoneInfo("America/New_York")
+        scan_timestamp_utc = _scan_started_at_utc.isoformat()
+        scan_timestamp_et = _scan_started_at_utc.astimezone(_scan_tz).isoformat()
+
         try:
             mres = market_data_mod.fetch_ticker(ticker, config)
         except Exception as exc:
@@ -945,4 +958,9 @@ async def run_analyze(
             # operator audit renderer can display real numbers instead of
             # inventing them. No judgment/tiering behavior depends on this key.
             "enriched": enriched,
+            # Phase 14X.1: additive runtime scan-clock instants — the only
+            # authoritative operator scan time. No judgment/tiering/routing
+            # behavior depends on these keys.
+            "scan_timestamp_et": scan_timestamp_et,
+            "scan_timestamp_utc": scan_timestamp_utc,
         }
