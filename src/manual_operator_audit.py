@@ -132,6 +132,16 @@ def _nonempty(v) -> list:
     return [x for x in _safe_list(v) if x not in (None, "", [])]
 
 
+_LIQUIDITY_KEYWORDS = ("liquidity", "pool", "sweep")
+
+
+def _mentions_liquidity(text) -> bool:
+    if not isinstance(text, str):
+        return False
+    low = text.lower()
+    return any(kw in low for kw in _LIQUIDITY_KEYWORDS)
+
+
 # ---------------------------------------------------------------------------
 # Capital / tier display labels (mirrors src/discord_alerts._CAPITAL_LABEL —
 # duplicated locally, display-only, so this renderer stays import-independent
@@ -192,6 +202,10 @@ _PROOF_ICON = {
     "BROKEN":    "❌",
     "MISSING":   _DASH,
     "UNAVAILABLE": _DASH,
+    # Phase 14X.1: a defined risk/target contract is not the same claim as a
+    # proof event having occurred — see DEFINED vs CONFIRMED law below. Uses
+    # its own icon so it can never be visually mistaken for ✅ CONFIRMED.
+    "DEFINED": "📋",
 }
 
 
@@ -230,14 +244,39 @@ def _one_hour_usable(one_hour: dict) -> bool:
     return True
 
 
-def _authoritative_proof_state(one_hour: dict, truth_key: str, table: dict, fallback_value) -> str:
-    """Prefer the 1H engine's own truth state; fall back to signal-level enum."""
+def _authoritative_proof_detail(one_hour: dict, truth_key: str, table: dict, fallback_value):
+    """Prefer the 1H engine's own truth state; fall back to signal-level enum.
+
+    Returns (state, raw_label, source) — raw_label is the actual enum token
+    backing the state (e.g. "RETEST_REAL" or the signal-level "partial"),
+    and source is "1H" only when genuinely 1H-sourced, else "SIGNAL" — so a
+    display line can never claim "LOCAL 1H" evidence when it actually fell
+    back to the model's own signal-level field.
+    """
     if _one_hour_usable(one_hour):
         prh = _safe_dict(one_hour.get("pullback_retest_hold"))
         truth = str(prh.get(truth_key, "") or "").upper().strip()
         if truth in table:
-            return table[truth]
-    return _proof_state_of(fallback_value)
+            return table[truth], truth, "1H"
+    return _proof_state_of(fallback_value), _fmt(fallback_value), "SIGNAL"
+
+
+def _authoritative_proof_state(one_hour: dict, truth_key: str, table: dict, fallback_value) -> str:
+    """Prefer the 1H engine's own truth state; fall back to signal-level enum."""
+    return _authoritative_proof_detail(one_hour, truth_key, table, fallback_value)[0]
+
+
+def _daily_permission(ev: dict) -> str:
+    """YES/CONDITIONAL/NO/UNAVAILABLE swing-permission label — the single
+    shared derivation used by the DAILY timeframe section, the DOCTRINE
+    SEQUENCE swing-qualification annotation, and AUTHORITY RECONCILIATION,
+    so the three can never disagree with each other."""
+    tfa = ev["timeframe_alignment"]
+    if not tfa or str(tfa.get("status") or "").upper() != "ENABLED":
+        return _UNAVAILABLE
+    swing = _safe_dict(tfa.get("swing_timeframe"))
+    swing_state = str(swing.get("state") or "PERMISSION_UNKNOWN")
+    return _SWING_PERMISSION_MAP.get(swing_state, _UNAVAILABLE)
 
 
 def _acceptance_state_from_location(location_state, structure_event) -> str:
@@ -313,8 +352,24 @@ def _extract(result: dict) -> dict:
 
 
 def _verdict_capital_section(result: dict, ev: dict) -> dict:
+    """VERDICT/CAPITAL evidence.
+
+    Phase 14X.1 scan-clock law: the operator scan time comes ONLY from the
+    runtime-captured result["scan_timestamp_et"] (set once in
+    scheduler.run_analyze — never by the model). final_signal.timestamp_et
+    is Claude's own field; it stays in the schema for model-contract
+    compatibility but carries zero scan-clock authority and is rendered
+    separately, explicitly labelled non-authoritative.
+
+    Entry quality/readiness uses the SAME authoritative 1H precedence as
+    DOCTRINE SEQUENCE / EXECUTION PROOF (_authoritative_proof_detail) rather
+    than the stale signal-level retest_status/hold_status directly, so the
+    top summary can never contradict the dedicated sections below it.
+    """
     tiering_result = ev["tiering_result"]
     signal = ev["signal"]
+    one_hour = ev["one_hour_entry"]
+    daily_ctx = _safe_dict(ev["enriched"].get("daily_bar_context"))
     final_tier = str(result.get("final_tier") or tiering_result.get("final_tier") or "WAIT").upper()
     capital_action = tiering_result.get("capital_action")
     calibration = ev["calibration"]
@@ -325,19 +380,30 @@ def _verdict_capital_section(result: dict, ev: dict) -> dict:
         f"trend={_fmt(signal.get('trend_state'))}"
     )
     candle_family = ev["candle_evidence"].get("candle_family")
+    retest_state, retest_raw, _retest_src = _authoritative_proof_detail(
+        one_hour, "retest_truth", _RETEST_TRUTH_STATE, signal.get("retest_status")
+    )
+    hold_state, hold_raw, _hold_src = _authoritative_proof_detail(
+        one_hour, "hold_truth", _HOLD_TRUTH_STATE, signal.get("hold_status")
+    )
     entry_quality = (
-        f"retest={_fmt(signal.get('retest_status'))} / "
-        f"hold={_fmt(signal.get('hold_status'))} / "
+        f"retest={retest_state} ({retest_raw}) / "
+        f"hold={hold_state} ({hold_raw}) / "
         f"candle={_fmt(candle_family)}"
     )
 
+    daily_status = daily_ctx.get("status")
     return {
         "ticker": _fmt(signal.get("ticker") or result.get("ticker")),
         "final_tier": final_tier,
         "badge": _TIER_BADGE.get(final_tier, final_tier),
         "capital_label": _CAPITAL_LABEL.get(capital_action, _fmt(capital_action)),
         "scan_price": _fmt_price(signal.get("scan_price")),
-        "scan_time": _fmt(signal.get("timestamp_et")),
+        "scan_executed": _fmt(result.get("scan_timestamp_et")),
+        "model_timestamp": _fmt(signal.get("timestamp_et")),
+        "daily_evidence_status": _fmt(daily_status) if daily_status else _UNAVAILABLE,
+        "daily_last_closed_date": _fmt(daily_ctx.get("last_closed_daily_date")),
+        "daily_live_date": _fmt(daily_ctx.get("live_daily_date")),
         "raw_score": _fmt(tiering_result.get("score")),
         "calibrated_score": _fmt(calibration.get("calibrated_score")) if calibration else _DASH,
         "setup_quality": setup_quality,
@@ -373,13 +439,34 @@ def _setup_section(ev: dict) -> dict:
     }
 
 
+def _swing_qualified(ev: dict, structure_state: str) -> bool:
+    """True only when the higher-authority swing thesis is actually
+    established: the Daily/swing Structure event is CONFIRMED AND Daily
+    timeframe permission is granted. Local 1H retest/hold proof — however
+    clean — never substitutes for this; see the Phase 14X.1 law that local
+    proof is not swing-thesis qualification."""
+    return structure_state == "CONFIRMED" and _daily_permission(ev) == "YES"
+
+
 def _doctrine_sequence_section(ev: dict) -> list:
-    """Structure -> Liquidity -> Displacement -> Acceptance/Reclaim -> Retest
-    -> Hold -> Invalidation -> Target.
+    """SWING DOCTRINE SEQUENCE: Structure -> Liquidity -> Displacement ->
+    Acceptance/Reclaim -> Retest -> Hold -> Invalidation -> Target.
 
     Liquidity/Displacement/Acceptance have no dedicated schema field; each is
     rendered as DERIVED_DISPLAY from the fields that do exist (structure_event,
     location_state, zone_type), explicitly labelled, never invented.
+
+    Retest/Hold carry an additional swing-qualification flag: a CONFIRMED
+    local (1H) retest/hold is real evidence, but it does not by itself mean
+    the whole swing thesis sequence is confirmed — that requires the
+    upstream Structure gate AND Daily swing permission to also hold. Local
+    proof can improve while the higher-authority thesis remains unqualified;
+    see _swing_qualified.
+
+    Invalidation/Target render DEFINED, never CONFIRMED — a defined risk
+    contract (a level + condition exist) is not the same claim as that level
+    having been triggered/hit, which this renderer has no explicit event-
+    level evidence to assert either way.
     """
     signal = ev["signal"]
     trade_location = ev["trade_location"]
@@ -400,37 +487,42 @@ def _doctrine_sequence_section(ev: dict) -> list:
     location_state = trade_location.get("location_state")
     acceptance_state = _acceptance_state_from_location(location_state, signal.get("structure_event"))
 
-    retest_state = _authoritative_proof_state(
+    retest_state, retest_raw, retest_src = _authoritative_proof_detail(
         one_hour, "retest_truth", _RETEST_TRUTH_STATE, signal.get("retest_status")
     )
-    hold_state = _authoritative_proof_state(
+    hold_state, hold_raw, hold_src = _authoritative_proof_detail(
         one_hour, "hold_truth", _HOLD_TRUTH_STATE, signal.get("hold_status")
     )
+    qualified = _swing_qualified(ev, structure_state)
+    qualification_note = None if qualified else "SWING-SEQUENCE QUALIFICATION: NOT EARNED"
 
     inval_level = signal.get("invalidation_level")
-    invalidation_state = "CONFIRMED" if inval_level is not None else "MISSING"
+    invalidation_state = "DEFINED" if inval_level is not None else "MISSING"
 
     targets = _safe_list(signal.get("targets"))
-    target_state = "CONFIRMED" if targets else "MISSING"
+    target_state = "DEFINED" if targets else "MISSING"
 
     rows = [
-        ("Structure", structure_state, _fmt(signal.get("structure_event")), None),
+        ("Structure", structure_state, _fmt(signal.get("structure_event")), None, None),
         ("Liquidity", "UNAVAILABLE",
-         "not modeled as a discrete field in the current schema", None),
+         "not modeled as a discrete field in the current schema", None, None),
         ("Displacement", displacement_state,
-         f"derived from structure_event={_fmt(signal.get('structure_event'))}", None),
-        ("Acceptance/Reclaim", acceptance_state, _fmt(trade_location.get("location_state")), None),
-        ("Retest", retest_state, _fmt(signal.get("retest_status")), None),
-        ("Hold", hold_state, _fmt(signal.get("hold_status")), None),
+         f"derived from structure_event={_fmt(signal.get('structure_event'))}", None, None),
+        ("Acceptance/Reclaim", acceptance_state, _fmt(trade_location.get("location_state")), None, None),
+        ("Retest", retest_state, f"LOCAL {retest_src}: {retest_raw}", None, qualification_note),
+        ("Hold", hold_state, f"LOCAL {hold_src}: {hold_raw}", None, qualification_note),
         ("Invalidation", invalidation_state,
-         _fmt(signal.get("invalidation_condition")), _fmt_price(inval_level)),
+         _fmt(signal.get("invalidation_condition")), _fmt_price(inval_level), None),
         ("Target", target_state,
          f"{len(targets)} target(s)" if targets else _DASH,
-         _fmt_price(targets[0].get("level")) if targets and isinstance(targets[0], dict) else None),
+         _fmt_price(targets[0].get("level")) if targets and isinstance(targets[0], dict) else None, None),
     ]
     return [
-        {"step": step, "state": state, "icon": _icon(state), "evidence": evidence, "level": level}
-        for step, state, evidence, level in rows
+        {
+            "step": step, "state": state, "icon": _icon(state), "evidence": evidence,
+            "level": level, "qualification_note": note,
+        }
+        for step, state, evidence, level, note in rows
     ]
 
 
@@ -444,14 +536,15 @@ def _execution_proof_section(ev: dict) -> dict:
     # final_signal.structure_event (that field already drives the DOCTRINE
     # SEQUENCE "Structure" row) — see _four_hour_break_state's docstring.
     break_state = _four_hour_break_state(four_hour)
+    break_raw = _fmt(_safe_dict(four_hour.get("structure")).get("break_state")) if four_hour else _DASH
 
     location_state = trade_location.get("location_state")
     acceptance_state = _acceptance_state_from_location(location_state, signal.get("structure_event"))
 
-    retest_state = _authoritative_proof_state(
+    retest_state, retest_raw, _retest_src = _authoritative_proof_detail(
         one_hour, "retest_truth", _RETEST_TRUTH_STATE, signal.get("retest_status")
     )
-    hold_state = _authoritative_proof_state(
+    hold_state, hold_raw, _hold_src = _authoritative_proof_detail(
         one_hour, "hold_truth", _HOLD_TRUTH_STATE, signal.get("hold_status")
     )
 
@@ -468,19 +561,39 @@ def _execution_proof_section(ev: dict) -> dict:
     final_tier = str(ev["tiering_result"].get("final_tier") or "WAIT").upper()
 
     return {
-        "break": {"state": break_state, "icon": _icon(break_state)},
+        "break": {"state": break_state, "icon": _icon(break_state), "raw": break_raw},
         "acceptance": {"state": acceptance_state, "icon": _icon(acceptance_state)},
-        "retest": {"state": retest_state, "icon": _icon(retest_state)},
-        "hold": {"state": hold_state, "icon": _icon(hold_state)},
+        "retest": {"state": retest_state, "icon": _icon(retest_state), "raw": retest_raw},
+        "hold": {"state": hold_state, "icon": _icon(hold_state), "raw": hold_raw},
         "sequence": sequence,
         "capital_readiness": _CAPITAL_READINESS.get(final_tier, "NONE"),
+        # Phase 14X.1: this section is LOCAL (4H/1H) execution evidence only.
+        # It never authorizes capital on its own — capital comes from the
+        # already-computed final_tier/capital_action, shown elsewhere and
+        # unchanged by this renderer. Static, always-true clarifying label.
+        "authority": "LOCAL ONLY — not capital-authorizing on its own",
     }
 
 
+_WEEKLY_REQUIRED_FIELDS = (
+    "monthly_bias_state", "weekly_campaign_state",
+    "campaign_location_label", "context_grade",
+)
+
+
 def _weekly_section(ev: dict) -> dict:
+    """WEEKLY — CAMPAIGN CONTEXT.
+
+    Phase 14X.1 law: UNKNOWN is not bullish and UNKNOWN is not bearish. A
+    posture value is only ever computed from `supports_long_setup` /
+    `weakens_long_setup`, but if the underlying campaign evidence is
+    materially incomplete (any of _WEEKLY_REQUIRED_FIELDS missing even
+    though data_status == "OK"), the posture must be explicitly qualified —
+    never silently read as proven positive sponsorship.
+    """
     htf = ev["higher_timeframe_context"]
     if not htf or str(htf.get("data_status") or "").upper() != "OK":
-        return {"available": False}
+        return {"available": False, "campaign_evidence": "INCOMPLETE"}
     supports = htf.get("supports_long_setup") is True
     weakens = htf.get("weakens_long_setup") is True
     if weakens:
@@ -489,6 +602,11 @@ def _weekly_section(ev: dict) -> dict:
         posture = "supportive"
     else:
         posture = "mixed"
+
+    missing_fields = [f for f in _WEEKLY_REQUIRED_FIELDS if not htf.get(f)]
+    campaign_evidence = "COMPLETE" if not missing_fields else "INCOMPLETE"
+    positive_sponsorship = "PROVEN" if (campaign_evidence == "COMPLETE" and supports and not weakens) else "NOT PROVEN"
+
     return {
         "available": True,
         "monthly_bias": _fmt(htf.get("monthly_bias_state")),
@@ -496,6 +614,8 @@ def _weekly_section(ev: dict) -> dict:
         "location": _fmt(htf.get("campaign_location_label")),
         "location_quality": _fmt(htf.get("campaign_location_quality")),
         "posture": posture,
+        "campaign_evidence": campaign_evidence,
+        "positive_sponsorship": positive_sponsorship,
         "blocks_snipe": htf.get("blocks_snipe_contextually") is True,
         "diagnostic": _sanitize(htf.get("diagnostic_sentence")),
     }
@@ -526,7 +646,7 @@ def _daily_section(ev: dict) -> dict:
         "sma200": _fmt_price(enriched.get("sma200")),
         "sma_alignment": _fmt(ev["signal"].get("sma_value_alignment")),
         "swing_state": swing_state,
-        "permission": _SWING_PERMISSION_MAP.get(swing_state, _UNAVAILABLE),
+        "permission": _daily_permission(ev),
     }
 
 
@@ -626,8 +746,26 @@ def _trade_location_section(ev: dict) -> dict:
         "sma50": _fmt_price(enriched.get("sma50")),
         "sma200": _fmt_price(enriched.get("sma200")),
         "invalidation": _fmt_price(inval_level),
+        # Phase 14X.1: a target LEVEL existing is not a target HIT/CONFIRMED
+        # event — labelled DEFINED elsewhere (DOCTRINE SEQUENCE). The `reason`
+        # text is Claude's own prose (final_signal.targets[].reason is part
+        # of the model's structured output, not a deterministic computation),
+        # so it is explicitly tagged [MODEL]; when it invokes liquidity
+        # language the renderer states plainly that no discrete liquidity
+        # schema exists to validate the claim (see DOCTRINE SEQUENCE's
+        # "Liquidity: UNAVAILABLE" row — same honest gap, not re-solved here).
         "targets": [
-            {"label": t.get("label"), "level": _fmt_price(t.get("level")), "reason": _sanitize(t.get("reason"))}
+            {
+                "label": t.get("label"),
+                "level": _fmt_price(t.get("level")),
+                "reason": _sanitize(t.get("reason")),
+                "reason_provenance": "MODEL",
+                "liquidity_validation": (
+                    _UNAVAILABLE
+                    if _mentions_liquidity(t.get("reason"))
+                    else None
+                ),
+            }
             for t in targets if isinstance(t, dict)
         ],
         "dist_to_trigger_pct": _fmt_pct(_pct_distance(scan_price, trigger)),
@@ -692,9 +830,60 @@ def _candle_truth_section(ev: dict) -> dict:
     }
 
 
+_RR_RECONCILE_TOLERANCE = 0.05  # 5% relative tolerance — documented, strict
+
+
+def _reconciled_reference_rr(reference_price, invalidation, t1_level, source_rr):
+    """Only return a value when (reference_price, invalidation, t1) reconciles
+    to source_rr within _RR_RECONCILE_TOLERANCE — the sole condition under
+    which "Reference R:R from scan price" may be labelled DERIVED_DISPLAY /
+    reconciled. Otherwise returns None and the caller must show the basis as
+    unavailable rather than silently claiming one. Never raises."""
+    try:
+        ref_f = float(reference_price)
+        inv_f = float(invalidation)
+        t1_f = float(t1_level)
+        src_f = float(source_rr)
+    except (TypeError, ValueError):
+        return None
+    if not all(_is_finite(x) for x in (ref_f, inv_f, t1_f, src_f)):
+        return None
+    risk = ref_f - inv_f
+    reward = t1_f - ref_f
+    if risk <= 0 or src_f == 0:
+        return None
+    computed = reward / risk
+    if not _is_finite(computed):
+        return None
+    if abs(computed - src_f) / abs(src_f) <= _RR_RECONCILE_TOLERANCE:
+        return computed
+    return None
+
+
 def _risk_runway_section(ev: dict) -> dict:
+    """RISK / RUNWAY.
+
+    Phase 14X.1 provenance laws:
+      - EXECUTABLE-ENTRY R:R is only ever the scanner-provided risk_reward,
+        and only when a real executable trigger exists; with no trigger it
+        is explicitly UNAVAILABLE — never silently implied by showing a
+        source R:R next to a missing entry.
+      - A "Reference R:R from scan price" line is rendered ONLY when
+        (scan_price, invalidation, T1) deterministically reconciles to the
+        source risk_reward within a strict, documented tolerance (see
+        _reconciled_reference_rr) — otherwise the basis is UNAVAILABLE.
+      - Reported overhead is the MODEL's own final_signal.overhead_status —
+        never presented as independently verified. When the deterministic
+        structural overhead computation (indicators.py's assess_overhead,
+        already computed into enriched["overhead_status"/"overhead_level"/
+        "overhead_distance_pct"]) is available, it is shown as its own,
+        separately-labelled structural reconciliation; when it is not
+        available, that is stated explicitly rather than silently upgrading
+        the model's "clear" into a proven clean path.
+    """
     signal = ev["signal"]
     one_hour = ev["one_hour_entry"]
+    enriched = ev["enriched"]
     targets = _safe_list(signal.get("targets"))
     t1 = targets[0] if targets and isinstance(targets[0], dict) else {}
     t2 = targets[1] if len(targets) > 1 and isinstance(targets[1], dict) else {}
@@ -710,8 +899,30 @@ def _risk_runway_section(ev: dict) -> dict:
             return None
 
     trigger = signal.get("trigger_level")
+    scan_price = signal.get("scan_price")
+    source_rr = signal.get("risk_reward")
+
+    executable_entry_rr = _fmt_ratio(source_rr) if trigger is not None else _UNAVAILABLE
+
+    reconciled = _reconciled_reference_rr(scan_price, signal.get("invalidation_level"), t1.get("level"), source_rr) \
+        if (t1 and source_rr is not None) else None
+    reference_rr = _fmt_ratio(reconciled) if reconciled is not None else _DASH
+    reference_rr_basis = (
+        "DERIVED_DISPLAY / reconciled to source value" if reconciled is not None
+        else "UNAVAILABLE / not reconstructable within tolerance"
+    )
+
+    # Deterministic structural overhead (indicators.assess_overhead) — real,
+    # already-computed evidence independent of the model. Reported alongside,
+    # never merged into, the model's own overhead_status.
+    struct_overhead_status = enriched.get("overhead_status")
+    struct_overhead_available = struct_overhead_status is not None
+    struct_overhead_level = enriched.get("overhead_level")
+    struct_overhead_distance_pct = enriched.get("overhead_distance_pct")
+
     return {
-        "trigger": _fmt_price(trigger),
+        "executable_trigger": _fmt_price(trigger) if trigger is not None else _UNAVAILABLE,
+        "reference_price": _fmt_price(scan_price),
         "invalidation": _fmt_price(signal.get("invalidation_level")),
         "risk_distance": _fmt_price(signal.get("risk_distance")),
         "risk_distance_pct": _fmt_pct(signal.get("risk_distance_pct")),
@@ -719,9 +930,20 @@ def _risk_runway_section(ev: dict) -> dict:
         "t2": _fmt_price(t2.get("level")),
         "reward_t1_pct": _fmt_pct(_reward_pct(t1.get("level"), trigger)) if t1 else _DASH,
         "reward_t2_pct": _fmt_pct(_reward_pct(t2.get("level"), trigger)) if t2 else _DASH,
-        "rr_t1": _fmt_ratio(signal.get("risk_reward")),
-        "overhead": _fmt(signal.get("overhead_status")),
-        "path_clarity": _fmt(path_quality.get("path_label")) if path_quality else _DASH,
+        "source_rr": _fmt_ratio(source_rr),
+        "executable_entry_rr": executable_entry_rr,
+        "reference_rr": reference_rr,
+        "reference_rr_basis": reference_rr_basis,
+        "reported_overhead": _fmt(signal.get("overhead_status")),
+        "reported_overhead_source": "MODEL / final_signal",
+        "structural_overhead_status": _fmt(struct_overhead_status) if struct_overhead_available else _UNAVAILABLE,
+        "structural_overhead_level": _fmt_price(struct_overhead_level) if struct_overhead_available else _DASH,
+        "structural_overhead_distance_pct": _fmt_pct(struct_overhead_distance_pct) if struct_overhead_available else _DASH,
+        "path_clarity_label": (
+            _fmt(path_quality.get("path_label"))
+            if path_quality and str(path_quality.get("path_label") or "UNKNOWN").upper() != "UNKNOWN"
+            else "NOT INDEPENDENTLY VERIFIED"
+        ),
         "failure_condition": _sanitize(signal.get("invalidation_condition")),
     }
 
@@ -812,6 +1034,55 @@ def _tier_judgment_section(ev: dict, result: dict) -> dict:
     }
 
 
+def _authority_reconciliation_section(ev: dict) -> dict:
+    """AUTHORITY RECONCILIATION.
+
+    Answers, from already-computed evidence only: what is improving locally,
+    what still blocks the swing thesis, and can local proof authorize
+    capital. Never produces a new tiering judgment — capital always comes
+    from the already-computed final_tier via _CAPITAL_READINESS, identical
+    to EXECUTION PROOF's capital_readiness field, so the two can never
+    disagree.
+    """
+    signal = ev["signal"]
+    one_hour = ev["one_hour_entry"]
+    tiering_result = ev["tiering_result"]
+
+    structure_event = str(signal.get("structure_event") or "none")
+    structure_state = (
+        "BROKEN" if structure_event == "failed_breakdown_reclaim"
+        else "MISSING" if structure_event.lower() == "none"
+        else "CONFIRMED"
+    )
+    daily_permission = _daily_permission(ev)
+    four_hour_break = _four_hour_break_state(ev["four_hour_operational"])
+    retest_state = _authoritative_proof_state(
+        one_hour, "retest_truth", _RETEST_TRUTH_STATE, signal.get("retest_status")
+    )
+    hold_state = _authoritative_proof_state(
+        one_hour, "hold_truth", _HOLD_TRUTH_STATE, signal.get("hold_status")
+    )
+
+    local_proof = "IMPROVING" if retest_state in ("CONFIRMED", "FORMING") or hold_state in ("CONFIRMED", "FORMING") else "NONE"
+    swing_qualified = _swing_qualified(ev, structure_state)
+
+    blockers = []
+    if daily_permission != "YES":
+        blockers.append(f"Daily permission {daily_permission}")
+    if four_hour_break != "CONFIRMED":
+        blockers.append(f"4H break {four_hour_break}")
+    if structure_state != "CONFIRMED":
+        blockers.append(f"Daily/swing structure {structure_state}")
+
+    final_tier = str(tiering_result.get("final_tier") or "WAIT").upper()
+    return {
+        "local_proof": local_proof,
+        "swing_thesis": "QUALIFIED" if swing_qualified else "NOT QUALIFIED",
+        "blockers": blockers or [_DASH],
+        "capital": _CAPITAL_READINESS.get(final_tier, "NONE"),
+    }
+
+
 def _delivery_section(result: dict, ev: dict) -> dict:
     tiering_result = ev["tiering_result"]
     safe_for_alert = result.get("safe_for_alert")
@@ -846,31 +1117,40 @@ def build_operator_audit(result: dict, config: dict | None = None) -> dict:
         "trade_location": _trade_location_section(ev),
         "candle_truth": _candle_truth_section(ev),
         "risk_runway": _risk_runway_section(ev),
+        "authority_reconciliation": _authority_reconciliation_section(ev),
         "tier_judgment": _tier_judgment_section(ev, result),
         "delivery": _delivery_section(result, ev),
     }
 
 
 def _render_doctrine_sequence(rows: list) -> list:
-    lines = ["DOCTRINE SEQUENCE", "─" * 30]
+    lines = ["SWING DOCTRINE SEQUENCE", "─" * 30]
     for row in rows:
         level = f"  @ {row['level']}" if row.get("level") else ""
         lines.append(f"{row['icon']} {row['step']:<20} {row['state']:<12} {row['evidence']}{level}")
+        if row.get("qualification_note"):
+            lines.append(f"{'':<24}  {row['qualification_note']}")
     return lines
 
 
 def _render_weekly(w: dict) -> list:
     if not w.get("available"):
-        lines = ["WEEKLY — CAMPAIGN CONTEXT", f"  {_UNAVAILABLE}"]
-        return lines
-    return [
+        return [
+            "WEEKLY — CAMPAIGN CONTEXT",
+            f"  {_UNAVAILABLE}",
+            f"  Campaign evidence: {w.get('campaign_evidence', 'INCOMPLETE')}",
+        ]
+    lines = [
         "WEEKLY — CAMPAIGN CONTEXT",
         f"  Monthly bias:     {w['monthly_bias']}",
         f"  Weekly campaign:  {w['weekly_campaign']}",
         f"  Location:         {w['location']} ({w['location_quality']})",
         f"  Posture:          {w['posture']}",
+        f"  Campaign evidence:    {w['campaign_evidence']}",
+        f"  Positive sponsorship: {w['positive_sponsorship']}",
         f"  Blocks SNIPE:     {'yes' if w['blocks_snipe'] else 'no'}",
     ]
+    return lines
 
 
 def _render_daily(d: dict) -> list:
@@ -920,6 +1200,22 @@ def _render_one_hour(o: dict) -> list:
     ]
 
 
+def _render_authority_reconciliation(ar: dict) -> list:
+    return [
+        "─" * 32,
+        "AUTHORITY RECONCILIATION",
+        "─" * 32,
+        f"  Local proof:      {ar['local_proof']}",
+        f"  Swing thesis:     {ar['swing_thesis']}",
+        "  Primary higher-authority blockers:",
+        *[f"    • {b}" for b in ar["blockers"]],
+        f"  Capital:          {ar['capital']}",
+        "  Interpretation: local 1H/4H proof may improve while higher-authority "
+        "(Daily/4H) permission remains denied or incomplete — local repair "
+        "cannot override that denial.",
+    ]
+
+
 def render_operator_audit(result: dict, config: dict | None = None) -> str:
     """Render the full MANUAL TICKER AUDIT text. Pure function — never
     mutates `result`, never performs I/O of any kind."""
@@ -931,6 +1227,7 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
     tl = audit["trade_location"]
     candle = audit["candle_truth"]
     risk = audit["risk_runway"]
+    ar = audit["authority_reconciliation"]
     tj = audit["tier_judgment"]
     delivery = audit["delivery"]
 
@@ -943,7 +1240,11 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
         f"CAPITAL: {vc['capital_label']}",
         "",
         f"Scan price:                {vc['scan_price']}",
-        f"Scan time:                 {vc['scan_time']}",
+        f"Scan executed:             {vc['scan_executed']}",
+        f"Model timestamp:           {vc['model_timestamp']}  (not used as scan authority)",
+        f"Daily evidence status:     {vc['daily_evidence_status']}",
+        f"Last closed daily date:    {vc['daily_last_closed_date']}",
+        f"Live daily date:           {vc['daily_live_date']}",
         f"Raw score:                 {vc['raw_score']}",
         f"Final/calibrated score:    {vc['calibrated_score']}",
         f"Setup quality:             {vc['setup_quality']}",
@@ -961,15 +1262,16 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
     lines += [
         "",
         "─" * 32,
-        "EXECUTION PROOF",
+        "LOCAL EXECUTION PROOF",
         "─" * 32,
-        f"  {exe['break']['icon']} Break:      {exe['break']['state']}",
+        f"  {exe['break']['icon']} 4H Break:   {exe['break']['state']} — {exe['break']['raw']}",
         f"  {exe['acceptance']['icon']} Acceptance: {exe['acceptance']['state']}",
-        f"  {exe['retest']['icon']} Retest:     {exe['retest']['state']}",
-        f"  {exe['hold']['icon']} Hold:       {exe['hold']['state']}",
+        f"  {exe['retest']['icon']} 1H Retest:  {exe['retest']['state']} — {exe['retest']['raw']}",
+        f"  {exe['hold']['icon']} 1H Hold:    {exe['hold']['state']} — {exe['hold']['raw']}",
         "",
-        f"  Sequence:          {exe['sequence']}",
+        f"  Local sequence:    {exe['sequence']}",
         f"  Capital readiness: {exe['capital_readiness']}",
+        f"  Authority:         {exe['authority']}",
         "",
         "─" * 32,
         "TIMEFRAME SOVEREIGNTY",
@@ -987,6 +1289,10 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
         "(Locked law: Weekly = campaign context, Daily = swing permission, "
         "4H = operational location, 1H = trigger proof.)",
         "",
+    ]
+    lines += _render_authority_reconciliation(ar)
+    lines += [
+        "",
         "─" * 32,
         "TRADE LOCATION / KEY NUMBERS",
         "─" * 32,
@@ -998,12 +1304,14 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
         f"  20 SMA:              {tl['sma20']}",
         f"  50 SMA:              {tl['sma50']}",
         f"  200 SMA:             {tl['sma200']}",
-        f"  Invalidation:        {tl['invalidation']}",
-        "  Targets:",
+        f"  Invalidation (DEFINED): {tl['invalidation']}",
+        "  Targets (DEFINED — not hit/confirmed events):",
     ]
     if tl["targets"]:
         for t in tl["targets"]:
-            lines.append(f"    {t['label']}: {t['level']}  ({t['reason']})")
+            lines.append(f"    {t['label']}: {t['level']}  ({t['reason']})  [reason: {t['reason_provenance']}]")
+            if t.get("liquidity_validation"):
+                lines.append(f"      Liquidity validation: {t['liquidity_validation']}")
     else:
         lines.append(f"    {_DASH}")
     lines += [
@@ -1060,17 +1368,24 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
         "─" * 32,
         "RISK / RUNWAY",
         "─" * 32,
-        f"  Trigger / entry:  {risk['trigger']}",
-        f"  Invalidation:     {risk['invalidation']}",
-        f"  Risk distance:    {risk['risk_distance']} ({risk['risk_distance_pct']})",
-        f"  Target 1:         {risk['t1']}",
-        f"  Target 2:         {risk['t2']}",
-        f"  Reward to T1:     {risk['reward_t1_pct']}",
-        f"  Reward to T2:     {risk['reward_t2_pct']}",
-        f"  R:R T1:           {risk['rr_t1']}",
-        f"  Overhead:         {risk['overhead']}",
-        f"  Path clarity:     {risk['path_clarity']}",
-        f"  Failure condition: {risk['failure_condition']}",
+        f"  Executable trigger:        {risk['executable_trigger']}",
+        f"  Reference price:           {risk['reference_price']}",
+        f"  Invalidation (DEFINED):    {risk['invalidation']}",
+        f"  Risk distance:             {risk['risk_distance']} ({risk['risk_distance_pct']})",
+        f"  Target 1 (DEFINED):        {risk['t1']}",
+        f"  Target 2 (DEFINED):        {risk['t2']}",
+        f"  Reward to T1:              {risk['reward_t1_pct']}",
+        f"  Reward to T2:              {risk['reward_t2_pct']}",
+        f"  Source-provided R:R:       {risk['source_rr']}",
+        f"  Executable-entry R:R:      {risk['executable_entry_rr']}",
+        f"  Reference R:R (scan-price): {risk['reference_rr']}",
+        f"    Basis:                   {risk['reference_rr_basis']}",
+        f"  Reported overhead:         {risk['reported_overhead']}",
+        f"    Source:                  {risk['reported_overhead_source']}",
+        f"  Structural overhead (deterministic): {risk['structural_overhead_status']}",
+        f"    Level / distance:        {risk['structural_overhead_level']} / {risk['structural_overhead_distance_pct']}",
+        f"  Path quality:              {risk['path_clarity_label']}",
+        f"  Failure condition:         {risk['failure_condition']}",
         "",
         "─" * 32,
         "TIER JUDGMENT",
@@ -1132,24 +1447,35 @@ def render_operator_audit_json(result: dict, config: dict | None = None) -> str:
 def chunk_operator_audit(text: str, max_len: int = _DISCORD_MAX_CHARS) -> list:
     """Line-aware chunker, section boundaries preferred. Self-contained (no
     import of discord_alerts.chunk_message) so this module has zero Discord
-    dependency."""
+    dependency.
+
+    Lossless by construction: operates on text.splitlines(keepends=True) so
+    every original character (including each line's own newline) is placed
+    into exactly one chunk and chunks are joined with "".join(...) — never
+    "\\n".join(...), which would silently drop the separator newline at
+    whichever line a mid-stream flush happens to land on. "".join(chunks)
+    always reconstructs the original text exactly.
+    """
     if len(text) <= max_len:
         return [text]
-    chunks, cur, cur_len = [], [], 0
-    for line in text.split("\n"):
-        is_boundary = line.startswith("─" * 4) or line.startswith("━" * 4)
-        if is_boundary and cur and cur_len + len(line) + 1 > max_len * 0.6:
-            chunks.append("\n".join(cur))
+    lines = text.splitlines(keepends=True)
+    chunks: list = []
+    cur: list = []
+    cur_len = 0
+    for line in lines:
+        stripped = line.rstrip("\n")
+        is_boundary = stripped.startswith("─" * 4) or stripped.startswith("━" * 4)
+        if is_boundary and cur and cur_len + len(line) > max_len * 0.6:
+            chunks.append("".join(cur))
             cur, cur_len = [], 0
         while len(line) > max_len:
             chunks.append(line[:max_len])
             line = line[max_len:]
-        add = len(line) + 1
-        if cur_len + add > max_len and cur:
-            chunks.append("\n".join(cur))
+        if cur_len + len(line) > max_len and cur:
+            chunks.append("".join(cur))
             cur, cur_len = [], 0
         cur.append(line)
-        cur_len += add
+        cur_len += len(line)
     if cur:
-        chunks.append("\n".join(cur))
+        chunks.append("".join(cur))
     return chunks
