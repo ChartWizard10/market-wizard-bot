@@ -56,7 +56,12 @@ def _full_tiering_result(final_tier: str, **sig_overrides) -> dict:
             "confirmation_level": 105.0, "display_text": "", "flags": [],
         },
         "candle_evidence": {
-            "status": "ok", "timeframe": "1H", "candle_status": "CLOSED",
+            # Phase 14X review: matches production truth — scheduler.py never
+            # passes a timeframe/bars into this call, so in production this
+            # object describes the current DAILY bar (candle_evidence's own
+            # _event_from_enriched reads enriched["current_*"]), and its
+            # `timeframe` field is None. Fixture mirrors that honestly.
+            "status": "ok", "timeframe": None, "candle_status": "CLOSED",
             "body_pct": 62.0, "upper_wick_pct": 10.0, "lower_wick_pct": 28.0,
             "close_position_pct": 85.0, "candle_family": "ACCEPTANCE",
             "close_quality": "STRONG", "wick_read": "MINOR_REJECTION",
@@ -68,7 +73,13 @@ def _full_tiering_result(final_tier: str, **sig_overrides) -> dict:
             "trigger_state": "TRIGGER_LIVE", "score": 82, "score_label": "STRONG_1H_TRIGGER",
             "pullback_retest_hold": {"retest_truth": "RETEST_CORE_VALID", "hold_truth": "HOLD_CONFIRMED"},
             "location_realism": {"label": "MID_ZONE"},
-            "candle_truth": {"event_type": "ACCEPTANCE", "closed_candle_confirms": True},
+            # Real one_hour_entry.py event_type enum: TRAP_RECLAIM/FAILURE/
+            # REJECTION/DISPLACEMENT/ABSORPTION/INDECISION/NONE.
+            "candle_truth": {
+                "event_type": "DISPLACEMENT", "closed_candle_confirms": True,
+                "body_acceptance": True, "wick_rejection": False,
+                "follow_through_present": True, "volume_support": "SUPPORTIVE",
+            },
             "invalidation": {"clear": True},
             "path_quality": {"path_label": "CLEAN"},
             "hard_caps_applied": [], "downgrade_reasons": [],
@@ -89,7 +100,9 @@ def _full_tiering_result(final_tier: str, **sig_overrides) -> dict:
             "enabled": True, "status": "OK", "structural_state": "HOLDING",
             "state_confidence": "CONFIRMED", "operational_location": "DEFENDABLE",
             "operational_readiness": "READY",
-            "structure": {"break_state": "CONFIRMED"},
+            # Real src/four_hour_operational.py break_state enum:
+            # BOS_CONFIRMED / WICK_ONLY / NONE / UNKNOWN.
+            "structure": {"break_state": "BOS_CONFIRMED"},
             "retest_truth": {"state": "CONFIRMED"},
         },
         "higher_timeframe_context": {
@@ -222,6 +235,95 @@ def _snipe_it_result() -> dict:
 
 def _empty_result() -> dict:
     return {"status": "complete", "final_tier": "WAIT", "tiering_result": {}}
+
+
+# ---------------------------------------------------------------------------
+# Adversarial pre-merge review findings (PR #117) — regression coverage for
+# each confirmed defect fixed during review. Every fixture below uses REAL
+# production enum values (never invented ones) so these tests cannot pass
+# against a reintroduced bug the way the original fixtures' fake enum values
+# ("CONFIRMED" for four_hour break_state, "ACCEPTANCE" for 1H event_type)
+# accidentally masked the original defects.
+# ---------------------------------------------------------------------------
+
+def test_below_zone_failure_renders_as_broken_never_forming():
+    """P1: trade_location's genuine failure state must never read as FORMING."""
+    result = _snipe_it_result()
+    tr = result["tiering_result"]
+    tr["trade_location"]["location_state"] = "below_zone_failure"
+    audit = moa.build_operator_audit(result)
+
+    doctrine_rows = {row["step"]: row["state"] for row in audit["doctrine_sequence"]}
+    assert doctrine_rows["Acceptance/Reclaim"] == "BROKEN"
+    assert audit["execution_proof"]["acceptance"]["state"] == "BROKEN"
+    # A broken proof step must fail the whole sequence, not merely mark it
+    # incomplete — a failed setup must never look like a still-developing one.
+    assert audit["execution_proof"]["sequence"] == "FAILED"
+
+
+def test_execution_proof_break_is_sourced_from_4h_not_daily_structure_event():
+    """P1: EXECUTION PROOF's Break must reflect real 4H structural evidence,
+    never the Daily/swing-level structure_event (which already drives the
+    separate DOCTRINE SEQUENCE 'Structure' row)."""
+    result = _snipe_it_result()
+    tr = result["tiering_result"]
+    # Daily/swing says a clean MSS occurred, but the 4H engine has NOT
+    # confirmed a break — the two timeframes must be allowed to disagree.
+    tr["final_signal"]["structure_event"] = "MSS"
+    tr["four_hour_operational"]["structure"]["break_state"] = "NONE"
+    audit = moa.build_operator_audit(result)
+
+    doctrine_rows = {row["step"]: row["state"] for row in audit["doctrine_sequence"]}
+    assert doctrine_rows["Structure"] == "CONFIRMED"          # Daily/swing evidence
+    assert audit["execution_proof"]["break"]["state"] == "MISSING"  # 4H evidence, independent
+
+    # A 4H wick-only break is an exploration, not an accepted break.
+    tr["four_hour_operational"]["structure"]["break_state"] = "WICK_ONLY"
+    audit2 = moa.build_operator_audit(result)
+    assert audit2["execution_proof"]["break"]["state"] == "FORMING"
+
+    # When 4H evidence was never computed at all, Break must read UNAVAILABLE
+    # — never silently reused from the Daily structure_event.
+    tr["four_hour_operational"] = {"enabled": False}
+    audit3 = moa.build_operator_audit(result)
+    assert audit3["execution_proof"]["break"]["state"] == "UNAVAILABLE"
+
+
+def test_candle_truth_never_claims_1h_for_daily_derived_evidence():
+    """P1: production's tiering_result['candle_evidence'] is Daily-derived
+    (timeframe=None) — the renderer must never assert '1H' for it."""
+    result = _snipe_it_result()
+    text = moa.render_operator_audit(result)
+    assert "LAST CLOSED 1H" not in text
+    assert "LAST CLOSED CANDLE (timeframe: not specified by evidence)" in text
+    # Genuine 1H evidence (one_hour_entry.candle_truth) still gets its own,
+    # honestly-labelled subsection.
+    assert "1H CANDLE TRUTH" in text
+    assert "Event type:             DISPLACEMENT" in text
+
+
+def test_candle_truth_echoes_a_real_timeframe_label_when_the_source_provides_one():
+    result = _snipe_it_result()
+    result["tiering_result"]["candle_evidence"]["timeframe"] = "1H"
+    text = moa.render_operator_audit(result)
+    assert "LAST CLOSED CANDLE (timeframe: 1H)" in text
+
+
+def test_percentage_and_ratio_formatting_never_leaks_nan_or_inf():
+    """P2: _fmt_pct/_fmt_ratio must match display_formatting's NaN/inf safety."""
+    assert moa._fmt_pct(float("nan")) == "—"
+    assert moa._fmt_pct(float("inf")) == "—"
+    assert moa._fmt_pct(float("-inf")) == "—"
+    assert moa._fmt_ratio(float("nan")) == "—"
+    assert moa._fmt_ratio(float("inf")) == "—"
+    result = _completed_result("WAIT", risk_reward=float("nan"))
+    text = moa.render_operator_audit(result)
+    # Narrow, defect-specific checks — "information" legitimately contains the
+    # substring "inf", so a blanket "inf" not in text would false-positive.
+    assert "nan%" not in text.lower()
+    assert "nan:1" not in text.lower()
+    assert "inf%" not in text.lower()
+    assert "inf:1" not in text.lower()
 
 
 # ---------------------------------------------------------------------------

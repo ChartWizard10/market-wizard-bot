@@ -92,11 +92,18 @@ def _fmt_price(v) -> str:
         return _DASH
 
 
+def _is_finite(f: float) -> bool:
+    return f == f and f not in (float("inf"), float("-inf"))  # noqa: PLR0124 (NaN self-compare)
+
+
 def _fmt_pct(v) -> str:
     if v is None:
         return _DASH
     try:
-        return f"{float(v):.2f}%"
+        f = float(v)
+        if not _is_finite(f):
+            return _DASH
+        return f"{f:.2f}%"
     except (TypeError, ValueError):
         return _DASH
 
@@ -105,7 +112,10 @@ def _fmt_ratio(v) -> str:
     if v is None:
         return _DASH
     try:
-        return f"{float(v):.2f}:1"
+        f = float(v)
+        if not _is_finite(f):
+            return _DASH
+        return f"{f:.2f}:1"
     except (TypeError, ValueError):
         return _DASH
 
@@ -230,6 +240,47 @@ def _authoritative_proof_state(one_hour: dict, truth_key: str, table: dict, fall
     return _proof_state_of(fallback_value)
 
 
+def _acceptance_state_from_location(location_state, structure_event) -> str:
+    """Classify trade_location.location_state into a proof state.
+
+    "below_zone_failure" (src/trade_location.py._classify) is a genuine BROKEN
+    state — price failed below the zone — and must never render as FORMING,
+    which would misrepresent a failed setup as still-developing. Every other
+    non-"unknown" location_state indicates the price is at least present in/at
+    the zone (FORMING), and "mid_zone_acceptance" or a Claude-classified
+    structural reclaim indicates acceptance is CONFIRMED.
+    """
+    ls = str(location_state or "").lower()
+    if ls == "below_zone_failure":
+        return "BROKEN"
+    if "acceptance" in ls or str(structure_event) == "reclaim":
+        return "CONFIRMED"
+    if ls and ls != "unknown":
+        return "FORMING"
+    return "MISSING"
+
+
+# 4H structural break evidence (src/four_hour_operational.py) — the correct,
+# already-computed source for the EXECUTION PROOF "Break" step. Deliberately
+# NOT sourced from final_signal.structure_event: that field is the Daily/
+# swing-level thesis (rendered separately as the DOCTRINE SEQUENCE "Structure"
+# row), and reusing it here would let higher-timeframe evidence masquerade as
+# independent 1H/4H execution-level break confirmation.
+_FOUR_HOUR_BREAK_STATE_MAP = {
+    "BOS_CONFIRMED": "CONFIRMED",
+    "WICK_ONLY": "FORMING",
+    "NONE": "MISSING",
+}
+
+
+def _four_hour_break_state(four_hour: dict) -> str:
+    if not four_hour or not four_hour.get("enabled"):
+        return "UNAVAILABLE"
+    structure = _safe_dict(four_hour.get("structure"))
+    raw = str(structure.get("break_state") or "UNKNOWN").upper()
+    return _FOUR_HOUR_BREAK_STATE_MAP.get(raw, "UNAVAILABLE")
+
+
 # ---------------------------------------------------------------------------
 # Section builders — each reads only already-completed evidence.
 # ---------------------------------------------------------------------------
@@ -346,12 +397,8 @@ def _doctrine_sequence_section(ev: dict) -> list:
         else "MISSING"
     )
 
-    location_state = str(trade_location.get("location_state") or "")
-    acceptance_state = (
-        "CONFIRMED" if ("acceptance" in location_state.lower() or structure_event == "reclaim")
-        else "FORMING" if location_state and location_state != "unknown"
-        else "MISSING"
-    )
+    location_state = trade_location.get("location_state")
+    acceptance_state = _acceptance_state_from_location(location_state, signal.get("structure_event"))
 
     retest_state = _authoritative_proof_state(
         one_hour, "retest_truth", _RETEST_TRUTH_STATE, signal.get("retest_status")
@@ -391,19 +438,16 @@ def _execution_proof_section(ev: dict) -> dict:
     signal = ev["signal"]
     trade_location = ev["trade_location"]
     one_hour = ev["one_hour_entry"]
+    four_hour = ev["four_hour_operational"]
 
-    structure_event = str(signal.get("structure_event") or "none")
-    break_state = (
-        "BROKEN" if structure_event == "failed_breakdown_reclaim"
-        else "MISSING" if structure_event.lower() == "none"
-        else "CONFIRMED"
-    )
-    location_state = str(trade_location.get("location_state") or "")
-    acceptance_state = (
-        "CONFIRMED" if "acceptance" in location_state.lower()
-        else "FORMING" if location_state and location_state != "unknown"
-        else "MISSING"
-    )
+    # Sourced from 4H structural evidence, never from the Daily/swing-level
+    # final_signal.structure_event (that field already drives the DOCTRINE
+    # SEQUENCE "Structure" row) — see _four_hour_break_state's docstring.
+    break_state = _four_hour_break_state(four_hour)
+
+    location_state = trade_location.get("location_state")
+    acceptance_state = _acceptance_state_from_location(location_state, signal.get("structure_event"))
+
     retest_state = _authoritative_proof_state(
         one_hour, "retest_truth", _RETEST_TRUTH_STATE, signal.get("retest_status")
     )
@@ -416,7 +460,7 @@ def _execution_proof_section(ev: dict) -> dict:
         sequence = "FAILED"
     elif all(s == "CONFIRMED" for s in states):
         sequence = "COMPLETE"
-    elif all(s == "MISSING" for s in states):
+    elif all(s in ("MISSING", "UNAVAILABLE") for s in states):
         sequence = _UNAVAILABLE
     else:
         sequence = "INCOMPLETE"
@@ -593,22 +637,57 @@ def _trade_location_section(ev: dict) -> dict:
 
 
 def _candle_truth_section(ev: dict) -> dict:
+    """CANDLE TRUTH evidence.
+
+    tiering_result["candle_evidence"] is built upstream by calling
+    candle_evidence.build_candle_evidence_context(enriched, tiering_result)
+    with no bars/timeframe args — it falls back to the CURRENT DAILY bar
+    (candle_evidence's own event-from-enriched path reads enriched's
+    current_* fields, which is the Daily indicator dict), and its own
+    `timeframe` field is therefore None in production today. This section
+    must never claim that object is 1H evidence; the timeframe label is
+    always echoed verbatim from the source, never asserted.
+
+    Genuinely 1H-scoped candle evidence — one_hour_entry.candle_truth — is
+    rendered as a separate, explicitly labelled subsection when usable.
+    """
     candle = ev["candle_evidence"]
-    if not candle or str(candle.get("status") or "unknown") == "unknown":
-        return {"available": False}
+    one_hour = ev["one_hour_entry"]
+
+    generic_available = bool(candle) and str(candle.get("status") or "unknown") != "unknown"
+    tf_raw = candle.get("timeframe") if generic_available else None
+    tf_label = _fmt(tf_raw) if tf_raw else "not specified by evidence"
+
+    one_hour_candle: dict = {}
+    if _one_hour_usable(one_hour):
+        oh_candle = _safe_dict(one_hour.get("candle_truth"))
+        event_type = str(oh_candle.get("event_type") or "NONE").upper()
+        if event_type not in ("", "NONE"):
+            one_hour_candle = {
+                "event_type": _fmt(oh_candle.get("event_type")),
+                "closed_candle_confirms": _fmt(oh_candle.get("closed_candle_confirms")),
+                "body_acceptance": _fmt(oh_candle.get("body_acceptance")),
+                "wick_rejection": _fmt(oh_candle.get("wick_rejection")),
+                "follow_through_present": _fmt(oh_candle.get("follow_through_present")),
+                "volume_support": _fmt(oh_candle.get("volume_support")),
+            }
+
     return {
-        "available": True,
-        "body_pct": _fmt_pct(candle.get("body_pct")),
-        "upper_wick_pct": _fmt_pct(candle.get("upper_wick_pct")),
-        "lower_wick_pct": _fmt_pct(candle.get("lower_wick_pct")),
-        "close_position_pct": _fmt_pct(candle.get("close_position_pct")),
-        "candle_family": _fmt(candle.get("candle_family")),
-        "close_quality": _fmt(candle.get("close_quality")),
-        "wick_read": _fmt(candle.get("wick_read")),
-        "level_reaction": _fmt(candle.get("level_reaction")),
-        "next_candle_verdict": _fmt(candle.get("next_candle_verdict")),
-        "candle_veto": _fmt(candle.get("candle_veto")),
-        "display_text": _sanitize(candle.get("display_text")),
+        "available": generic_available or bool(one_hour_candle),
+        "generic_available": generic_available,
+        "timeframe_label": tf_label,
+        "body_pct": _fmt_pct(candle.get("body_pct")) if generic_available else _DASH,
+        "upper_wick_pct": _fmt_pct(candle.get("upper_wick_pct")) if generic_available else _DASH,
+        "lower_wick_pct": _fmt_pct(candle.get("lower_wick_pct")) if generic_available else _DASH,
+        "close_position_pct": _fmt_pct(candle.get("close_position_pct")) if generic_available else _DASH,
+        "candle_family": _fmt(candle.get("candle_family")) if generic_available else _DASH,
+        "close_quality": _fmt(candle.get("close_quality")) if generic_available else _DASH,
+        "wick_read": _fmt(candle.get("wick_read")) if generic_available else _DASH,
+        "level_reaction": _fmt(candle.get("level_reaction")) if generic_available else _DASH,
+        "next_candle_verdict": _fmt(candle.get("next_candle_verdict")) if generic_available else _DASH,
+        "candle_veto": _fmt(candle.get("candle_veto")) if generic_available else _DASH,
+        "display_text": _sanitize(candle.get("display_text")) if generic_available else "",
+        "one_hour_candle": one_hour_candle,
         "live_state": "information only — no confirmation authority until close",
     }
 
@@ -937,16 +1016,32 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
         "─" * 32,
     ]
     if candle.get("available"):
+        if candle["generic_available"]:
+            lines += [
+                f"  LAST CLOSED CANDLE (timeframe: {candle['timeframe_label']})",
+                f"    Body %:            {candle['body_pct']}",
+                f"    Upper wick %:      {candle['upper_wick_pct']}",
+                f"    Lower wick %:      {candle['lower_wick_pct']}",
+                f"    Close position %:  {candle['close_position_pct']}",
+                f"    Candle family:     {candle['candle_family']}",
+                f"    Close quality:     {candle['close_quality']}",
+                f"    Wick read:         {candle['wick_read']}",
+                f"    Level reaction:    {candle['level_reaction']}",
+            ]
+        if candle["one_hour_candle"]:
+            oh = candle["one_hour_candle"]
+            if candle["generic_available"]:
+                lines.append("")
+            lines += [
+                "  1H CANDLE TRUTH",
+                f"    Event type:             {oh['event_type']}",
+                f"    Closed candle confirms: {oh['closed_candle_confirms']}",
+                f"    Body acceptance:        {oh['body_acceptance']}",
+                f"    Wick rejection:         {oh['wick_rejection']}",
+                f"    Follow-through:         {oh['follow_through_present']}",
+                f"    Volume support:         {oh['volume_support']}",
+            ]
         lines += [
-            "  LAST CLOSED 1H",
-            f"    Body %:            {candle['body_pct']}",
-            f"    Upper wick %:      {candle['upper_wick_pct']}",
-            f"    Lower wick %:      {candle['lower_wick_pct']}",
-            f"    Close position %:  {candle['close_position_pct']}",
-            f"    Candle family:     {candle['candle_family']}",
-            f"    Close quality:     {candle['close_quality']}",
-            f"    Wick read:         {candle['wick_read']}",
-            f"    Level reaction:    {candle['level_reaction']}",
             "",
             "  CURRENT LIVE 1H",
             f"    State: {candle['live_state']}",
