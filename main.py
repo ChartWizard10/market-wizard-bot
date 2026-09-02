@@ -175,7 +175,9 @@ def register_commands(
         await ctx.send(
             "**Market Wizard Bot Commands**\n"
             "`!scan` — Full scan of ticker universe (respects market hours)\n"
-            "`!analyze TICKER` — Single-ticker analysis (bypasses dedup cooldown)\n"
+            "`!analyze TICKER [compact|json]` — Full manual operator audit "
+            "(bypasses dedup cooldown; `compact` for the short summary, "
+            "`json` for machine-readable evidence)\n"
             "`!status` — Bot status and last scan summary\n"
             "`!autoscan start` — Enable scheduled auto-scan\n"
             "`!autoscan stop` — Disable scheduled auto-scan\n"
@@ -267,11 +269,14 @@ def register_commands(
             await ctx.send(f"Scan error: {type(exc).__name__}")
 
     @bot.command(name="analyze")
-    async def analyze_cmd(ctx, ticker: str = "") -> None:
+    async def analyze_cmd(ctx, ticker: str = "", mode: str = "") -> None:
         if not ticker:
-            await ctx.send("Usage: `!analyze TICKER`  e.g. `!analyze AAPL`")
+            await ctx.send(
+                "Usage: `!analyze TICKER [compact|json]`  e.g. `!analyze AAPL`"
+            )
             return
         ticker = ticker.upper().strip()
+        mode = (mode or "").lower().strip()
         if model_client is None or system_prompt is None:
             await ctx.send(
                 "ERROR: Claude model not configured"
@@ -292,12 +297,20 @@ def register_commands(
                 display_status = "model_error" if status == "claude_error" else status
                 await ctx.send(f"{ticker}: {display_status} — {detail}")
                 return
-            await ctx.send(
-                f"**{ticker}** — {result.get('final_tier', 'WAIT')}\n"
-                f"Alert sent: {result.get('alert_sent', False)}  |  "
-                f"Dedup: {result.get('dedup_reason', '')}\n"
-                f"Scan ID: {result.get('scan_id', '')}"
-            )
+
+            from src import manual_operator_audit
+            from src.discord_alerts import chunk_message
+
+            if mode == "compact":
+                await ctx.send(manual_operator_audit.render_operator_audit_compact(result))
+            elif mode == "json":
+                text = "```json\n" + manual_operator_audit.render_operator_audit_json(result) + "\n```"
+                for chunk in chunk_message(text):
+                    await ctx.send(chunk)
+            else:
+                audit_text = manual_operator_audit.render_operator_audit(result, config)
+                for chunk in chunk_message(audit_text):
+                    await ctx.send(chunk)
         except Exception as exc:
             log.error("!analyze error for %s: %s", ticker, exc)
             await ctx.send(f"Analyze error for {ticker}: {type(exc).__name__}")
