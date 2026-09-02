@@ -526,13 +526,17 @@ def test_live_1h_never_rendered_as_closed_confirmation():
 
 def test_missing_proof_and_broken_proof_are_never_conflated():
     # NEAR_ENTRY: retest partial (forming), hold missing — neither is BROKEN.
+    # (1H is usable here and sources the classification — see Phase 14X.2
+    # authoritative-proof tests for the dedicated 1H-vs-signal coverage.)
     ne_audit = moa.build_operator_audit(_near_entry_result())
     tj = ne_audit["tier_judgment"]
     assert tj["broken_proof"] == ["—"]
-    assert any("hold_status" in m for m in tj["missing_proof"])
+    assert any("hold" in m.lower() for m in tj["missing_proof"])
 
-    # A genuinely failed retest must appear under BROKEN, never MISSING.
+    # A genuinely failed retest (signal-level fallback — 1H disabled so the
+    # signal is authoritative) must appear under BROKEN, never MISSING.
     failed = _completed_result("WAIT", retest_status="failed", hold_status="missing")
+    failed["tiering_result"]["one_hour_entry"] = {"status": "DISABLED"}
     failed_audit = moa.build_operator_audit(failed)
     tj2 = failed_audit["tier_judgment"]
     assert any("retest_status=failed" in b for b in tj2["broken_proof"])
