@@ -45,6 +45,7 @@ from tests.test_phase_14x_full_manual_operator_audit import (
     _completed_result,
     _full_tiering_result,
     _snipe_it_result,
+    _starter_result,
     _wait_result,
 )
 
@@ -720,6 +721,160 @@ def test_choch_is_not_automatically_full_structure_confirmation():
     # CHOCH alone (FORMING, not CONFIRMED) must not authorize the HTF thesis
     # even though Daily permission reads YES here.
     assert ar["htf_thesis_authorization"] != "AUTHORIZED"
+
+
+# ===========================================================================
+# TEST — AUDIT INTEGRITY guard (Phase 14X.1 final integrity-conflict guard)
+# ===========================================================================
+
+def test_wait_with_incomplete_evidence_is_consistent():
+    result = _wait_result()
+    audit = moa.build_operator_audit(result)
+    assert audit["audit_integrity"]["status"] == "CONSISTENT"
+    assert audit["audit_integrity"]["trust"] == "VERIFIED"
+
+
+def test_starter_with_incomplete_local_sequence_is_consistent():
+    """STARTER is explicitly reduced-size before complete SNIPE confirmation
+    — an incomplete local sequence under STARTER is not a conflict."""
+    result = _starter_result()
+    audit = moa.build_operator_audit(result)
+    assert audit["execution_proof"]["sequence"] != "COMPLETE"
+    assert audit["audit_integrity"]["status"] == "CONSISTENT"
+
+
+def test_snipe_it_with_complete_sequence_is_consistent():
+    result = _snipe_it_result()
+    audit = moa.build_operator_audit(result)
+    assert audit["audit_integrity"]["status"] == "CONSISTENT"
+    assert audit["audit_integrity"]["source_final_tier"] == "SNIPE_IT"
+    assert audit["audit_integrity"]["source_capital"] == "FULL"
+
+
+def test_snipe_it_with_failed_local_sequence_is_conflict():
+    result = _snipe_it_result()
+    result["tiering_result"]["four_hour_operational"]["structure"]["break_state"] = "NONE"
+    result["tiering_result"]["one_hour_entry"]["pullback_retest_hold"] = {
+        "retest_truth": "RETEST_MISSED", "hold_truth": "HOLD_FAILED",
+    }
+    audit = moa.build_operator_audit(result)
+    ai = audit["audit_integrity"]
+    assert ai["status"] == "CONFLICT"
+    assert any("local execution sequence is FAILED" in c for c in ai["conflicts"])
+    # Source truth is preserved verbatim, never rewritten.
+    assert ai["source_final_tier"] == "SNIPE_IT"
+    assert ai["source_capital"] == "FULL"
+    assert result["final_tier"] == "SNIPE_IT"
+
+
+def test_snipe_it_with_incomplete_local_sequence_is_conflict():
+    result = _snipe_it_result()
+    result["tiering_result"]["four_hour_operational"]["structure"]["break_state"] = "WICK_ONLY"
+    audit = moa.build_operator_audit(result)
+    ai = audit["audit_integrity"]
+    assert ai["status"] == "CONFLICT"
+    assert any("local execution sequence is INCOMPLETE" in c for c in ai["conflicts"])
+
+
+def test_starter_with_broken_local_proof_is_conflict():
+    result = _starter_result()
+    result["tiering_result"]["one_hour_entry"]["pullback_retest_hold"] = {
+        "retest_truth": "RETEST_REAL", "hold_truth": "HOLD_FAILED",
+    }
+    audit = moa.build_operator_audit(result)
+    ai = audit["audit_integrity"]
+    assert ai["status"] == "CONFLICT"
+    assert any("local proof is BROKEN" in c for c in ai["conflicts"])
+
+
+def test_snipe_it_with_broken_local_proof_is_conflict():
+    result = _snipe_it_result()
+    result["tiering_result"]["one_hour_entry"]["pullback_retest_hold"] = {
+        "retest_truth": "RETEST_REAL", "hold_truth": "HOLD_FAILED",
+    }
+    audit = moa.build_operator_audit(result)
+    assert audit["audit_integrity"]["status"] == "CONFLICT"
+
+
+def test_choch_with_snipe_it_is_conflict():
+    """Production SNIPE gates never admit CHOCH alone as confirmed structure
+    (src/prefilter.py 40% weight, setup_family_compiler.py's valid_events
+    exclusion, snipe_gate_audit.py's BREAK_CONFIRMED gate) — SNIPE_IT +
+    CHOCH is therefore a real audit-integrity conflict."""
+    result = _snipe_it_result()
+    result["tiering_result"]["final_signal"]["structure_event"] = "CHOCH"
+    audit = moa.build_operator_audit(result)
+    ai = audit["audit_integrity"]
+    assert ai["status"] == "CONFLICT"
+    assert any("HTF thesis authorization is CONDITIONAL" in c for c in ai["conflicts"])
+
+
+def test_snipe_it_with_promotion_blocked_is_conflict():
+    result = _snipe_it_result()
+    result["tiering_result"]["snipe_gate_audit"]["promotion_state"] = "PROMOTION_BLOCKED"
+    audit = moa.build_operator_audit(result)
+    ai = audit["audit_integrity"]
+    assert ai["status"] == "CONFLICT"
+    assert any("promotion_state is PROMOTION_BLOCKED" in c for c in ai["conflicts"])
+
+
+def test_snipe_it_with_active_blocked_gates_is_conflict():
+    result = _snipe_it_result()
+    result["tiering_result"]["snipe_gate_audit"]["blocked_gate_names"] = ["HOLD_CONFIRMED"]
+    audit = moa.build_operator_audit(result)
+    ai = audit["audit_integrity"]
+    assert ai["status"] == "CONFLICT"
+    assert any("blocked gates remain" in c for c in ai["conflicts"])
+
+
+def test_snipe_it_with_seal_applied_corrected_tier_mismatch_is_conflict():
+    """The completed result's own seal already declared a downgrade
+    (applied=True, corrected_tier=STARTER) but final_tier still reads
+    SNIPE_IT — a genuine pipeline-output integrity break, read verbatim,
+    never recomputed."""
+    result = _snipe_it_result()
+    result["tiering_result"]["snipe_confirmed_seal"] = {
+        "applied": True, "original_tier": "SNIPE_IT", "corrected_tier": "STARTER",
+    }
+    audit = moa.build_operator_audit(result)
+    ai = audit["audit_integrity"]
+    assert ai["status"] == "CONFLICT"
+    assert any("snipe_confirmed_seal.applied=True" in c for c in ai["conflicts"])
+
+
+def test_missing_evidence_alone_is_incomplete_not_conflict():
+    result = _snipe_it_result()
+    result["tiering_result"]["four_hour_operational"] = {"enabled": False}
+    audit = moa.build_operator_audit(result)
+    ai = audit["audit_integrity"]
+    # No 4H evidence at all is an evidence gap, not a proven contradiction —
+    # by itself it must not flip status to CONFLICT.
+    assert "local execution sequence evidence is UNAVAILABLE" not in " ".join(ai["conflicts"])
+    for c in ai["conflicts"]:
+        assert "UNAVAILABLE" not in c or "local execution sequence" not in c
+
+
+def test_audit_integrity_never_mutates_source_tier_or_capital():
+    for fixture in (_wait_result, _snipe_it_result, _starter_result, _wmt_shaped_result):
+        original = fixture()
+        snapshot = copy.deepcopy(original)
+        moa.build_operator_audit(original)
+        moa.render_operator_audit(original)
+        moa.render_operator_audit_json(original)
+        moa.render_operator_audit_compact(original)
+        assert original == snapshot
+
+
+def test_audit_integrity_section_appears_in_full_render_with_conflict():
+    result = _snipe_it_result()
+    result["tiering_result"]["one_hour_entry"]["pullback_retest_hold"] = {
+        "retest_truth": "RETEST_REAL", "hold_truth": "HOLD_FAILED",
+    }
+    text = moa.render_operator_audit(result)
+    assert "AUDIT INTEGRITY" in text
+    assert "Status:                    CONFLICT" in text
+    assert "DO NOT TREAT CAPITAL CLAIM AS VERIFIED" in text
+    assert "Source final tier:         SNIPE_IT" in text
 
 
 # ===========================================================================

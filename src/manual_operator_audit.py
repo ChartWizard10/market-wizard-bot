@@ -1235,6 +1235,139 @@ def _authority_reconciliation_section(ev: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# AUDIT INTEGRITY — Phase 14X.1 final integrity-conflict guard.
+#
+# Production already runs a downgrade-only consistency seal
+# (src/snipe_confirmed_seal.py, applied upstream in the shared post-tiering
+# judgment organ BEFORE this renderer ever sees the result) whose law is:
+# SNIPE_IT/full capital/SNIPE routing may not survive an active confirmation
+# blocker (failed hold, failed retest, incomplete 1H trigger, blocked gate,
+# missing proof, HTF contextual block). In the normal path a completed
+# result reaching this renderer should therefore already be internally
+# coherent.
+#
+# This section is a DEFENSIVE, READ-ONLY check on the completed result this
+# renderer actually received — it is not a second tiering engine, it never
+# re-runs the seal's or the gate audit's logic, and it never mutates
+# final_tier/capital_action. It only detects when the DISPLAYED evidence
+# (already computed and rendered elsewhere in this same audit — local
+# execution sequence, local proof, HTF thesis authorization, and the raw
+# snipe_gate_audit/snipe_confirmed_seal fields) contradicts the DISPLAYED
+# final-tier/capital claim, and says so plainly. Source truth (final_tier,
+# capital_action) is never rewritten — only its trust status is reported.
+# ---------------------------------------------------------------------------
+
+# Mirrors src/snipe_confirmed_seal.py's own vocabulary (read, never imported/
+# called — this module stays a pure, dependency-free renderer). A promotion
+# state or audit label in these sets is something production's OWN seal/gate
+# audit already treats as "not a clean confirmation."
+_BLOCKING_PROMOTION_STATES = {"PROMOTION_BLOCKED", "PROMOTION_PENDING", "NOT_ELIGIBLE"}
+_BLOCKING_AUDIT_LABELS = {
+    "DISQUALIFIED", "STARTER_ONLY_VALID", "WATCH_ONLY_BLOCKED",
+    "INSUFFICIENT_CONTEXT", "SNIPE_CONFIRMATION_BLOCKED",
+}
+
+
+def _audit_integrity_section(ev: dict, result: dict) -> dict:
+    tiering_result = ev["tiering_result"]
+    sga = ev["snipe_gate_audit"]
+    seal = ev["snipe_confirmed_seal"]
+
+    final_tier = str(result.get("final_tier") or tiering_result.get("final_tier") or "WAIT").upper()
+    capital = _CAPITAL_READINESS.get(final_tier, "NONE")
+
+    structure_state = _structure_event_state(ev["signal"].get("structure_event"))
+    htf_thesis = _htf_thesis_authorization(ev, structure_state)
+    states = _local_execution_states(ev)
+    local_execution_sequence = _local_execution_sequence(states)
+    local_proof = _local_proof_narrative(states)
+
+    conflicts: list = []
+    incomplete: list = []
+
+    # Clear conflict #1 — false SNIPE execution: SNIPE_IT claimed without a
+    # complete local execution sequence. UNAVAILABLE (no evidence to judge)
+    # is treated as an evidence gap, not a proven conflict — see the
+    # "incomplete is not conflict" law.
+    if final_tier == "SNIPE_IT":
+        if local_execution_sequence in ("FAILED", "INCOMPLETE"):
+            conflicts.append(
+                f"SNIPE_IT claimed but local execution sequence is {local_execution_sequence}"
+            )
+        elif local_execution_sequence == _UNAVAILABLE:
+            incomplete.append("local execution sequence evidence is UNAVAILABLE")
+
+    # Clear conflict #2 — a failed critical local proof leg cannot coexist
+    # with a capital-granting tier claim (STARTER or SNIPE_IT).
+    if local_proof == "BROKEN" and final_tier in ("STARTER", "SNIPE_IT"):
+        conflicts.append(
+            f"{final_tier} claimed but local proof is BROKEN (a critical execution leg failed)"
+        )
+
+    # Clear conflict #3 — SNIPE_IT requires the HTF thesis to be actually
+    # AUTHORIZED, not merely CONDITIONAL/NOT AUTHORIZED (matches real
+    # production doctrine: CHOCH/early structure and non-granted Daily
+    # permission are never sufficient for SNIPE-tier confirmation — see
+    # src/prefilter.py._score_structure_event, setup_family_compiler.py's
+    # valid_events, and snipe_gate_audit.py's BREAK_CONFIRMED gate, none of
+    # which admit CHOCH as a confirmed break).
+    if final_tier == "SNIPE_IT":
+        if htf_thesis == _UNAVAILABLE:
+            incomplete.append("HTF thesis authorization evidence is UNAVAILABLE")
+        elif htf_thesis != "AUTHORIZED":
+            conflicts.append(f"SNIPE_IT claimed but HTF thesis authorization is {htf_thesis}")
+
+    # Clear conflict #4 — the completed result's OWN seal/gate-audit objects
+    # already declare a contradiction. Read verbatim; never recomputed.
+    if seal.get("applied") is True:
+        corrected = str(seal.get("corrected_tier") or seal.get("sealed_tier") or "").upper().strip()
+        if corrected and corrected != final_tier:
+            conflicts.append(
+                f"snipe_confirmed_seal.applied=True corrected_tier={corrected} "
+                f"but final_tier is still {final_tier}"
+            )
+    if final_tier == "SNIPE_IT":
+        promo = str(sga.get("promotion_state") or "").upper().strip()
+        if promo in _BLOCKING_PROMOTION_STATES:
+            conflicts.append(f"SNIPE_IT claimed but snipe_gate_audit.promotion_state is {promo}")
+        blocked = _nonempty(sga.get("blocked_gate_names")) or _nonempty(sga.get("blocked_gates"))
+        if blocked:
+            conflicts.append(
+                "SNIPE_IT claimed but blocked gates remain: "
+                + ", ".join(_fmt_item(x) for x in blocked)
+            )
+        audit_label = str(sga.get("audit_label") or "").upper().strip()
+        if audit_label in _BLOCKING_AUDIT_LABELS:
+            conflicts.append(f"SNIPE_IT claimed but snipe_gate_audit.audit_label is {audit_label}")
+
+    # De-duplicate while preserving order.
+    seen, unique_conflicts = set(), []
+    for c in conflicts:
+        if c not in seen:
+            seen.add(c)
+            unique_conflicts.append(c)
+
+    if unique_conflicts:
+        status = "CONFLICT"
+        trust = "DO NOT TREAT CAPITAL CLAIM AS VERIFIED UNTIL PIPELINE CONFLICT IS RECONCILED"
+    elif incomplete:
+        status = "INCOMPLETE"
+        trust = "VERIFIED"
+    else:
+        status = "CONSISTENT"
+        trust = "VERIFIED"
+
+    return {
+        "status": status,
+        "source_final_tier": final_tier,
+        "source_capital": capital,
+        "conflicts": unique_conflicts or [_DASH],
+        "incomplete_reasons": incomplete or [_DASH],
+        "trust": trust,
+    }
+
+
 def _delivery_section(result: dict, ev: dict) -> dict:
     tiering_result = ev["tiering_result"]
     safe_for_alert = result.get("safe_for_alert")
@@ -1270,6 +1403,7 @@ def build_operator_audit(result: dict, config: dict | None = None) -> dict:
         "candle_truth": _candle_truth_section(ev),
         "risk_runway": _risk_runway_section(ev),
         "authority_reconciliation": _authority_reconciliation_section(ev),
+        "audit_integrity": _audit_integrity_section(ev, result),
         "tier_judgment": _tier_judgment_section(ev, result),
         "delivery": _delivery_section(result, ev),
     }
@@ -1382,6 +1516,7 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
     candle = audit["candle_truth"]
     risk = audit["risk_runway"]
     ar = audit["authority_reconciliation"]
+    ai = audit["audit_integrity"]
     tj = audit["tier_judgment"]
     delivery = audit["delivery"]
 
@@ -1446,6 +1581,18 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
     ]
     lines += _render_authority_reconciliation(ar)
     lines += [
+        "",
+        "─" * 32,
+        "AUDIT INTEGRITY",
+        "─" * 32,
+        f"  Status:                    {ai['status']}",
+        f"  Source final tier:         {ai['source_final_tier']}",
+        f"  Source capital readiness:  {ai['source_capital']}",
+        "  Evidence conflicts:",
+        *[f"    • {c}" for c in ai["conflicts"]],
+        "  Evidence gaps (incomplete, not proven conflict):",
+        *[f"    • {r}" for r in ai["incomplete_reasons"]],
+        f"  Operator trust:            {ai['trust']}",
         "",
         "─" * 32,
         "TRADE LOCATION / KEY NUMBERS",
