@@ -693,6 +693,47 @@ def _htf_field_is_meaningful(value) -> bool:
     return True
 
 
+def _normalize_htf_view(htf) -> dict:
+    """Adapter over the two real higher_timeframe_context shapes.
+
+    Phase 14X.2 finding: tiering_result["higher_timeframe_context"] on a
+    completed live run_analyze() result is the FULL NESTED object exactly as
+    build_higher_timeframe_context() returns it — monthly_bias_state,
+    weekly_campaign_state, campaign_location_label, campaign_location_
+    quality, context_grade, supports_long_setup, weakens_long_setup, and
+    blocks_snipe_contextually live at htf["monthly"]["bias_state"],
+    htf["weekly"]["campaign_state"], htf["campaign_location"]["label"/
+    "quality"], and htf["setup_relationship"][...] respectively — NEVER as
+    top-level flat keys. The historical alert_history persistence path
+    instead stores the ALREADY-FLATTENED shape (produced by
+    higher_timeframe_context.compact_history_snapshot, the same function
+    src/audit_access.py's persisted-row rendering implicitly depends on).
+    Reading the nested object as if it were flat silently starved this
+    renderer's Weekly section of every field except data_status/
+    diagnostic_sentence (both happen to be top-level in either shape).
+
+    This function detects which shape it received and always normalizes to
+    the flat view using that SAME canonical, already-existing, pure
+    serialization function — never a hand-rolled parallel mapping that could
+    drift from it. Never mutates `htf`. When both a nested sub-object and a
+    stray top-level flat key are present (e.g. a hand-built fixture), the
+    nested object always wins — it is the authoritative live source; a flat
+    key only exists at all on an already-compacted snapshot.
+    """
+    if not isinstance(htf, dict):
+        return {}
+    is_nested = any(isinstance(htf.get(k), dict) for k in ("monthly", "weekly", "setup_relationship", "campaign_location"))
+    if is_nested:
+        from src import higher_timeframe_context as _htf_engine  # local import (pure, stdlib-only serializer)
+        compact = _htf_engine.compact_history_snapshot(htf)
+        if isinstance(compact, dict):
+            return compact
+    # Already-flat/compact shape (persisted snapshot or a test fixture built
+    # directly in that shape) — used as-is; a field genuinely absent here
+    # simply renders as unavailable downstream, never fabricated.
+    return htf
+
+
 def _weekly_section(ev: dict) -> dict:
     """WEEKLY — CAMPAIGN CONTEXT.
 
@@ -705,7 +746,7 @@ def _weekly_section(ev: dict) -> dict:
     the posture must be explicitly qualified, and positive sponsorship can
     never be PROVEN from missing/degraded evidence.
     """
-    htf = ev["higher_timeframe_context"]
+    htf = _normalize_htf_view(ev["higher_timeframe_context"])
     if not htf or str(htf.get("data_status") or "").upper() != "OK":
         return {"available": False, "campaign_evidence": "INCOMPLETE"}
     supports = htf.get("supports_long_setup") is True
@@ -1095,11 +1136,32 @@ def _risk_runway_section(ev: dict) -> dict:
 
 
 def _tier_judgment_section(ev: dict, result: dict) -> dict:
+    """TIER JUDGMENT.
+
+    Phase 14X.2 fix: this section previously classified retest/hold
+    proof independently via _proof_state_of(signal.get(...)) — the stale
+    signal-level fields — never checking whether usable 1H evidence had
+    already superseded them. That let the SAME operator case file say
+    "retest CONFIRMED" in VERDICT/DOCTRINE/EXECUTION PROOF while TIER
+    JUDGMENT simultaneously listed "retest_status=partial" as a current
+    missing proof — two interpretations of one fact. This now uses the
+    identical _authoritative_proof_detail precedence as every other
+    section (one_hour_entry wins when usable, else the signal-level
+    field), so all sections can never again disagree.
+
+    A completed snipe_gate_audit.missing_proofs entry that merely names
+    "retest"/"hold" is also superseded once the CURRENT authoritative
+    state for that leg reads CONFIRMED — the raw evidence is not deleted
+    anywhere upstream (snipe_gate_audit itself is untouched), only this
+    display no longer repeats a claim its own authoritative source has
+    already resolved.
+    """
     tiering_result = ev["tiering_result"]
     signal = ev["signal"]
     sga = ev["snipe_gate_audit"]
     ladder = ev["snipe_ladder"]
     seal = ev["snipe_confirmed_seal"]
+    one_hour = ev["one_hour_entry"]
 
     final_tier = str(result.get("final_tier") or tiering_result.get("final_tier") or "WAIT").upper()
     capital_action = tiering_result.get("capital_action")
@@ -1108,20 +1170,40 @@ def _tier_judgment_section(ev: dict, result: dict) -> dict:
     blocked_gates = _nonempty(sga.get("blocked_gate_names")) or _nonempty(sga.get("blocked_gates"))
     applied_vetoes = _nonempty(tiering_result.get("applied_vetoes"))
 
-    # MISSING vs BROKEN law: retest/hold "failed" is broken; anything else
-    # incomplete (missing/partial/forming) is missing, never invented as failed.
+    retest_state, retest_raw, retest_src = _authoritative_proof_detail(
+        one_hour, "retest_truth", _RETEST_TRUTH_STATE, signal.get("retest_status")
+    )
+    hold_state, hold_raw, hold_src = _authoritative_proof_detail(
+        one_hour, "hold_truth", _HOLD_TRUTH_STATE, signal.get("hold_status")
+    )
+
+    # MISSING vs BROKEN law: "failed"/BROKEN is broken; anything else
+    # incomplete (missing/partial/forming) is missing, never invented as
+    # failed. Signal-sourced fallback keeps the exact legacy label format
+    # ("retest_status=failed") for backward-compatible provenance; a 1H-
+    # sourced read is labelled as such so the operator can see which
+    # authority produced it.
     broken: list = []
     missing: list = []
-    if _proof_state_of(signal.get("retest_status")) == "BROKEN":
-        broken.append("retest_status=failed")
-    elif _proof_state_of(signal.get("retest_status")) != "CONFIRMED":
-        missing.append(f"retest_status={_fmt(signal.get('retest_status'))}")
-    if _proof_state_of(signal.get("hold_status")) == "BROKEN":
-        broken.append("hold_status=failed")
-    elif _proof_state_of(signal.get("hold_status")) != "CONFIRMED":
-        missing.append(f"hold_status={_fmt(signal.get('hold_status'))}")
+    if retest_state == "BROKEN":
+        broken.append(f"retest_status={retest_raw}" if retest_src == "SIGNAL" else f"1H retest={retest_raw}")
+    elif retest_state != "CONFIRMED":
+        missing.append(f"retest_status={retest_raw}" if retest_src == "SIGNAL" else f"1H retest={retest_state} ({retest_raw})")
+    if hold_state == "BROKEN":
+        broken.append(f"hold_status={hold_raw}" if hold_src == "SIGNAL" else f"1H hold={hold_raw}")
+    elif hold_state != "CONFIRMED":
+        missing.append(f"hold_status={hold_raw}" if hold_src == "SIGNAL" else f"1H hold={hold_state} ({hold_raw})")
+
+    retest_confirmed = retest_state == "CONFIRMED"
+    hold_confirmed = hold_state == "CONFIRMED"
     for m in missing_proofs:
-        missing.append(_fmt_item(m))
+        item_text = _fmt_item(m)
+        low = item_text.lower()
+        if retest_confirmed and "retest" in low:
+            continue  # superseded by current authoritative retest confirmation
+        if hold_confirmed and "hold" in low:
+            continue  # superseded by current authoritative hold confirmation
+        missing.append(item_text)
     for v in applied_vetoes:
         broken.append(_fmt_item(v))
 
@@ -1269,7 +1351,7 @@ _BLOCKING_AUDIT_LABELS = {
 }
 
 
-def _audit_integrity_section(ev: dict, result: dict) -> dict:
+def _audit_integrity_section(ev: dict, result: dict, tier_judgment: dict) -> dict:
     tiering_result = ev["tiering_result"]
     sga = ev["snipe_gate_audit"]
     seal = ev["snipe_confirmed_seal"]
@@ -1285,6 +1367,33 @@ def _audit_integrity_section(ev: dict, result: dict) -> dict:
 
     conflicts: list = []
     incomplete: list = []
+
+    # Phase 14X.2 — cross-section proof-contradiction insurance check.
+    # TIER JUDGMENT is now built from the identical authoritative retest/hold
+    # precedence (_authoritative_proof_detail) as EXECUTION PROOF/DOCTRINE
+    # SEQUENCE, so this should never fire in practice — it exists as a
+    # regression guard comparing NORMALIZED evidence objects (never rendered
+    # prose) in case the two ever drift apart again.
+    tj_stale_texts = [
+        m for m in (tier_judgment.get("missing_proof") or []) + (tier_judgment.get("broken_proof") or [])
+        if m and m != _DASH
+    ]
+    if states["retest"] == "CONFIRMED" and any("retest" in t.lower() for t in tj_stale_texts):
+        conflicts.append(
+            "Authoritative retest is CONFIRMED but Tier Judgment lists a retest proof gap"
+        )
+    if states["hold"] == "CONFIRMED" and any("hold" in t.lower() for t in tj_stale_texts):
+        conflicts.append(
+            "Authoritative hold is CONFIRMED but Tier Judgment lists a hold proof gap"
+        )
+    if states["retest"] == "BROKEN" and not any("retest" in b.lower() for b in (tier_judgment.get("broken_proof") or []) if b != _DASH):
+        conflicts.append(
+            "Authoritative retest is BROKEN but Tier Judgment does not list it as broken"
+        )
+    if states["hold"] == "BROKEN" and not any("hold" in b.lower() for b in (tier_judgment.get("broken_proof") or []) if b != _DASH):
+        conflicts.append(
+            "Authoritative hold is BROKEN but Tier Judgment does not list it as broken"
+        )
 
     # Clear conflict #1 — false SNIPE execution: SNIPE_IT claimed without a
     # complete local execution sequence. UNAVAILABLE (no evidence to judge)
@@ -1392,6 +1501,7 @@ def build_operator_audit(result: dict, config: dict | None = None) -> dict:
     """
     result = result if isinstance(result, dict) else {}
     ev = _extract(result)
+    tier_judgment = _tier_judgment_section(ev, result)
     return {
         "status": result.get("status"),
         "verdict_capital": _verdict_capital_section(result, ev),
@@ -1403,8 +1513,8 @@ def build_operator_audit(result: dict, config: dict | None = None) -> dict:
         "candle_truth": _candle_truth_section(ev),
         "risk_runway": _risk_runway_section(ev),
         "authority_reconciliation": _authority_reconciliation_section(ev),
-        "audit_integrity": _audit_integrity_section(ev, result),
-        "tier_judgment": _tier_judgment_section(ev, result),
+        "audit_integrity": _audit_integrity_section(ev, result, tier_judgment),
+        "tier_judgment": tier_judgment,
         "delivery": _delivery_section(result, ev),
     }
 

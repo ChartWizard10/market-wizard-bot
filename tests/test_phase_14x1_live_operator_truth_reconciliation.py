@@ -153,7 +153,16 @@ def _wmt_shaped_result() -> dict:
     tiering_result["snipe_gate_audit"] = {
         "audit_label": "NOT_READY", "promotion_state": "NOT_ELIGIBLE",
         "blocked_gate_names": ["daily_structure_break", "daily_permission"],
-        "missing_proofs": ["hold_confirmed_1h_closed"],
+        # Real gate names per src/snipe_confirmed_seal.py._HARD_FAILURE_GATES;
+        # a stale "hold_confirmed_1h_closed" entry is deliberately included
+        # too — 1H hold_truth is already HOLD_CONFIRMED below, so Phase
+        # 14X.2's fix must filter that one entry out while leaving the two
+        # genuinely still-open Daily/4H proofs visible.
+        "missing_proofs": [
+            "hold_confirmed_1h_closed",
+            "DAILY_PERMISSION_GRANTED",
+            "FOUR_H_LOCATION_VALID",
+        ],
         "diagnostic_sentence": "Daily permission denied; no structure break.",
     }
     tiering_result["snipe_ladder"] = {
@@ -626,13 +635,19 @@ def test_live_1h_still_information_only_after_reconciliation():
 # ===========================================================================
 
 def test_missing_vs_broken_still_distinct_after_reconciliation():
+    # Phase 14X.2: WMT's 1H retest/hold are now authoritatively CONFIRMED
+    # (RETEST_REAL/HOLD_CONFIRMED), so neither appears as missing/broken any
+    # more — the real remaining blockers (Daily/structure) stay visible.
     result = _wmt_shaped_result()
     audit = moa.build_operator_audit(result)
     tj = audit["tier_judgment"]
-    assert any("hold_status" in m for m in tj["missing_proof"])
+    assert not any("hold" in m.lower() for m in tj["missing_proof"])
+    assert not any("retest" in m.lower() for m in tj["missing_proof"])
     assert tj["broken_proof"] == ["—"]
+    assert any(m != moa._DASH for m in tj["missing_proof"])  # real blockers still present
 
     failed = _completed_result("WAIT", retest_status="failed")
+    failed["tiering_result"]["one_hour_entry"] = {"status": "DISABLED"}
     audit2 = moa.build_operator_audit(failed)
     tj2 = audit2["tier_judgment"]
     assert any("retest_status=failed" in b for b in tj2["broken_proof"])
