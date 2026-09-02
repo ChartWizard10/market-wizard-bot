@@ -235,12 +235,23 @@ _RETEST_TRUTH_STATE = {
     "RETEST_REAL":       "CONFIRMED",
     "RETEST_EDGE_ONLY":  "FORMING",
     "RETEST_MISSED":     "MISSING",
+    # Phase 14X.2 (live NONE-token fix): "NONE" is a real member of
+    # src/one_hour_entry.py's own RETEST_TRUTH set — a USABLE 1H organ
+    # explicitly reporting that retest proof has not been earned. It is
+    # evidence of absence, not absence of evidence, and must never be
+    # discarded to a stale signal-level fallback merely because its
+    # resolved state is MISSING. See test_phase_14x2_analyze_truth_closure.
+    # py's canonical-enum coverage lock, which imports the real RETEST_TRUTH/
+    # HOLD_TRUTH sets to guard this mapping against future drift.
+    "NONE":              "MISSING",
 }
 _HOLD_TRUTH_STATE = {
     "HOLD_CONFIRMED": "CONFIRMED",
     "HOLD_FORMING":   "FORMING",
     "HOLD_WEAK":      "FORMING",
     "HOLD_FAILED":    "BROKEN",
+    # See _RETEST_TRUTH_STATE's "NONE" comment — identical law for hold.
+    "NONE":           "MISSING",
 }
 
 
@@ -608,17 +619,17 @@ def _local_execution_states(ev: dict) -> dict:
     location_state = trade_location.get("location_state")
     acceptance_state = _acceptance_state_from_location(location_state, signal.get("structure_event"))
 
-    retest_state, retest_raw, _retest_src = _authoritative_proof_detail(
+    retest_state, retest_raw, retest_src = _authoritative_proof_detail(
         one_hour, "retest_truth", _RETEST_TRUTH_STATE, signal.get("retest_status")
     )
-    hold_state, hold_raw, _hold_src = _authoritative_proof_detail(
+    hold_state, hold_raw, hold_src = _authoritative_proof_detail(
         one_hour, "hold_truth", _HOLD_TRUTH_STATE, signal.get("hold_status")
     )
     return {
         "break": break_state, "break_raw": break_raw,
         "acceptance": acceptance_state,
-        "retest": retest_state, "retest_raw": retest_raw,
-        "hold": hold_state, "hold_raw": hold_raw,
+        "retest": retest_state, "retest_raw": retest_raw, "retest_src": retest_src,
+        "hold": hold_state, "hold_raw": hold_raw, "hold_src": hold_src,
     }
 
 
@@ -1404,6 +1415,26 @@ def _audit_integrity_section(ev: dict, result: dict, tier_judgment: dict) -> dic
         conflicts.append(
             "Authoritative hold is BROKEN but Tier Judgment does not list it as broken"
         )
+
+    # Phase 14X.2 — authority-fallback-leak guard. A usable 1H organ reporting
+    # a real canonical token (including "NONE" — evidence that proof was not
+    # earned, never "1H unavailable") must always win as the resolved source.
+    # If the 1H organ is usable and its raw token is a real member of the
+    # canonical table, yet the resolved source still reads SIGNAL, the 1H
+    # value was wrongly discarded — a genuine authority-fallback leak.
+    one_hour = ev["one_hour_entry"]
+    if _one_hour_usable(one_hour):
+        prh = _safe_dict(one_hour.get("pullback_retest_hold"))
+        raw_retest = str(prh.get("retest_truth", "") or "").upper().strip()
+        raw_hold = str(prh.get("hold_truth", "") or "").upper().strip()
+        if raw_retest in _RETEST_TRUTH_STATE and states["retest_src"] == "SIGNAL":
+            conflicts.append(
+                f"Usable 1H retest_truth={raw_retest} was discarded in favor of the stale signal-level field"
+            )
+        if raw_hold in _HOLD_TRUTH_STATE and states["hold_src"] == "SIGNAL":
+            conflicts.append(
+                f"Usable 1H hold_truth={raw_hold} was discarded in favor of the stale signal-level field"
+            )
 
     # Clear conflict #1 — false SNIPE execution: SNIPE_IT claimed without a
     # complete local execution sequence. UNAVAILABLE (no evidence to judge)
