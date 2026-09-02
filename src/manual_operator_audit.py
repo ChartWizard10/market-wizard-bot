@@ -411,20 +411,54 @@ def _verdict_capital_section(result: dict, ev: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Centralized structure_event display mapping (Phase 14X.1 pre-merge hardening).
+#
+# The naive "contains the substring 'failed'" heuristic previously classified
+# failed_breakdown_reclaim as BROKEN/FAILED. That is wrong: the model schema
+# (prompts/market_wizard_system.md) defines it as "Price broke below support,
+# but immediately reversed and closed back above. Trap-style bullish event" —
+# and every real strategy module that scores/gates structure_event treats it
+# as a fully confirmed positive structural event, same tier as BOS/accepted_
+# break (src/prefilter.py._score_structure_event: BOS/failed_breakdown_
+# reclaim/accepted_break all score 90% of weight; MSS scores 100%; reclaim
+# scores 75%). CHOCH is real but consistently weaker/earlier across the
+# codebase (prefilter.py scores it only 40%; src/setup_family_compiler.py's
+# valid_events and src/snipe_gate_audit.py's confirmed-structure group both
+# EXCLUDE it) — an early change-of-character, not sovereign confirmation.
+# This mapping is DISPLAY ONLY: it changes no score, gate, or tier.
+# ---------------------------------------------------------------------------
+
+_STRUCTURE_EVENT_STATE = {
+    "bos": "CONFIRMED",
+    "mss": "CONFIRMED",
+    "reclaim": "CONFIRMED",
+    "accepted_break": "CONFIRMED",
+    "failed_breakdown_reclaim": "CONFIRMED",
+    "choch": "FORMING",
+    "none": "MISSING",
+}
+
+
+def _structure_event_state(structure_event) -> str:
+    key = str(structure_event or "none").strip().lower()
+    return _STRUCTURE_EVENT_STATE.get(key, "MISSING")
+
+
 def _setup_section(ev: dict) -> dict:
     signal = ev["signal"]
     retest_state = _proof_state_of(signal.get("retest_status"))
     hold_state = _proof_state_of(signal.get("hold_status"))
-    structure_event = str(signal.get("structure_event") or "none").lower()
+    structure_state = _structure_event_state(signal.get("structure_event"))
 
-    if structure_event in ("", "none"):
+    if structure_state == "MISSING":
         stage = _UNAVAILABLE
-    elif structure_event == "failed_breakdown_reclaim":
-        stage = "FAILED"
-    elif retest_state == "CONFIRMED" and hold_state == "CONFIRMED":
-        stage = "CONFIRMED"
     elif retest_state == "BROKEN" or hold_state == "BROKEN":
+        # A genuinely failed local proof leg is FAILED regardless of how the
+        # structural event is named — never inferred from the event's name.
         stage = "FAILED"
+    elif structure_state == "CONFIRMED" and retest_state == "CONFIRMED" and hold_state == "CONFIRMED":
+        stage = "CONFIRMED"
     else:
         stage = "FORMING"
 
@@ -439,13 +473,29 @@ def _setup_section(ev: dict) -> dict:
     }
 
 
-def _swing_qualified(ev: dict, structure_state: str) -> bool:
-    """True only when the higher-authority swing thesis is actually
-    established: the Daily/swing Structure event is CONFIRMED AND Daily
-    timeframe permission is granted. Local 1H retest/hold proof — however
-    clean — never substitutes for this; see the Phase 14X.1 law that local
-    proof is not swing-thesis qualification."""
-    return structure_state == "CONFIRMED" and _daily_permission(ev) == "YES"
+def _htf_thesis_authorization(ev: dict, structure_state: str) -> str:
+    """AUTHORIZED / CONDITIONAL / NOT AUTHORIZED / UNAVAILABLE.
+
+    Answers exactly one question: is the HIGHER-TIMEFRAME swing thesis
+    authorized (Weekly/Daily context + Daily/swing Structure)? This is a
+    single, named boolean-turned-enum precisely so it cannot be conflated
+    with two other, different questions this renderer also answers
+    elsewhere: whether the LOCAL execution sequence (4H+1H: Break ->
+    Acceptance -> Retest -> Hold) is complete, and whether CAPITAL is ready
+    (owned exclusively by final_tier/capital_action). Local 1H retest/hold
+    proof — however clean — never substitutes for this; a clean local
+    sequence can coexist with NOT AUTHORIZED/CONDITIONAL here.
+    """
+    daily_permission = _daily_permission(ev)
+    if daily_permission == _UNAVAILABLE:
+        return _UNAVAILABLE
+    if daily_permission == "NO":
+        return "NOT AUTHORIZED"
+    if daily_permission == "YES" and structure_state == "CONFIRMED":
+        return "AUTHORIZED"
+    if daily_permission in ("YES", "CONDITIONAL"):
+        return "CONDITIONAL"
+    return "NOT AUTHORIZED"
 
 
 def _doctrine_sequence_section(ev: dict) -> list:
@@ -456,12 +506,15 @@ def _doctrine_sequence_section(ev: dict) -> list:
     rendered as DERIVED_DISPLAY from the fields that do exist (structure_event,
     location_state, zone_type), explicitly labelled, never invented.
 
-    Retest/Hold carry an additional swing-qualification flag: a CONFIRMED
-    local (1H) retest/hold is real evidence, but it does not by itself mean
-    the whole swing thesis sequence is confirmed — that requires the
-    upstream Structure gate AND Daily swing permission to also hold. Local
-    proof can improve while the higher-authority thesis remains unqualified;
-    see _swing_qualified.
+    Retest/Hold carry an additional annotation naming exactly one question:
+    is the HTF (Weekly/Daily) swing thesis AUTHORIZED? A CONFIRMED local
+    (1H) retest/hold is real evidence, but it does not by itself mean the
+    higher-timeframe thesis is authorized — that requires the upstream
+    Structure gate AND Daily swing permission to also hold. Local proof can
+    improve while HTF-thesis authorization remains withheld; see
+    _htf_thesis_authorization. This is deliberately a single, named
+    question — never conflated with local-execution-sequence completeness
+    (EXECUTION PROOF) or capital readiness (owned only by final_tier).
 
     Invalidation/Target render DEFINED, never CONFIRMED — a defined risk
     contract (a level + condition exist) is not the same claim as that level
@@ -472,15 +525,11 @@ def _doctrine_sequence_section(ev: dict) -> list:
     trade_location = ev["trade_location"]
     one_hour = ev["one_hour_entry"]
 
-    structure_event = str(signal.get("structure_event") or "none")
-    structure_state = (
-        "BROKEN" if structure_event == "failed_breakdown_reclaim"
-        else "MISSING" if structure_event.lower() == "none"
-        else "CONFIRMED"
-    )
+    structure_event = signal.get("structure_event")
+    structure_state = _structure_event_state(structure_event)
 
     displacement_state = (
-        "CONFIRMED" if structure_event in ("BOS", "MSS", "accepted_break")
+        "CONFIRMED" if str(structure_event or "").upper() in ("BOS", "MSS", "ACCEPTED_BREAK")
         else "MISSING"
     )
 
@@ -493,8 +542,11 @@ def _doctrine_sequence_section(ev: dict) -> list:
     hold_state, hold_raw, hold_src = _authoritative_proof_detail(
         one_hour, "hold_truth", _HOLD_TRUTH_STATE, signal.get("hold_status")
     )
-    qualified = _swing_qualified(ev, structure_state)
-    qualification_note = None if qualified else "SWING-SEQUENCE QUALIFICATION: NOT EARNED"
+    htf_thesis = _htf_thesis_authorization(ev, structure_state)
+    qualification_note = (
+        None if htf_thesis == "AUTHORIZED"
+        else f"HTF THESIS AUTHORIZATION: {htf_thesis} — local proof alone does not authorize it"
+    )
 
     inval_level = signal.get("invalidation_level")
     invalidation_state = "DEFINED" if inval_level is not None else "MISSING"
@@ -526,7 +578,12 @@ def _doctrine_sequence_section(ev: dict) -> list:
     ]
 
 
-def _execution_proof_section(ev: dict) -> dict:
+def _local_execution_states(ev: dict) -> dict:
+    """The single source of truth for the Break -> Acceptance -> Retest ->
+    Hold local (4H/1H) execution chain — computed once, consumed by both
+    EXECUTION PROOF and AUTHORITY RECONCILIATION so the two sections can
+    never disagree about local proof or sequence completeness.
+    """
     signal = ev["signal"]
     trade_location = ev["trade_location"]
     one_hour = ev["one_hour_entry"]
@@ -547,24 +604,57 @@ def _execution_proof_section(ev: dict) -> dict:
     hold_state, hold_raw, _hold_src = _authoritative_proof_detail(
         one_hour, "hold_truth", _HOLD_TRUTH_STATE, signal.get("hold_status")
     )
+    return {
+        "break": break_state, "break_raw": break_raw,
+        "acceptance": acceptance_state,
+        "retest": retest_state, "retest_raw": retest_raw,
+        "hold": hold_state, "hold_raw": hold_raw,
+    }
 
-    states = [break_state, acceptance_state, retest_state, hold_state]
-    if any(s == "BROKEN" for s in states):
-        sequence = "FAILED"
-    elif all(s == "CONFIRMED" for s in states):
-        sequence = "COMPLETE"
-    elif all(s in ("MISSING", "UNAVAILABLE") for s in states):
-        sequence = _UNAVAILABLE
-    else:
-        sequence = "INCOMPLETE"
 
+def _local_execution_sequence(states: dict) -> str:
+    """COMPLETE / INCOMPLETE / FAILED / UNAVAILABLE for the full local chain.
+    A single BROKEN leg fails the whole sequence regardless of position."""
+    ordered = [states["break"], states["acceptance"], states["retest"], states["hold"]]
+    if any(s == "BROKEN" for s in ordered):
+        return "FAILED"
+    if all(s == "CONFIRMED" for s in ordered):
+        return "COMPLETE"
+    if all(s in ("MISSING", "UNAVAILABLE") for s in ordered):
+        return _UNAVAILABLE
+    return "INCOMPLETE"
+
+
+def _local_proof_narrative(states: dict) -> str:
+    """BROKEN / CONFIRMED / IMPROVING / NONE — a conservative, precedence-
+    ordered narrative over the SAME four legs used by
+    _local_execution_sequence. This is the fix for the defect where an
+    optimistic OR could let e.g. RETEST_REAL (CONFIRMED) hide a HOLD_FAILED
+    (BROKEN) behind "IMPROVING" — a later failed critical leg must never be
+    hidden by an earlier successful one. BROKEN always outranks everything
+    else; only when nothing is BROKEN can partial/complete progress be
+    reported as IMPROVING/CONFIRMED.
+    """
+    ordered = [states["break"], states["acceptance"], states["retest"], states["hold"]]
+    if any(s == "BROKEN" for s in ordered):
+        return "BROKEN"
+    if all(s == "CONFIRMED" for s in ordered):
+        return "CONFIRMED"
+    if any(s in ("CONFIRMED", "FORMING") for s in ordered):
+        return "IMPROVING"
+    return "NONE"
+
+
+def _execution_proof_section(ev: dict) -> dict:
+    states = _local_execution_states(ev)
+    sequence = _local_execution_sequence(states)
     final_tier = str(ev["tiering_result"].get("final_tier") or "WAIT").upper()
 
     return {
-        "break": {"state": break_state, "icon": _icon(break_state), "raw": break_raw},
-        "acceptance": {"state": acceptance_state, "icon": _icon(acceptance_state)},
-        "retest": {"state": retest_state, "icon": _icon(retest_state), "raw": retest_raw},
-        "hold": {"state": hold_state, "icon": _icon(hold_state), "raw": hold_raw},
+        "break": {"state": states["break"], "icon": _icon(states["break"]), "raw": states["break_raw"]},
+        "acceptance": {"state": states["acceptance"], "icon": _icon(states["acceptance"])},
+        "retest": {"state": states["retest"], "icon": _icon(states["retest"]), "raw": states["retest_raw"]},
+        "hold": {"state": states["hold"], "icon": _icon(states["hold"]), "raw": states["hold_raw"]},
         "sequence": sequence,
         "capital_readiness": _CAPITAL_READINESS.get(final_tier, "NONE"),
         # Phase 14X.1: this section is LOCAL (4H/1H) execution evidence only.
@@ -580,16 +670,40 @@ _WEEKLY_REQUIRED_FIELDS = (
     "campaign_location_label", "context_grade",
 )
 
+# src/higher_timeframe_context.py's own real vocabulary: BIAS_STATES,
+# CAMPAIGN_STATES-equivalents, LOCATION_QUALITY, and GRADES all include the
+# literal placeholder "UNKNOWN" as a legitimate degraded/insufficient-data
+# value — a non-empty Python string, so a bare truthiness check on these
+# fields wrongly counts "UNKNOWN" as present/complete evidence. This treats
+# it (and other real non-informative tokens the engine emits) as NOT
+# satisfying completeness.
+_HTF_NONINFORMATIVE_TOKENS = {
+    "", "unknown", "unavailable", "not_available", "n/a", "none", "null", "error",
+}
+
+
+def _htf_field_is_meaningful(value) -> bool:
+    if value is None:
+        return False
+    s = str(value).strip().lower()
+    if not s or s in _HTF_NONINFORMATIVE_TOKENS:
+        return False
+    if s.startswith("degraded"):
+        return False
+    return True
+
 
 def _weekly_section(ev: dict) -> dict:
     """WEEKLY — CAMPAIGN CONTEXT.
 
-    Phase 14X.1 law: UNKNOWN is not bullish and UNKNOWN is not bearish. A
-    posture value is only ever computed from `supports_long_setup` /
-    `weakens_long_setup`, but if the underlying campaign evidence is
-    materially incomplete (any of _WEEKLY_REQUIRED_FIELDS missing even
-    though data_status == "OK"), the posture must be explicitly qualified —
-    never silently read as proven positive sponsorship.
+    Phase 14X.1 law: UNKNOWN is not bullish, UNKNOWN is not bearish, and
+    UNKNOWN is not complete evidence. A posture value is only ever computed
+    from `supports_long_setup`/`weakens_long_setup`, but if the underlying
+    campaign evidence is materially incomplete — any of _WEEKLY_REQUIRED_
+    FIELDS missing OR literally "UNKNOWN"/degraded (src/higher_timeframe_
+    context.py's own real vocabulary), even though data_status == "OK" —
+    the posture must be explicitly qualified, and positive sponsorship can
+    never be PROVEN from missing/degraded evidence.
     """
     htf = ev["higher_timeframe_context"]
     if not htf or str(htf.get("data_status") or "").upper() != "OK":
@@ -603,7 +717,7 @@ def _weekly_section(ev: dict) -> dict:
     else:
         posture = "mixed"
 
-    missing_fields = [f for f in _WEEKLY_REQUIRED_FIELDS if not htf.get(f)]
+    missing_fields = [f for f in _WEEKLY_REQUIRED_FIELDS if not _htf_field_is_meaningful(htf.get(f))]
     campaign_evidence = "COMPLETE" if not missing_fields else "INCOMPLETE"
     positive_sponsorship = "PROVEN" if (campaign_evidence == "COMPLETE" and supports and not weakens) else "NOT PROVEN"
 
@@ -833,29 +947,36 @@ def _candle_truth_section(ev: dict) -> dict:
 _RR_RECONCILE_TOLERANCE = 0.05  # 5% relative tolerance — documented, strict
 
 
-def _reconciled_reference_rr(reference_price, invalidation, t1_level, source_rr):
-    """Only return a value when (reference_price, invalidation, t1) reconciles
-    to source_rr within _RR_RECONCILE_TOLERANCE — the sole condition under
-    which "Reference R:R from scan price" may be labelled DERIVED_DISPLAY /
-    reconciled. Otherwise returns None and the caller must show the basis as
-    unavailable rather than silently claiming one. Never raises."""
+def _reconcile_rr(entry_price, invalidation, target, source_rr, tolerance: float = _RR_RECONCILE_TOLERANCE):
+    """Deterministically reconcile (entry_price, invalidation, target) against
+    source_rr; return the computed ratio only when it matches within
+    `tolerance`, else None. Never raises.
+
+    This is the SOLE mechanism by which any R:R may be labelled reconciled/
+    executable — mere existence of a price is never sufficient. Two
+    independent callers use this with two different bases:
+      - scan_price as entry_price -> "Reference R:R (scan-price)"
+      - trigger_level as entry_price -> "Executable-entry R:R"
+    A reconciliation against one basis says nothing about the other; each
+    call is independent.
+    """
     try:
-        ref_f = float(reference_price)
+        entry_f = float(entry_price)
         inv_f = float(invalidation)
-        t1_f = float(t1_level)
+        target_f = float(target)
         src_f = float(source_rr)
     except (TypeError, ValueError):
         return None
-    if not all(_is_finite(x) for x in (ref_f, inv_f, t1_f, src_f)):
+    if not all(_is_finite(x) for x in (entry_f, inv_f, target_f, src_f)):
         return None
-    risk = ref_f - inv_f
-    reward = t1_f - ref_f
-    if risk <= 0 or src_f == 0:
+    risk = entry_f - inv_f          # bullish mandate: risk is entry minus invalidation, below entry
+    reward = target_f - entry_f     # reward is target minus entry, above entry
+    if risk <= 0 or reward <= 0 or src_f == 0:
         return None
     computed = reward / risk
     if not _is_finite(computed):
         return None
-    if abs(computed - src_f) / abs(src_f) <= _RR_RECONCILE_TOLERANCE:
+    if abs(computed - src_f) / abs(src_f) <= tolerance:
         return computed
     return None
 
@@ -864,14 +985,18 @@ def _risk_runway_section(ev: dict) -> dict:
     """RISK / RUNWAY.
 
     Phase 14X.1 provenance laws:
-      - EXECUTABLE-ENTRY R:R is only ever the scanner-provided risk_reward,
-        and only when a real executable trigger exists; with no trigger it
-        is explicitly UNAVAILABLE — never silently implied by showing a
-        source R:R next to a missing entry.
-      - A "Reference R:R from scan price" line is rendered ONLY when
-        (scan_price, invalidation, T1) deterministically reconciles to the
-        source risk_reward within a strict, documented tolerance (see
-        _reconciled_reference_rr) — otherwise the basis is UNAVAILABLE.
+      - Trigger existence alone does NOT prove the source risk_reward was
+        computed from (trigger -> invalidation -> T1) geometry — a source
+        R:R could have been calculated from scan price, another reference,
+        or unreconstructable model reasoning. EXECUTABLE-ENTRY R:R is
+        therefore labelled reconciled ONLY when (trigger, invalidation, T1)
+        deterministically matches source_rr within tolerance (_reconcile_rr)
+        — otherwise it is UNAVAILABLE with an explicit "not reconciled"
+        basis, even when a trigger exists.
+      - "Reference R:R (scan-price)" is an INDEPENDENT reconciliation check
+        against (scan_price, invalidation, T1) — it may reconcile while the
+        trigger-basis does not, and vice versa; the two never imply each
+        other.
       - Reported overhead is the MODEL's own final_signal.overhead_status —
         never presented as independently verified. When the deterministic
         structural overhead computation (indicators.py's assess_overhead,
@@ -900,15 +1025,35 @@ def _risk_runway_section(ev: dict) -> dict:
 
     trigger = signal.get("trigger_level")
     scan_price = signal.get("scan_price")
+    invalidation = signal.get("invalidation_level")
     source_rr = signal.get("risk_reward")
+    t1_level = t1.get("level") if t1 else None
 
-    executable_entry_rr = _fmt_ratio(source_rr) if trigger is not None else _UNAVAILABLE
+    # Executable-entry basis: reconciled against the real trigger, never
+    # merely because a trigger happens to exist.
+    executable_reconciled = (
+        _reconcile_rr(trigger, invalidation, t1_level, source_rr)
+        if (trigger is not None and t1_level is not None and source_rr is not None) else None
+    )
+    if trigger is None:
+        executable_entry_rr = _UNAVAILABLE
+        executable_entry_rr_basis = "UNAVAILABLE / no executable trigger"
+    elif executable_reconciled is not None:
+        executable_entry_rr = _fmt_ratio(executable_reconciled)
+        executable_entry_rr_basis = "DERIVED_DISPLAY / reconciled to source value"
+    else:
+        executable_entry_rr = _UNAVAILABLE
+        executable_entry_rr_basis = "NOT RECONCILED"
 
-    reconciled = _reconciled_reference_rr(scan_price, signal.get("invalidation_level"), t1.get("level"), source_rr) \
-        if (t1 and source_rr is not None) else None
-    reference_rr = _fmt_ratio(reconciled) if reconciled is not None else _DASH
+    # Reference basis: an INDEPENDENT reconciliation against scan price —
+    # never implied by, or implying, the executable-entry basis above.
+    reference_reconciled = (
+        _reconcile_rr(scan_price, invalidation, t1_level, source_rr)
+        if (t1_level is not None and source_rr is not None) else None
+    )
+    reference_rr = _fmt_ratio(reference_reconciled) if reference_reconciled is not None else _DASH
     reference_rr_basis = (
-        "DERIVED_DISPLAY / reconciled to source value" if reconciled is not None
+        "DERIVED_DISPLAY / reconciled to source value" if reference_reconciled is not None
         else "UNAVAILABLE / not reconstructable within tolerance"
     )
 
@@ -932,6 +1077,7 @@ def _risk_runway_section(ev: dict) -> dict:
         "reward_t2_pct": _fmt_pct(_reward_pct(t2.get("level"), trigger)) if t2 else _DASH,
         "source_rr": _fmt_ratio(source_rr),
         "executable_entry_rr": executable_entry_rr,
+        "executable_entry_rr_basis": executable_entry_rr_basis,
         "reference_rr": reference_rr,
         "reference_rr_basis": reference_rr_basis,
         "reported_overhead": _fmt(signal.get("overhead_status")),
@@ -1037,47 +1183,53 @@ def _tier_judgment_section(ev: dict, result: dict) -> dict:
 def _authority_reconciliation_section(ev: dict) -> dict:
     """AUTHORITY RECONCILIATION.
 
-    Answers, from already-computed evidence only: what is improving locally,
-    what still blocks the swing thesis, and can local proof authorize
-    capital. Never produces a new tiering judgment — capital always comes
-    from the already-computed final_tier via _CAPITAL_READINESS, identical
-    to EXECUTION PROOF's capital_readiness field, so the two can never
-    disagree.
+    Answers THREE DISTINCT, never-collapsed questions from already-computed
+    evidence only — never a new tiering judgment:
+
+      A. HTF THESIS AUTHORIZATION (Weekly/Daily context + Daily/swing
+         Structure) — AUTHORIZED / CONDITIONAL / NOT AUTHORIZED / UNAVAILABLE.
+         Owned by _htf_thesis_authorization.
+      B. LOCAL EXECUTION SEQUENCE (4H Break -> Acceptance -> 1H Retest ->
+         Hold) — COMPLETE / INCOMPLETE / FAILED / UNAVAILABLE. Identical
+         value to EXECUTION PROOF's "sequence" field (both derive from
+         _local_execution_states/_local_execution_sequence), so the two
+         sections can never disagree.
+      C. CAPITAL READINESS — FULL / STARTER / NONE. Owned exclusively by
+         final_tier via _CAPITAL_READINESS, identical to EXECUTION PROOF's
+         capital_readiness field.
+
+    Daily YES + Structure CONFIRMED + 4H WICK_ONLY is a real, valid case
+    where (A) reads AUTHORIZED while (B) reads INCOMPLETE/FAILED — HTF
+    thesis authorization is not proof the local execution sequence, let
+    alone capital, is ready. Local proof itself is reported separately
+    (local_proof) using the conservative BROKEN-outranks-IMPROVING
+    precedence in _local_proof_narrative — a clean retest never hides a
+    failed hold behind an optimistic "IMPROVING" read.
     """
     signal = ev["signal"]
-    one_hour = ev["one_hour_entry"]
     tiering_result = ev["tiering_result"]
 
-    structure_event = str(signal.get("structure_event") or "none")
-    structure_state = (
-        "BROKEN" if structure_event == "failed_breakdown_reclaim"
-        else "MISSING" if structure_event.lower() == "none"
-        else "CONFIRMED"
-    )
+    structure_state = _structure_event_state(signal.get("structure_event"))
     daily_permission = _daily_permission(ev)
-    four_hour_break = _four_hour_break_state(ev["four_hour_operational"])
-    retest_state = _authoritative_proof_state(
-        one_hour, "retest_truth", _RETEST_TRUTH_STATE, signal.get("retest_status")
-    )
-    hold_state = _authoritative_proof_state(
-        one_hour, "hold_truth", _HOLD_TRUTH_STATE, signal.get("hold_status")
-    )
+    htf_thesis = _htf_thesis_authorization(ev, structure_state)
 
-    local_proof = "IMPROVING" if retest_state in ("CONFIRMED", "FORMING") or hold_state in ("CONFIRMED", "FORMING") else "NONE"
-    swing_qualified = _swing_qualified(ev, structure_state)
+    states = _local_execution_states(ev)
+    local_execution_sequence = _local_execution_sequence(states)
+    local_proof = _local_proof_narrative(states)
 
     blockers = []
     if daily_permission != "YES":
         blockers.append(f"Daily permission {daily_permission}")
-    if four_hour_break != "CONFIRMED":
-        blockers.append(f"4H break {four_hour_break}")
+    if states["break"] != "CONFIRMED":
+        blockers.append(f"4H break {states['break']}")
     if structure_state != "CONFIRMED":
         blockers.append(f"Daily/swing structure {structure_state}")
 
     final_tier = str(tiering_result.get("final_tier") or "WAIT").upper()
     return {
         "local_proof": local_proof,
-        "swing_thesis": "QUALIFIED" if swing_qualified else "NOT QUALIFIED",
+        "htf_thesis_authorization": htf_thesis,
+        "local_execution_sequence": local_execution_sequence,
         "blockers": blockers or [_DASH],
         "capital": _CAPITAL_READINESS.get(final_tier, "NONE"),
     }
@@ -1205,14 +1357,16 @@ def _render_authority_reconciliation(ar: dict) -> list:
         "─" * 32,
         "AUTHORITY RECONCILIATION",
         "─" * 32,
-        f"  Local proof:      {ar['local_proof']}",
-        f"  Swing thesis:     {ar['swing_thesis']}",
+        f"  Local proof:               {ar['local_proof']}",
+        f"  HTF thesis authorization:  {ar['htf_thesis_authorization']}",
+        f"  Local execution sequence:  {ar['local_execution_sequence']}",
+        f"  Capital readiness:         {ar['capital']}",
         "  Primary higher-authority blockers:",
         *[f"    • {b}" for b in ar["blockers"]],
-        f"  Capital:          {ar['capital']}",
-        "  Interpretation: local 1H/4H proof may improve while higher-authority "
-        "(Daily/4H) permission remains denied or incomplete — local repair "
-        "cannot override that denial.",
+        "  Interpretation: these are three separate questions. HTF thesis "
+        "authorization does not mean the local execution sequence is "
+        "complete; a complete local sequence does not by itself change "
+        "capital readiness, which comes only from the final tier.",
     ]
 
 
@@ -1378,6 +1532,7 @@ def render_operator_audit(result: dict, config: dict | None = None) -> str:
         f"  Reward to T2:              {risk['reward_t2_pct']}",
         f"  Source-provided R:R:       {risk['source_rr']}",
         f"  Executable-entry R:R:      {risk['executable_entry_rr']}",
+        f"    Basis:                   {risk['executable_entry_rr_basis']}",
         f"  Reference R:R (scan-price): {risk['reference_rr']}",
         f"    Basis:                   {risk['reference_rr_basis']}",
         f"  Reported overhead:         {risk['reported_overhead']}",

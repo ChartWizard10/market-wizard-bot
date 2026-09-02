@@ -281,24 +281,38 @@ def test_local_proof_does_not_become_swing_proof():
 
     assert doctrine["Retest"]["state"] == "CONFIRMED"
     assert doctrine["Hold"]["state"] == "CONFIRMED"
-    assert doctrine["Retest"]["qualification_note"] == "SWING-SEQUENCE QUALIFICATION: NOT EARNED"
-    assert doctrine["Hold"]["qualification_note"] == "SWING-SEQUENCE QUALIFICATION: NOT EARNED"
+    assert doctrine["Retest"]["qualification_note"] == "HTF THESIS AUTHORIZATION: NOT AUTHORIZED — local proof alone does not authorize it"
+    assert doctrine["Hold"]["qualification_note"] == "HTF THESIS AUTHORIZATION: NOT AUTHORIZED — local proof alone does not authorize it"
 
     ar = audit["authority_reconciliation"]
     assert ar["local_proof"] == "IMPROVING"
-    assert ar["swing_thesis"] == "NOT QUALIFIED"
+    assert ar["htf_thesis_authorization"] == "NOT AUTHORIZED"
+    assert ar["local_execution_sequence"] == "INCOMPLETE"
     assert ar["capital"] == "NONE"
     assert any("Daily permission" in b for b in ar["blockers"])
 
 
-def test_swing_qualified_when_structure_confirmed_and_daily_granted():
+def test_htf_thesis_authorized_when_structure_confirmed_and_daily_granted():
     result = _snipe_it_result()
     audit = moa.build_operator_audit(result)
     doctrine = {row["step"]: row for row in audit["doctrine_sequence"]}
     assert doctrine["Retest"]["qualification_note"] is None
     assert doctrine["Hold"]["qualification_note"] is None
     ar = audit["authority_reconciliation"]
-    assert ar["swing_thesis"] == "QUALIFIED"
+    assert ar["htf_thesis_authorization"] == "AUTHORIZED"
+
+
+def test_htf_thesis_authorized_does_not_imply_local_execution_complete():
+    """The 'Important 4H law' regression: Daily YES + Structure confirmed +
+    4H WICK_ONLY must show HTF thesis AUTHORIZED while local execution
+    sequence is NOT complete, and capital is unaffected by either."""
+    result = _snipe_it_result()
+    result["tiering_result"]["four_hour_operational"]["structure"]["break_state"] = "WICK_ONLY"
+    audit = moa.build_operator_audit(result)
+    ar = audit["authority_reconciliation"]
+    assert ar["htf_thesis_authorization"] == "AUTHORIZED"
+    assert ar["local_execution_sequence"] != "COMPLETE"
+    assert ar["capital"] == "FULL"  # capital is owned only by final_tier (SNIPE_IT here), never by 4H/1H evidence
 
 
 # ===========================================================================
@@ -353,7 +367,69 @@ def test_rr_basis_reconciliation_only_when_math_matches_within_tolerance():
     audit2 = moa.build_operator_audit(mutated)
     risk2 = audit2["risk_runway"]
     assert risk2["reference_rr"] == "—"
-    assert "UNAVAILABLE" in risk2["reference_rr_basis"]
+
+
+def test_trigger_exists_but_only_scan_price_geometry_reconciles():
+    """Adversarial case A: a trigger exists, but the source R:R only matches
+    scan-price geometry, not trigger geometry — trigger existence alone must
+    never produce a fake executable-entry R:R."""
+    result = _wmt_shaped_result()
+    mutated = copy.deepcopy(result)
+    sig = mutated["tiering_result"]["final_signal"]
+    # A trigger far from scan_price so trigger-basis geometry cannot
+    # reconcile to the same source R:R that the scan-price basis matches.
+    sig["trigger_level"] = 95.00
+    audit = moa.build_operator_audit(mutated)
+    risk = audit["risk_runway"]
+    assert risk["executable_trigger"] != "UNAVAILABLE"  # trigger DOES exist
+    assert risk["executable_entry_rr"] == "UNAVAILABLE"
+    assert risk["executable_entry_rr_basis"] == "NOT RECONCILED"
+    # The independent scan-price basis is unaffected by the trigger's presence.
+    assert risk["reference_rr"] != "—"
+
+
+def test_trigger_geometry_reconciles_to_source_rr():
+    """Adversarial case B: trigger geometry genuinely matches source R:R ->
+    executable-entry R:R IS reconciled."""
+    result = _wmt_shaped_result()
+    mutated = copy.deepcopy(result)
+    sig = mutated["tiering_result"]["final_signal"]
+    # trigger=105.92 (== scan_price), invalidation=103.40, T1=114.29 ->
+    # same geometry the scan-price basis already proved reconciles to 3.32.
+    sig["trigger_level"] = 105.92
+    audit = moa.build_operator_audit(mutated)
+    risk = audit["risk_runway"]
+    assert risk["executable_entry_rr"] != "UNAVAILABLE"
+    assert "DERIVED_DISPLAY" in risk["executable_entry_rr_basis"]
+
+
+def test_invalid_trigger_invalidation_geometry_yields_unavailable_executable_rr():
+    """Adversarial case C/D: trigger exists but invalidation >= trigger (or
+    target <= trigger) -> executable R:R stays UNAVAILABLE, never fake."""
+    result = _wmt_shaped_result()
+    mutated = copy.deepcopy(result)
+    sig = mutated["tiering_result"]["final_signal"]
+    sig["trigger_level"] = 100.0
+    sig["invalidation_level"] = 105.0   # invalidation ABOVE trigger — invalid for a bullish mandate
+    audit = moa.build_operator_audit(mutated)
+    risk = audit["risk_runway"]
+    assert risk["executable_entry_rr"] == "UNAVAILABLE"
+
+    mutated2 = copy.deepcopy(result)
+    sig2 = mutated2["tiering_result"]["final_signal"]
+    sig2["trigger_level"] = 120.0
+    sig2["targets"][0]["level"] = 110.0  # target BELOW trigger — invalid reward
+    audit2 = moa.build_operator_audit(mutated2)
+    risk2 = audit2["risk_runway"]
+    assert risk2["executable_entry_rr"] == "UNAVAILABLE"
+
+
+def test_rr_reconcile_helper_rejects_nan_inf_and_malformed_inputs():
+    assert moa._reconcile_rr(float("nan"), 100, 110, 3.0) is None
+    assert moa._reconcile_rr(105, float("inf"), 110, 3.0) is None
+    assert moa._reconcile_rr(105, 100, 110, float("nan")) is None
+    assert moa._reconcile_rr("abc", 100, 110, 3.0) is None
+    assert moa._reconcile_rr(None, None, None, None) is None
 
 
 # ===========================================================================
@@ -437,6 +513,33 @@ def test_weekly_complete_evidence_can_show_proven_sponsorship():
     weekly = audit["timeframe_sovereignty"]["weekly"]
     assert weekly["campaign_evidence"] == "COMPLETE"
     assert weekly["positive_sponsorship"] == "PROVEN"
+
+
+def test_weekly_literal_unknown_values_never_count_as_complete_evidence():
+    """src/higher_timeframe_context.py's own real vocabulary (BIAS_STATES,
+    GRADES, etc.) includes the literal string "UNKNOWN" as a legitimate
+    degraded value. A bare truthiness check would wrongly treat it as
+    present/complete since it is a non-empty string — this must not happen."""
+    result = _snipe_it_result()
+    htf = result["tiering_result"]["higher_timeframe_context"]
+    htf["monthly_bias_state"] = "UNKNOWN"
+    htf["weekly_campaign_state"] = "UNKNOWN"
+    htf["campaign_location_label"] = "UNKNOWN"
+    htf["context_grade"] = "UNKNOWN"
+    audit = moa.build_operator_audit(result)
+    weekly = audit["timeframe_sovereignty"]["weekly"]
+    assert weekly["campaign_evidence"] == "INCOMPLETE"
+    assert weekly["positive_sponsorship"] == "NOT PROVEN"
+
+
+def test_weekly_degraded_data_status_never_proven_sponsorship():
+    result = _snipe_it_result()
+    htf = result["tiering_result"]["higher_timeframe_context"]
+    htf["data_status"] = "DEGRADED_INSUFFICIENT_HISTORY"
+    audit = moa.build_operator_audit(result)
+    weekly = audit["timeframe_sovereignty"]["weekly"]
+    assert weekly.get("campaign_evidence") == "INCOMPLETE"
+    assert weekly.get("positive_sponsorship") != "PROVEN"
 
 
 # ===========================================================================
@@ -535,6 +638,91 @@ def test_missing_vs_broken_still_distinct_after_reconciliation():
 
 
 # ===========================================================================
+# TEST — BROKEN local proof must outrank IMPROVING (Phase 14X.1 hardening)
+# ===========================================================================
+
+def test_retest_real_hold_failed_is_broken_never_improving():
+    result = _snipe_it_result()
+    result["tiering_result"]["one_hour_entry"]["pullback_retest_hold"] = {
+        "retest_truth": "RETEST_REAL", "hold_truth": "HOLD_FAILED",
+    }
+    audit = moa.build_operator_audit(result)
+    ar = audit["authority_reconciliation"]
+    assert ar["local_proof"] == "BROKEN"
+    exe = audit["execution_proof"]
+    assert exe["hold"]["state"] == "BROKEN"
+    assert exe["sequence"] == "FAILED"
+
+
+def test_retest_edge_only_hold_failed_is_broken():
+    result = _snipe_it_result()
+    result["tiering_result"]["one_hour_entry"]["pullback_retest_hold"] = {
+        "retest_truth": "RETEST_EDGE_ONLY", "hold_truth": "HOLD_FAILED",
+    }
+    audit = moa.build_operator_audit(result)
+    assert audit["authority_reconciliation"]["local_proof"] == "BROKEN"
+
+
+def test_retest_missed_hold_confirmed_is_never_called_complete():
+    result = _snipe_it_result()
+    result["tiering_result"]["one_hour_entry"]["pullback_retest_hold"] = {
+        "retest_truth": "RETEST_MISSED", "hold_truth": "HOLD_CONFIRMED",
+    }
+    audit = moa.build_operator_audit(result)
+    assert audit["authority_reconciliation"]["local_proof"] != "CONFIRMED"
+    assert audit["authority_reconciliation"]["local_proof"] != "BROKEN"
+
+
+def test_retest_real_hold_confirmed_never_broken():
+    result = _snipe_it_result()  # already RETEST_CORE_VALID/HOLD_CONFIRMED
+    audit = moa.build_operator_audit(result)
+    assert audit["authority_reconciliation"]["local_proof"] in ("CONFIRMED", "IMPROVING")
+
+
+# ===========================================================================
+# TEST — failed_breakdown_reclaim is a bullish CONFIRMED event, never BROKEN
+# ===========================================================================
+
+def test_failed_breakdown_reclaim_is_never_automatically_broken_or_failed():
+    result = _snipe_it_result()
+    result["tiering_result"]["final_signal"]["structure_event"] = "failed_breakdown_reclaim"
+    audit = moa.build_operator_audit(result)
+
+    assert audit["setup"]["stage"] != "FAILED"
+    doctrine = {row["step"]: row for row in audit["doctrine_sequence"]}
+    assert doctrine["Structure"]["state"] == "CONFIRMED"
+    assert doctrine["Structure"]["state"] != "BROKEN"
+
+    text = moa.render_operator_audit(result)
+    assert "Setup stage: FAILED" not in text
+    assert "Structure: BROKEN" not in text
+
+
+def test_failed_breakdown_reclaim_with_daily_4h_context_stays_bullish_capital_from_tier():
+    """failed_breakdown_reclaim + valid Daily/4H context: renderer keeps the
+    bullish-reclaim semantic; capital still comes only from final_tier."""
+    result = _snipe_it_result()
+    result["tiering_result"]["final_signal"]["structure_event"] = "failed_breakdown_reclaim"
+    audit = moa.build_operator_audit(result)
+    ar = audit["authority_reconciliation"]
+    assert ar["htf_thesis_authorization"] == "AUTHORIZED"   # Daily YES + structure now CONFIRMED
+    assert ar["capital"] == "FULL"                           # unchanged — owned by final_tier (SNIPE_IT)
+
+
+def test_choch_is_not_automatically_full_structure_confirmation():
+    result = _snipe_it_result()  # Daily permission already YES in this fixture
+    result["tiering_result"]["final_signal"]["structure_event"] = "CHOCH"
+    audit = moa.build_operator_audit(result)
+    doctrine = {row["step"]: row for row in audit["doctrine_sequence"]}
+    assert doctrine["Structure"]["state"] == "FORMING"
+    assert doctrine["Structure"]["state"] != "CONFIRMED"
+    ar = audit["authority_reconciliation"]
+    # CHOCH alone (FORMING, not CONFIRMED) must not authorize the HTF thesis
+    # even though Daily permission reads YES here.
+    assert ar["htf_thesis_authorization"] != "AUTHORIZED"
+
+
+# ===========================================================================
 # TEST 21 — Discord chunking safe with expanded labels
 # ===========================================================================
 
@@ -573,7 +761,8 @@ def test_json_mode_valid_and_carries_new_provenance_fields():
     payload = json.loads(moa.render_operator_audit_json(result))
     assert payload["verdict_capital"]["scan_executed"] == _RUNTIME_TIMESTAMP_ET
     assert payload["verdict_capital"]["model_timestamp"] == _MODEL_TIMESTAMP
-    assert payload["authority_reconciliation"]["swing_thesis"] == "NOT QUALIFIED"
+    assert payload["authority_reconciliation"]["htf_thesis_authorization"] == "NOT AUTHORIZED"
+    assert payload["authority_reconciliation"]["local_execution_sequence"] == "INCOMPLETE"
     assert payload["risk_runway"]["executable_entry_rr"] == "UNAVAILABLE"
     blob = json.dumps(payload)
     assert "ANTHROPIC" not in blob
@@ -631,7 +820,7 @@ def test_wmt_shaped_golden_is_one_coherent_case_file():
 
     assert "1H Retest:  CONFIRMED — RETEST_REAL" in text
     assert "1H Hold:    CONFIRMED — HOLD_CONFIRMED" in text
-    assert "SWING-SEQUENCE QUALIFICATION: NOT EARNED" in text
+    assert "HTF THESIS AUTHORIZATION: NOT AUTHORIZED" in text
     assert "4H Break:   FORMING — WICK_ONLY" in text
     assert "Permission:       NO  (PERMISSION_DENIED)" in text
     assert "Invalidation (DEFINED): $103.40" in text
@@ -641,7 +830,7 @@ def test_wmt_shaped_golden_is_one_coherent_case_file():
     assert "Reported overhead:         clear" in text
     assert "Structural overhead (deterministic): moderate" in text
     assert "NOT PROVEN" in text  # Weekly positive sponsorship
-    assert "Capital:          NONE" in text  # AUTHORITY RECONCILIATION
+    assert "Capital readiness:         NONE" in text  # AUTHORITY RECONCILIATION
 
     assert "$0.00" not in text
     # Fields with genuinely no source value render "—"/UNAVAILABLE, never a
