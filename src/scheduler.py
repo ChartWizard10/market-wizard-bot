@@ -940,4 +940,9 @@ async def run_analyze(
             "alert_sent": send_result.get("sent", False),
             "channel_id": send_result.get("channel_id"),
             "tiering_result": tiering_result,
+            # Phase 14X: additive, read-only exposure of the already-computed
+            # enriched indicator dict (raw SMA10/20/50/200 etc.) so the manual
+            # operator audit renderer can display real numbers instead of
+            # inventing them. No judgment/tiering behavior depends on this key.
+            "enriched": enriched,
         }
