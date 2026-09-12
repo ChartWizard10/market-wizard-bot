@@ -9,6 +9,7 @@ secondary provider.
 """
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -175,7 +176,7 @@ def register_commands(
         await ctx.send(
             "**Market Wizard Bot Commands**\n"
             "`!scan` — Full scan of ticker universe (respects market hours)\n"
-            "`!analyze TICKER [compact|json]` — Full manual operator audit "
+            "`!analyze TICKER [compact|json]` — Full manual operator audit + Structural Atlas "
             "(bypasses dedup cooldown; `compact` for the short summary, "
             "`json` for machine-readable evidence)\n"
             "`!status` — Bot status and last scan summary\n"
@@ -299,17 +300,21 @@ def register_commands(
                 return
 
             from src import manual_operator_audit
+            from src import structural_atlas
             from src.discord_alerts import chunk_message
 
             if mode == "compact":
                 await ctx.send(manual_operator_audit.render_operator_audit_compact(result))
             elif mode == "json":
-                text = "```json\n" + manual_operator_audit.render_operator_audit_json(result) + "\n```"
+                payload = json.loads(manual_operator_audit.render_operator_audit_json(result))
+                payload["structural_atlas"] = structural_atlas.build_structural_atlas(result)
+                text = "```json\n" + json.dumps(payload, indent=2, default=str) + "\n```"
                 for chunk in chunk_message(text):
                     await ctx.send(chunk)
             else:
                 audit_text = manual_operator_audit.render_operator_audit(result, config)
-                for chunk in chunk_message(audit_text):
+                atlas_text = structural_atlas.render_structural_atlas(result)
+                for chunk in chunk_message(audit_text + "\n" + atlas_text):
                     await ctx.send(chunk)
         except Exception as exc:
             log.error("!analyze error for %s: %s", ticker, exc)
