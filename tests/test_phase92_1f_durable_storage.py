@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 from pathlib import Path
@@ -183,11 +184,24 @@ def test_storage_module_is_not_on_critical_scan_path():
 
 def test_storage_verification_has_zero_strategy_authority_contract():
     source = Path("src/signal_outcome_storage.py").read_text(encoding="utf-8")
-    for forbidden in (
+    tree = ast.parse(source)
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    attrs = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+    constants = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    module_doc = ast.get_docstring(tree, clean=False)
+    if module_doc:
+        constants.discard(module_doc)
+    forbidden = {
         "final_tier", "capital_action", "raw_score", "candidate_cap",
         "cooldown", "dedup", "routing", "claude_client", "anthropic",
-    ):
-        assert forbidden not in source
+    }
+    assert not forbidden & names
+    assert not forbidden & attrs
+    assert not forbidden & constants
 
 
 def test_probe_fingerprint_is_deterministic_and_nonempty(tmp_path):
