@@ -44,3 +44,11 @@ Report Top 10 by C, with A/B/D alongside and top three trade dossiers. Do not ra
 - No alteration to existing production tiers, candidate caps, Discord routes, model prompts, scan timing or risk gates until separate authorized promotion.
 - Chronological tests prove rank stability, no lookahead and no significant degradation in scan budget.
 - Operational receipt includes test results, CI, merge SHA, Railway deployment status and live-vs-shadow parity.
+
+## Institutional sourcing, backtesting and forward-monitoring contract
+- Build a provider inventory with primary/secondary sources, licensing, update latency, symbol/contract mapping, field provenance, as-of timestamps, historical depth and failover behavior. Entitlement checks must precede any live-data assertion.
+- Version immutable point-in-time research snapshots, corporate actions, factor/sector membership and release-date-aware fundamentals. Record missing data, revisions, exclusions and sample coverage. Independent source cross-checks are required for decision-critical fields.
+- Research design: predeclare hypothesis, feature/label availability time, candidate universe, benchmark, regime buckets, costs and acceptance criteria before evaluating outcomes. Purged/embargoed chronological walk-forward where overlapping labels require it; avoid lookahead, survivorship, selection and multiple-testing biases.
+- Evaluate expectancy, payoff distribution, hit rate, drawdown, tail losses, turnover, implementation shortfall, liquidity/capacity, factor-adjusted return and stability by regime. Use transaction costs, spread/slippage, and for options bid/ask, IV/theta and exercise/assignment assumptions. Report sample size and uncertainty; never invent win probabilities.
+- Keep distinct BACKTEST / SHADOW / PAPER / LIVE evidence and persist research version, candidate rank, as-of signal, later outcome and attribution. Production intraday scans consume the latest validated research artifact; they do not rerun expensive full-history backtests on every scan.
+- Monitor data freshness, provider failures, rank drift, factor exposure, forward-vs-backtest divergence and regime changes. Trigger controlled recalibration and regression tests when thresholds are breached. Preserve all existing production risk gates, cadence and cost budgets until separate authorized promotion.
